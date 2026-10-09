@@ -66,7 +66,7 @@ export const validateRawImageLayout = (
   profile: RawImageProfile,
   imageBytes: number,
 ): Result<{ readonly endAddress: number }, string> => {
-  if (profile.processor_language_id.startsWith('x86:LE:16:'))
+  if (profile.processor_language_id.startsWith("x86:LE:16:"))
     return err(
       "segmented 16-bit x86 languages are not raw-image profiles; use the dos-com or dos-mz interpretation",
     );
