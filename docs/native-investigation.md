@@ -251,7 +251,33 @@ acting when it matches nothing, matches several elements without `index`, or
 the capture is truncated (uniqueness would be unknown). The helper then
 re-checks the element's role, subrole, identifier and title at the resolved
 path and fails if the UI changed in between. Each step records the addressed
-`path` and `stable_key`. No global event injection is used. Unsupported AX actions fail explicitly. The result preserves
+`path` and `stable_key`. No global event injection is used.
+
+Scenarios also accept:
+
+- `keys`: ordered chords (`key` plus optional `modifiers` and `hold_ms`) posted
+  only to the selected process (CGEvent `postToPid`) and delivered to its
+  focused element. Keys use US ANSI virtual key codes, so the produced
+  characters depend on the active keyboard layout. Use `key-entry` to set text
+  independent of layout.
+- `wait_for`: polls accessibility-only captures (no screenshots, not retained)
+  every `poll_ms` until a condition passes or `timeout_ms` expires, then keeps
+  one capture. A timeout fails the step and stops the scenario.
+- `expect`: evaluates a condition on the preceding capture and records `pass`,
+  `fail` or `unknown` without capturing or stopping the scenario.
+- `checkpoint`: a named capture, reported as the step's `label`.
+
+Conditions test an element selector's state (`exists`, `absent`, `enabled`,
+`disabled`, `focused`, `selected`), an element attribute (`title`, `value`,
+`description`) for exact equality, or the window title. Element states other
+than `exists` and `absent` need a single element (a unique match or `index`).
+A truncated capture makes a missing element `unknown`, and an attribute the
+element does not expose is `unknown`; neither is guessed as pass or fail.
+
+Pointer gestures are not offered. Mouse events posted to a process are not
+delivered to AppKit windows, in the background or foreground, and REA does not
+fall back to system-wide event injection, which would move the real cursor and
+could reach other windows. Unsupported AX actions fail explicitly. The result preserves
 ordered before/after captures and gaps; an action may have occurred before a
 post-action capture fails. Application state is left as-is; REA does not attempt
 to restore it.

@@ -6,9 +6,7 @@ import {
   nativeUiScenarioInputSchema,
   nativeUiHelperSnapshotSchema,
   nativeUiResultSchema,
-  resolveNativeUiSelector,
   withStableKeys,
-  type NativeUiSnapshot,
 } from "../domain/native/nativeUiObservation.js";
 import {
   AnalysisCancelledError,
@@ -19,6 +17,7 @@ import { ProviderAdapterError } from "../domain/providerAdapterError.js";
 import { type AnalysisError } from "../domain/analysisErrorBase.js";
 import { err, ok, type Result } from "../domain/result.js";
 import { createNativeUiHelperRuntime } from "./NativeUiHelperRuntime.js";
+import { runNativeUiStep, type NativeUiCapture } from "./NativeUiSteps.js";
 import {
   NATIVE_UI_OUTPUT_BUDGET_BYTES,
   NATIVE_UI_OUTPUT_WEIGHT,
@@ -98,9 +97,7 @@ const observeWithHelper = async (
   const invoke = options.invoke;
   let launchTime: number | undefined;
   let outputBytes = 0;
-  const take = async (
-    action?: unknown,
-  ): Promise<Result<NativeUiSnapshot, AnalysisError>> => {
+  const take: NativeUiCapture = async (action, captureOptions = {}) => {
     if (signal.aborted) return err(new AnalysisCancelledError(operation));
     try {
       const response = responseSchema.parse(
@@ -111,7 +108,7 @@ const observeWithHelper = async (
             executable: target.path,
             sha256: target.sha256,
             ...(launchTime === undefined ? {} : { launch_time: launchTime }),
-            screenshot: input.screenshot,
+            screenshot: captureOptions.screenshot ?? input.screenshot,
             accessibility: input.accessibility,
             max_nodes: input.max_nodes,
             ...(action === undefined ? {} : { action }),
@@ -142,6 +139,8 @@ const observeWithHelper = async (
           ),
         );
       launchTime = response.result.window.launch_time;
+      if (captureOptions.retained === false)
+        return ok(withStableKeys(response.result));
       outputBytes +=
         NATIVE_UI_OUTPUT_WEIGHT *
         Buffer.byteLength(JSON.stringify(response.result));
@@ -179,7 +178,9 @@ const observeWithHelper = async (
       results.push({
         index,
         kind: step.kind,
+        label: null,
         target: null,
+        assertion: null,
         before,
         after: null,
         outcome: "cancelled",
@@ -187,76 +188,10 @@ const observeWithHelper = async (
       });
       break;
     }
-    if (step.kind === "wait") {
-      try {
-        await new Promise<void>((resolve, reject) => {
-          const abort = () => {
-            clearTimeout(timer);
-            reject(new Error("cancelled"));
-          };
-          const timer = setTimeout(() => {
-            signal.removeEventListener("abort", abort);
-            resolve();
-          }, step.milliseconds);
-          signal.addEventListener("abort", abort, { once: true });
-          if (signal.aborted) abort();
-        });
-      } catch (cause: unknown) {
-        // Cancellation is recorded as a cancelled outcome.
-        void cause;
-        results.push({
-          index,
-          kind: step.kind,
-          target: null,
-          before,
-          after: null,
-          outcome: "cancelled",
-          reason: "Scenario cancelled during wait",
-        });
-        break;
-      }
-    }
-    const action =
-      step.kind === "wait" ? undefined : resolveAction(step, before);
-    if (action !== undefined && !action.ok) {
-      results.push({
-        index,
-        kind: step.kind,
-        target: null,
-        before,
-        after: null,
-        outcome: "failed",
-        reason: action.error,
-      });
-      break;
-    }
-    const target = action?.value.target ?? null;
-    const after = await take(action?.value.request);
-    if (!after.ok) {
-      results.push({
-        index,
-        kind: step.kind,
-        target,
-        before,
-        after: null,
-        outcome:
-          after.error._tag === "AnalysisCancelledError"
-            ? "cancelled"
-            : "failed",
-        reason: after.error.message,
-      });
-      break;
-    }
-    results.push({
-      index,
-      kind: step.kind,
-      target,
-      before,
-      after: after.value,
-      outcome: "completed",
-      reason: null,
-    });
-    before = after.value;
+    const outcome = await runNativeUiStep(step, before, take, signal);
+    results.push({ index, kind: step.kind, before, ...outcome.record });
+    if (outcome.stop) break;
+    before = outcome.next;
   }
   return ok(
     nativeUiResultSchema.parse({
@@ -267,59 +202,13 @@ const observeWithHelper = async (
       limitations: [
         "Only the explicitly selected already-running process/window is admitted. REA starts no target process and does not change permissions, foreground applications, or restore application data.",
         "Click uses AXPress; scroll uses AXIncrement/AXDecrement; key-entry sets the selected element's AXValue. Unsupported elements fail without global event fallback.",
-        "Each completed action is followed immediately by capture; delayed UI changes require explicit wait steps. A failed after-capture can follow a completed action, so failure does not prove absence of application effects.",
+        "keys posts synthetic key events to the selected process only (CGEvent postToPid); no global event tap is used and the system cursor is untouched. Chords go to the application's focused element and use US ANSI virtual key codes, so produced characters depend on the active keyboard layout. Pointer gestures are not offered: process-targeted mouse events are not delivered to AppKit windows.",
+        "expect evaluates its condition on the capture before it and never stops the scenario. wait_for polls accessibility-only captures (no screenshots, not retained) until the condition passes or its timeout expires, then records one retained capture; a timeout fails the step. Conditions on truncated captures are unknown rather than pass or fail.",
+        "Each completed action is followed immediately by capture; use wait_for or wait for delayed UI changes. A failed after-capture can follow a completed action, so failure does not prove absence of application effects.",
         "Scenarios can change app data, cause app network activity and persist changes. The caller explicitly chooses leave-as-is; automatic restoration is unsupported.",
         "Selectors resolve against the capture taken immediately before each action; the helper re-checks role, subrole, identifier and title at the resolved path and fails if the element changed. Selector steps fail closed on truncated captures, no match, or ambiguous matches without index. Stable keys derive from accessibility identity and parent keys; they are REA-derived, not application-assigned.",
         "Window matching uses exact PID and window ID for screenshots and unique accessibility geometry. Accessibility paths can change as the UI changes; stale or ambiguous paths fail. Screenshots are scaled to at most 2048 pixels; scenario output is budgeted at 64 MiB and execution is cancelled after 180 seconds.",
       ],
     }),
   );
-};
-
-type ElementStep = Exclude<
-  z.infer<typeof nativeUiScenarioInputSchema>["steps"][number],
-  { kind: "wait" }
->;
-
-/**
- * Turn one element step into the helper request. Selector steps resolve
- * against the preceding capture and pin the element identity the helper must
- * re-check; path steps keep their positional meaning.
- */
-const resolveAction = (
-  step: ElementStep,
-  before: NativeUiSnapshot,
-): Result<
-  {
-    readonly request: Readonly<Record<string, unknown>>;
-    readonly target: { path: number[]; stable_key: string | null };
-  },
-  string
-> => {
-  const { selector, path, ...action } = step;
-  if (selector !== undefined) {
-    const resolved = resolveNativeUiSelector(before, selector);
-    if (!resolved.ok) return resolved;
-    return ok({
-      request: {
-        ...action,
-        path: [...resolved.value.path],
-        expect: resolved.value.expect,
-      },
-      target: {
-        path: [...resolved.value.path],
-        stable_key: resolved.value.stable_key,
-      },
-    });
-  }
-  const steps = path ?? [];
-  const node = before.nodes.find(
-    (candidate) =>
-      candidate.path.length === steps.length &&
-      candidate.path.every((value, index) => value === steps[index]),
-  );
-  return ok({
-    request: { ...action, path: steps },
-    target: { path: steps, stable_key: node?.stable_key ?? null },
-  });
 };

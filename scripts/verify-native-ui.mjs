@@ -254,6 +254,107 @@ try {
       throw new Error("Real ambiguous selector was not refused before acting");
     scenarioStatus =
       "selected-AX-button-action-CLI-parity-selectors-and-attributes-observed";
+
+    // Process-targeted keys, conditions and checkpoints.
+    const scenarioSteps = await observeNativeUi(
+      target.value,
+      "capture_native_ui_scenario",
+      {
+        ...scope,
+        screenshot: false,
+        steps: [
+          {
+            kind: "keys",
+            keys: [
+              { key: "a" },
+              { key: "b" },
+              { key: "s", modifiers: ["command"] },
+            ],
+          },
+          { kind: "checkpoint", name: "after-keys" },
+          { kind: "click", selector: { identifier: "rea-later" } },
+          {
+            kind: "wait_for",
+            condition: {
+              selector: { identifier: "rea-later" },
+              attribute: "title",
+              equals: "REA fixture finished later",
+            },
+            timeout_ms: 5000,
+            poll_ms: 100,
+          },
+          {
+            kind: "expect",
+            condition: {
+              selector: { identifier: "rea-disabled" },
+              state: "disabled",
+            },
+          },
+          {
+            kind: "expect",
+            condition: {
+              selector: { identifier: "rea-disabled" },
+              state: "enabled",
+            },
+          },
+        ],
+      },
+    );
+    if (!scenarioSteps.ok) throw scenarioSteps.error;
+    const steps = scenarioSteps.value.steps;
+    const keyLog = byIdentifier(steps[1]?.after, "rea-canvas")?.value ?? "";
+    const waited = steps[3];
+    if (
+      steps.some((step) => step.outcome !== "completed") ||
+      !keyLog.endsWith("key:a key:b key:cmd+s") ||
+      steps[1]?.label !== "after-keys" ||
+      waited?.assertion?.status !== "pass" ||
+      byIdentifier(waited?.after, "rea-later")?.title !==
+        "REA fixture finished later" ||
+      steps[4]?.assertion?.status !== "pass" ||
+      steps[5]?.assertion?.status !== "fail" ||
+      steps[5]?.after !== null
+    )
+      throw new Error(
+        `Keys and conditions scenario failed: ${JSON.stringify({
+          keyLog,
+          steps: steps.map(({ kind, outcome, reason, assertion, label }) => ({
+            kind,
+            outcome,
+            reason,
+            assertion,
+            label,
+          })),
+        })}`,
+      );
+    const timeout = await observeNativeUi(
+      target.value,
+      "capture_native_ui_scenario",
+      {
+        ...scope,
+        screenshot: false,
+        steps: [
+          {
+            kind: "wait_for",
+            condition: {
+              selector: { identifier: "rea-missing" },
+              state: "exists",
+            },
+            timeout_ms: 300,
+          },
+        ],
+      },
+    );
+    if (
+      !timeout.ok ||
+      timeout.value.steps[0]?.outcome !== "failed" ||
+      timeout.value.steps[0]?.assertion?.status !== "fail"
+    )
+      throw new Error(
+        "wait_for timeout did not fail the step with its verdict",
+      );
+    scenarioStatus =
+      "selectors-attributes-keys-conditions-and-checkpoints-observed";
   }
   const mismatch = await observeNativeUi(
     { ...target.value, sha256: "0".repeat(64) },

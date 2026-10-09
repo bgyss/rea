@@ -543,3 +543,156 @@ describe("native UI selector refusals", () => {
     expect(calls).toHaveLength(0);
   });
 });
+
+describe("native UI keys, conditions and checkpoints", () => {
+  const titled = (title: string) =>
+    tree([window, node([1], { identifier: "status", title })]);
+  /** Fake helper returning queued captures, then repeating the last one. */
+  const scripted = (...captures: unknown[]) => {
+    const calls: Readonly<Record<string, unknown>>[] = [];
+    const invoke = async (parameters: Readonly<Record<string, unknown>>) => {
+      calls.push(parameters);
+      const next = captures[Math.min(calls.length - 1, captures.length - 1)];
+      return { ok: true, result: next };
+    };
+    return { calls, invoke };
+  };
+  const run = (steps: unknown[], helper: ReturnType<typeof scripted>) =>
+    observeNativeUi(
+      target,
+      "capture_native_ui_scenario",
+      { ...scope, accessibility: true, steps },
+      { invoke: helper.invoke },
+    );
+
+  it("sends key chords with their modifiers and records a checkpoint label", async () => {
+    const helper = scripted(titled("idle"));
+    const result = await run(
+      [
+        { kind: "keys", keys: [{ key: "s", modifiers: ["command"] }] },
+        { kind: "checkpoint", name: "saved" },
+      ],
+      helper,
+    );
+    if (!result.ok) throw result.error;
+    expect(helper.calls[1]).toMatchObject({
+      action: {
+        kind: "keys",
+        keys: [{ key: "s", modifiers: ["command"], hold_ms: 0 }],
+      },
+    });
+    expect(helper.calls).toHaveLength(3);
+    expect(result.value.steps[1]).toMatchObject({
+      kind: "checkpoint",
+      label: "saved",
+      outcome: "completed",
+    });
+  });
+
+  it("evaluates expect on the preceding capture without capturing or stopping", async () => {
+    const helper = scripted(titled("idle"));
+    const result = await run(
+      [
+        {
+          kind: "expect",
+          condition: {
+            selector: { identifier: "status" },
+            attribute: "title",
+            equals: "done",
+          },
+        },
+        { kind: "checkpoint", name: "still-running" },
+      ],
+      helper,
+    );
+    if (!result.ok) throw result.error;
+    expect(result.value.steps[0]).toMatchObject({
+      outcome: "completed",
+      after: null,
+      assertion: { status: "fail", detail: 'title is "idle"' },
+    });
+    expect(result.value.steps[1]).toMatchObject({ outcome: "completed" });
+    expect(helper.calls).toHaveLength(2);
+  });
+
+  it("polls without screenshots until the condition passes, then keeps one capture", async () => {
+    const helper = scripted(
+      titled("idle"),
+      titled("busy"),
+      titled("done"),
+      titled("done"),
+    );
+    const result = await run(
+      [
+        {
+          kind: "wait_for",
+          condition: {
+            selector: { identifier: "status" },
+            attribute: "title",
+            equals: "done",
+          },
+          timeout_ms: 5_000,
+          poll_ms: 50,
+        },
+      ],
+      helper,
+    );
+    if (!result.ok) throw result.error;
+    expect(helper.calls.slice(1, 3).map((call) => call["screenshot"])).toEqual([
+      false,
+      false,
+    ]);
+    expect(helper.calls[3]?.["screenshot"]).toBe(scope.screenshot);
+    expect(result.value.steps[0]).toMatchObject({
+      outcome: "completed",
+      assertion: { status: "pass" },
+    });
+  });
+
+  it("fails a wait_for that times out and stops the scenario", async () => {
+    const helper = scripted(titled("idle"));
+    const result = await run(
+      [
+        {
+          kind: "wait_for",
+          condition: { window_title: "Never" },
+          timeout_ms: 120,
+          poll_ms: 50,
+        },
+        { kind: "checkpoint", name: "unreached" },
+      ],
+      helper,
+    );
+    if (!result.ok) throw result.error;
+    expect(result.value.steps).toHaveLength(1);
+    expect(result.value.steps[0]).toMatchObject({
+      outcome: "failed",
+      assertion: { status: "fail" },
+      reason: expect.stringContaining("Condition not met within 120 ms"),
+    });
+  });
+
+  it.each([
+    [
+      "an element condition without accessibility",
+      [
+        {
+          kind: "expect",
+          condition: { selector: { title: "OK" }, state: "exists" },
+        },
+      ],
+    ],
+    ["an unknown key", [{ kind: "keys", keys: [{ key: "hyper" }] }]],
+    ["an empty chord list", [{ kind: "keys", keys: [] }]],
+  ])("rejects %s before capturing", async (_name, steps) => {
+    const helper = scripted(titled("idle"));
+    const result = await observeNativeUi(
+      target,
+      "capture_native_ui_scenario",
+      { ...scope, accessibility: false, screenshot: true, steps },
+      { invoke: helper.invoke },
+    );
+    expect(result.ok).toBe(false);
+    expect(helper.calls).toHaveLength(0);
+  });
+});

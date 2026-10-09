@@ -117,6 +117,13 @@ Add `bounds`, `enabled`, `focused`, `selected`, `automation_id` (AXIdentifier), 
 
 The scenario union grows as specified. Pointer actions use CGEvent on macOS and `SendInput` on Windows. Every `expect` records pass, fail, or unknown with the nodes and crops it examined.
 
+**Status: keys, wait_for, expect and checkpoint implemented on `feat/native-ui-gestures`. Pointer is blocked on a policy decision.**
+
+- **Steps.** `keys` posts chords to the selected process only (CGEvent `postToPid`, US ANSI key codes) and reaches its focused element. `wait_for` polls accessibility-only captures (no screenshots, not budgeted) until a condition passes or times out, keeps one capture, and fails the step on timeout. `expect` records pass, fail or unknown on the preceding capture without capturing or stopping. `checkpoint` is a labelled capture.
+- **Conditions.** Element `exists`, `absent`, `enabled`, `disabled`, `focused` and `selected`; exact `title`, `value` or `description`; and window title. A truncated capture or an unexposed attribute yields `unknown`. The capture model moved to `src/domain/native/nativeUiCapture.ts`, conditions to `nativeUiConditions.ts`, and step execution to `src/native/NativeUiSteps.ts`.
+- **Verified.** `verify:native-ui` passes on macOS with real AX: chords `a`, `b`, `cmd+s` arrived in order at the focused view, a checkpoint label, `wait_for` on a delayed title change, passing and failing `expect` with the scenario continuing, and a `wait_for` timeout failing its step. There are 33 native UI unit tests plus 5 condition tests.
+- **Pointer finding (measured).** Mouse events posted to the process (`postToPid`, with or without window-under-pointer fields, private or HID source, background or foreground) never reached the fixture's custom view. The earlier text-field "success" was default focus, not delivery. Pointer gestures therefore need system-wide injection (`CGEvent.post(tap: .cghidEventTap)`): it moves the real cursor, activates the app, and could hit an overlapping window. A safe version would verify that the selected window is topmost at every point before posting, then restore the cursor. That changes REA's "no global event injection" property, so it needs an explicit decision. The prototype code (point targets, live element frames, out-of-window refusal, click, double-click, right-click and drag with modifiers) is ready to restore.
+
 ### B16. `rea-uia` Windows helper and `remote-windows-ui` provider (U7, U10)
 
 **[U][R]** · 1.5–2 weeks · new `native/rust/rea-uia`, new `src/windows-ui/`

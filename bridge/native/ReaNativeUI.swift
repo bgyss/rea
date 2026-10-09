@@ -16,7 +16,11 @@ struct Request: Decodable {
   var action: Action?
 }
 struct Expectation: Decodable { var role: String?; var subrole: String?; var identifier: String?; var title: String? }
-struct Action: Decodable { var kind: String; var path: [Int]?; var direction: String?; var text: String?; var expect: Expectation? }
+struct KeySpec: Decodable { var key: String; var modifiers: [String]?; var hold_ms: Int? }
+struct Action: Decodable {
+  var kind: String; var path: [Int]?; var direction: String?; var text: String?; var expect: Expectation?
+  var keys: [KeySpec]?
+}
 struct BoundaryFailure: Error { var code: String; var message: String }
 func fail(_ code: String, _ message: String) throws -> Never { throw BoundaryFailure(code: code, message: message) }
 func attribute(_ element: AXUIElement, _ key: String) -> CFTypeRef? {
@@ -51,6 +55,73 @@ func windowBounds(_ element: AXUIElement) -> CGRect? {
   var point = CGPoint.zero; var size = CGSize.zero
   guard AXValueGetValue(p as! AXValue, .cgPoint, &point), AXValueGetValue(s as! AXValue, .cgSize, &size) else { return nil }
   return CGRect(origin: point, size: size)
+}
+func element(at path: [Int], from root: AXUIElement, pid: Int32) throws -> AXUIElement {
+  var element = root
+  for index in path {
+    var selectedChild: CFArray?
+    let count = childCount(element)
+    guard let available = count.value else {
+      try fail("element-count-unavailable", "Cannot validate selected accessibility path because child count failed with AXError \(count.error ?? -1)")
+    }
+    guard index >= 0 && index < available,
+      AXUIElementCopyAttributeValues(element, kAXChildrenAttribute as CFString, index, 1, &selectedChild) == .success,
+      let item = (selectedChild as? [AXUIElement])?.first else { try fail("element-missing", "Selected accessibility path no longer exists") }
+    element = item
+  }
+  var owner: pid_t = 0
+  guard AXUIElementGetPid(element, &owner) == .success && owner == pid else { try fail("element-owner-mismatch", "Selected element belongs to another process") }
+  return element
+}
+func verify(_ element: AXUIElement, _ expected: Expectation?) throws {
+  guard let expected else { return }
+  let observed = Expectation(role: string(element, kAXRoleAttribute), subrole: string(element, kAXSubroleAttribute), identifier: string(element, kAXIdentifierAttribute), title: string(element, kAXTitleAttribute))
+  guard observed.role == expected.role && observed.subrole == expected.subrole && observed.identifier == expected.identifier && observed.title == expected.title else {
+    try fail("element-changed", "The element at the selected path changed since the preceding capture; expected role \(expected.role ?? "nil") identifier \(expected.identifier ?? "nil") title \(expected.title ?? "nil"), found role \(observed.role ?? "nil") identifier \(observed.identifier ?? "nil") title \(observed.title ?? "nil")")
+  }
+}
+
+func modifierFlags(_ names: [String]?) -> CGEventFlags {
+  var flags: CGEventFlags = []
+  for name in names ?? [] {
+    switch name {
+    case "command": flags.insert(.maskCommand)
+    case "shift": flags.insert(.maskShift)
+    case "option": flags.insert(.maskAlternate)
+    case "control": flags.insert(.maskControl)
+    default: break
+    }
+  }
+  return flags
+}
+
+/// US ANSI virtual key codes; produced characters depend on the active keyboard layout.
+let virtualKeys: [String: CGKeyCode] = [
+  "a": 0x00, "s": 0x01, "d": 0x02, "f": 0x03, "h": 0x04, "g": 0x05, "z": 0x06, "x": 0x07, "c": 0x08, "v": 0x09,
+  "b": 0x0B, "q": 0x0C, "w": 0x0D, "e": 0x0E, "r": 0x0F, "y": 0x10, "t": 0x11, "1": 0x12, "2": 0x13, "3": 0x14,
+  "4": 0x15, "6": 0x16, "5": 0x17, "equal": 0x18, "9": 0x19, "7": 0x1A, "minus": 0x1B, "8": 0x1C, "0": 0x1D,
+  "o": 0x1F, "u": 0x20, "i": 0x22, "p": 0x23, "return": 0x24, "l": 0x25, "j": 0x26, "k": 0x28, "comma": 0x2B,
+  "slash": 0x2C, "n": 0x2D, "m": 0x2E, "period": 0x2F, "tab": 0x30, "space": 0x31, "delete": 0x33, "escape": 0x35,
+  "f5": 0x60, "f6": 0x61, "f7": 0x62, "f3": 0x63, "f8": 0x64, "f9": 0x65, "f11": 0x67, "f10": 0x6D, "f12": 0x6F,
+  "home": 0x73, "page_up": 0x74, "forward_delete": 0x75, "f4": 0x76, "end": 0x77, "f2": 0x78, "page_down": 0x79,
+  "f1": 0x7A, "left": 0x7B, "right": 0x7C, "down": 0x7D, "up": 0x7E,
+]
+
+/// Post key chords to the selected process's focused element.
+func keys(_ chords: [KeySpec], pid: Int32) throws {
+  let source = CGEventSource(stateID: .privateState)
+  for chord in chords {
+    guard let code = virtualKeys[chord.key] else { try fail("unsupported-key", "Unsupported key \(chord.key)") }
+    let flags = modifierFlags(chord.modifiers)
+    for down in [true, false] {
+      guard let event = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: down) else {
+        try fail("event-unavailable", "Cannot create a key event for \(chord.key)")
+      }
+      event.flags = flags
+      event.postToPid(pid)
+      usleep(down ? useconds_t(max(0, chord.hold_ms ?? 0) * 1000 + 20_000) : 20_000)
+    }
+  }
 }
 func observe(_ request: Request) async throws -> [String: Any] {
   guard let app = NSRunningApplication(processIdentifier: request.pid), let url = app.executableURL else {
@@ -96,34 +167,20 @@ func observe(_ request: Request) async throws -> [String: Any] {
     selected = matches[0]
   }
   if let action = request.action, let root = selected {
-    var element = root
-    for index in action.path ?? [] {
-      var selectedChild: CFArray?
-      let count = childCount(element)
-      guard let available = count.value else {
-        try fail("element-count-unavailable", "Cannot validate selected accessibility path because child count failed with AXError \(count.error ?? -1)")
-      }
-      guard index >= 0 && index < available,
-        AXUIElementCopyAttributeValues(element, kAXChildrenAttribute as CFString, index, 1, &selectedChild) == .success,
-        let item = (selectedChild as? [AXUIElement])?.first else { try fail("element-missing", "Selected accessibility path no longer exists") }
-      element = item
-    }
-    var owner: pid_t = 0
-    guard AXUIElementGetPid(element, &owner) == .success && owner == request.pid else { try fail("element-owner-mismatch", "Selected element belongs to another process") }
-    if let expected = action.expect {
-      let observed = Expectation(role: string(element, kAXRoleAttribute), subrole: string(element, kAXSubroleAttribute), identifier: string(element, kAXIdentifierAttribute), title: string(element, kAXTitleAttribute))
-      guard observed.role == expected.role && observed.subrole == expected.subrole && observed.identifier == expected.identifier && observed.title == expected.title else {
-        try fail("element-changed", "The element at the selected path changed since the preceding capture; expected role \(expected.role ?? "nil") identifier \(expected.identifier ?? "nil") title \(expected.title ?? "nil"), found role \(observed.role ?? "nil") identifier \(observed.identifier ?? "nil") title \(observed.title ?? "nil")")
-      }
-    }
-    let outcome: AXError
     switch action.kind {
-    case "click": outcome = AXUIElementPerformAction(element, kAXPressAction as CFString)
-    case "scroll": outcome = AXUIElementPerformAction(element, (action.direction == "increment" ? kAXIncrementAction : kAXDecrementAction) as CFString)
-    case "key-entry": outcome = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, (action.text ?? "") as CFString)
-    default: try fail("unsupported-action", "Only selected-element press, increment/decrement and text-value entry are admitted")
+    case "keys": try keys(action.keys ?? [], pid: request.pid)
+    default:
+      let element = try element(at: action.path ?? [], from: root, pid: request.pid)
+      try verify(element, action.expect)
+      let outcome: AXError
+      switch action.kind {
+      case "click": outcome = AXUIElementPerformAction(element, kAXPressAction as CFString)
+      case "scroll": outcome = AXUIElementPerformAction(element, (action.direction == "increment" ? kAXIncrementAction : kAXDecrementAction) as CFString)
+      case "key-entry": outcome = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, (action.text ?? "") as CFString)
+      default: try fail("unsupported-action", "Only press, increment/decrement, text-value entry and keys actions are admitted")
+      }
+      guard outcome == .success else { try fail("action-failed", "Accessibility action failed with AXError \(outcome.rawValue)") }
     }
-    guard outcome == .success else { try fail("action-failed", "Accessibility action failed with AXError \(outcome.rawValue)") }
   }
   var nodes: [[String: Any]] = []; var truncated = false; var gaps: [String] = []
   if request.accessibility, let root = selected {
