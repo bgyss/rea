@@ -82,7 +82,7 @@ export const NATIVE_TOOL_CONTRACTS = [
   ),
   native(
     "capture_native_ui_scenario",
-    "Run selected-element press, increment/decrement scroll, AXValue text entry and bounded wait steps in one exact native app window. Returns ordered before/after captures and action/capture failures. Actions can change app data, network activity and persistent state; application state is left as-is and restoration is not attempted.",
+    "Run selected-element press, increment/decrement scroll, AXValue text entry and bounded wait steps in one exact native app window. Target each action by AX child-index path or by attribute selector (role, subrole, identifier, title, description, within, index); selectors resolve against the preceding capture, fail closed on ambiguity or truncation, and are re-checked before acting. Returns ordered before/after captures with stable node keys, each step's addressed element, and action/capture failures. Actions can change app data, network activity and persistent state; application state is left as-is and restoration is not attempted.",
     nativeUiScenarioInputSchema,
   ),
   native(

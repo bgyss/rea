@@ -4,8 +4,11 @@ import type { BinaryTarget } from "../domain/binaryTarget.js";
 import {
   nativeUiObservationInputSchema,
   nativeUiScenarioInputSchema,
-  nativeUiSnapshotSchema,
+  nativeUiHelperSnapshotSchema,
   nativeUiResultSchema,
+  resolveNativeUiSelector,
+  withStableKeys,
+  type NativeUiSnapshot,
 } from "../domain/native/nativeUiObservation.js";
 import {
   AnalysisCancelledError,
@@ -25,7 +28,7 @@ const helper = fileURLToPath(
   new URL("../../bridge/native/ReaNativeUI.swift", import.meta.url),
 );
 const responseSchema = z.discriminatedUnion("ok", [
-  z.strictObject({ ok: z.literal(true), result: nativeUiSnapshotSchema }),
+  z.strictObject({ ok: z.literal(true), result: nativeUiHelperSnapshotSchema }),
   z.strictObject({
     ok: z.literal(false),
     code: z.string(),
@@ -97,7 +100,7 @@ const observeWithHelper = async (
   let outputBytes = 0;
   const take = async (
     action?: unknown,
-  ): Promise<Result<z.infer<typeof nativeUiSnapshotSchema>, AnalysisError>> => {
+  ): Promise<Result<NativeUiSnapshot, AnalysisError>> => {
     if (signal.aborted) return err(new AnalysisCancelledError(operation));
     try {
       const response = responseSchema.parse(
@@ -150,7 +153,7 @@ const observeWithHelper = async (
             "Scenario captures exceeded the 64 MiB output budget",
           ),
         );
-      return ok(response.result);
+      return ok(withStableKeys(response.result));
     } catch (cause) {
       return err(
         signal.aborted
@@ -176,6 +179,7 @@ const observeWithHelper = async (
       results.push({
         index,
         kind: step.kind,
+        target: null,
         before,
         after: null,
         outcome: "cancelled",
@@ -203,6 +207,7 @@ const observeWithHelper = async (
         results.push({
           index,
           kind: step.kind,
+          target: null,
           before,
           after: null,
           outcome: "cancelled",
@@ -211,11 +216,27 @@ const observeWithHelper = async (
         break;
       }
     }
-    const after = await take(step.kind === "wait" ? undefined : step);
+    const action =
+      step.kind === "wait" ? undefined : resolveAction(step, before);
+    if (action !== undefined && !action.ok) {
+      results.push({
+        index,
+        kind: step.kind,
+        target: null,
+        before,
+        after: null,
+        outcome: "failed",
+        reason: action.error,
+      });
+      break;
+    }
+    const target = action?.value.target ?? null;
+    const after = await take(action?.value.request);
     if (!after.ok) {
       results.push({
         index,
         kind: step.kind,
+        target,
         before,
         after: null,
         outcome:
@@ -229,6 +250,7 @@ const observeWithHelper = async (
     results.push({
       index,
       kind: step.kind,
+      target,
       before,
       after: after.value,
       outcome: "completed",
@@ -247,8 +269,57 @@ const observeWithHelper = async (
         "Click uses AXPress; scroll uses AXIncrement/AXDecrement; key-entry sets the selected element's AXValue. Unsupported elements fail without global event fallback.",
         "Each completed action is followed immediately by capture; delayed UI changes require explicit wait steps. A failed after-capture can follow a completed action, so failure does not prove absence of application effects.",
         "Scenarios can change app data, cause app network activity and persist changes. The caller explicitly chooses leave-as-is; automatic restoration is unsupported.",
+        "Selectors resolve against the capture taken immediately before each action; the helper re-checks role, subrole, identifier and title at the resolved path and fails if the element changed. Selector steps fail closed on truncated captures, no match, or ambiguous matches without index. Stable keys derive from accessibility identity and parent keys; they are REA-derived, not application-assigned.",
         "Window matching uses exact PID and window ID for screenshots and unique accessibility geometry. Accessibility paths can change as the UI changes; stale or ambiguous paths fail. Screenshots are scaled to at most 2048 pixels; scenario output is budgeted at 64 MiB and execution is cancelled after 180 seconds.",
       ],
     }),
   );
+};
+
+type ElementStep = Exclude<
+  z.infer<typeof nativeUiScenarioInputSchema>["steps"][number],
+  { kind: "wait" }
+>;
+
+/**
+ * Turn one element step into the helper request. Selector steps resolve
+ * against the preceding capture and pin the element identity the helper must
+ * re-check; path steps keep their positional meaning.
+ */
+const resolveAction = (
+  step: ElementStep,
+  before: NativeUiSnapshot,
+): Result<
+  {
+    readonly request: Readonly<Record<string, unknown>>;
+    readonly target: { path: number[]; stable_key: string | null };
+  },
+  string
+> => {
+  const { selector, path, ...action } = step;
+  if (selector !== undefined) {
+    const resolved = resolveNativeUiSelector(before, selector);
+    if (!resolved.ok) return resolved;
+    return ok({
+      request: {
+        ...action,
+        path: [...resolved.value.path],
+        expect: resolved.value.expect,
+      },
+      target: {
+        path: [...resolved.value.path],
+        stable_key: resolved.value.stable_key,
+      },
+    });
+  }
+  const steps = path ?? [];
+  const node = before.nodes.find(
+    (candidate) =>
+      candidate.path.length === steps.length &&
+      candidate.path.every((value, index) => value === steps[index]),
+  );
+  return ok({
+    request: { ...action, path: steps },
+    target: { path: steps, stable_key: node?.stable_key ?? null },
+  });
 };

@@ -103,6 +103,14 @@ Run Ghidra FID or BSim against operator-supplied databases (pinned by digest). M
 
 Add `bounds`, `enabled`, `focused`, `selected`, `automation_id` (AXIdentifier), `subrole`, and `stable_key` to nodes. Add selector-based targets alongside `path`.
 
+**Status: implemented on `feat/native-ui-selectors`.**
+
+- **Nodes.** Each node reports `subrole`, `identifier`, `description`, `enabled`, `focused`, `selected`, and `bounds` (window-relative points); unsupported attributes are `null`.
+- **Stable keys.** `stable_key` (`uik_` plus 32 hex characters) is derived from the identifier, or role, subrole, title and description, chained through the parent key. Sibling order only breaks ties, and `value` is excluded, so keys survive sibling insertion and value or title changes on identified elements.
+- **Selectors.** Element steps take exactly one of `path` or `selector` (`role`, `subrole`, `identifier`, `title`, `description`, `within`, `index`). A selector resolves against the preceding capture and fails without acting on no match, on ambiguity without `index`, or on a truncated capture. The helper re-checks role, subrole, identifier and title at the resolved path (`element-changed`). Each step records the addressed `target: {path, stable_key}`.
+- **Verified.** `npm run verify:native-ui` (macOS, real AX and Screen Recording) passes against the extended source-owned fixture: identified, disabled and field elements, a selector-driven key entry and click, an unchanged stable key across a title change, and an ambiguous selector refused before acting. There are 26 unit tests.
+- **Not yet.** Selector matching is exact-string only (no regex), and `within` takes one ancestor selector. Path-addressed steps don't re-check identity, so they keep their positional meaning.
+
 ### B15. Pointer, keys, wait_for, expect, checkpoint actions (U3–U5)
 
 **[U][R][D]** · 1 week

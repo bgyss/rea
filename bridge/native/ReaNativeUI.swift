@@ -15,7 +15,8 @@ struct Request: Decodable {
   var max_nodes: Int
   var action: Action?
 }
-struct Action: Decodable { var kind: String; var path: [Int]?; var direction: String?; var text: String? }
+struct Expectation: Decodable { var role: String?; var subrole: String?; var identifier: String?; var title: String? }
+struct Action: Decodable { var kind: String; var path: [Int]?; var direction: String?; var text: String?; var expect: Expectation? }
 struct BoundaryFailure: Error { var code: String; var message: String }
 func fail(_ code: String, _ message: String) throws -> Never { throw BoundaryFailure(code: code, message: message) }
 func attribute(_ element: AXUIElement, _ key: String) -> CFTypeRef? {
@@ -34,7 +35,16 @@ func children(_ element: AXUIElement, count: Int) -> ChildBatch<AXUIElement> {
     return value as? [AXUIElement]
   }
 }
-func text(_ element: AXUIElement, _ key: String) -> Any { (attribute(element, key) as? String) ?? NSNull() as Any }
+func string(_ element: AXUIElement, _ key: String) -> String? { attribute(element, key) as? String }
+func text(_ element: AXUIElement, _ key: String) -> Any { string(element, key) ?? NSNull() as Any }
+func flag(_ element: AXUIElement, _ key: String) -> Any {
+  guard let value = attribute(element, key), CFGetTypeID(value) == CFBooleanGetTypeID() else { return NSNull() }
+  return CFBooleanGetValue((value as! CFBoolean))
+}
+func relativeFrame(_ element: AXUIElement, in window: CGRect) -> Any {
+  guard let frame = windowBounds(element) else { return NSNull() }
+  return ["x": frame.origin.x - window.origin.x, "y": frame.origin.y - window.origin.y, "width": max(0, frame.width), "height": max(0, frame.height)]
+}
 func windowBounds(_ element: AXUIElement) -> CGRect? {
   guard let p = attribute(element, kAXPositionAttribute), let s = attribute(element, kAXSizeAttribute),
     CFGetTypeID(p) == AXValueGetTypeID(), CFGetTypeID(s) == AXValueGetTypeID() else { return nil }
@@ -100,6 +110,12 @@ func observe(_ request: Request) async throws -> [String: Any] {
     }
     var owner: pid_t = 0
     guard AXUIElementGetPid(element, &owner) == .success && owner == request.pid else { try fail("element-owner-mismatch", "Selected element belongs to another process") }
+    if let expected = action.expect {
+      let observed = Expectation(role: string(element, kAXRoleAttribute), subrole: string(element, kAXSubroleAttribute), identifier: string(element, kAXIdentifierAttribute), title: string(element, kAXTitleAttribute))
+      guard observed.role == expected.role && observed.subrole == expected.subrole && observed.identifier == expected.identifier && observed.title == expected.title else {
+        try fail("element-changed", "The element at the selected path changed since the preceding capture; expected role \(expected.role ?? "nil") identifier \(expected.identifier ?? "nil") title \(expected.title ?? "nil"), found role \(observed.role ?? "nil") identifier \(observed.identifier ?? "nil") title \(observed.title ?? "nil")")
+      }
+    }
     let outcome: AXError
     switch action.kind {
     case "click": outcome = AXUIElementPerformAction(element, kAXPressAction as CFString)
@@ -117,7 +133,21 @@ func observe(_ request: Request) async throws -> [String: Any] {
       let childCountResult = childCount(element)
       var actions: CFArray?
       AXUIElementCopyActionNames(element, &actions)
-      nodes.append(["path": path, "role": text(element, kAXRoleAttribute), "title": text(element, kAXTitleAttribute), "value": text(element, kAXValueAttribute), "actions": actions as? [String] ?? [], "children_count": childCountResult.value.map { $0 as Any } ?? NSNull()])
+      nodes.append([
+        "path": path,
+        "role": text(element, kAXRoleAttribute),
+        "subrole": text(element, kAXSubroleAttribute),
+        "identifier": text(element, kAXIdentifierAttribute),
+        "title": text(element, kAXTitleAttribute),
+        "description": text(element, kAXDescriptionAttribute),
+        "value": text(element, kAXValueAttribute),
+        "enabled": flag(element, kAXEnabledAttribute),
+        "focused": flag(element, kAXFocusedAttribute),
+        "selected": flag(element, kAXSelectedAttribute),
+        "bounds": relativeFrame(element, in: bounds),
+        "actions": actions as? [String] ?? [],
+        "children_count": childCountResult.value.map { $0 as Any } ?? NSNull(),
+      ])
       guard let totalChildren = childCountResult.value else {
         truncated = true
         gaps.append("AX child count unavailable at path \(path): AXError \(childCountResult.error ?? -1)")

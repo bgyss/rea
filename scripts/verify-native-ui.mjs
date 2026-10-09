@@ -180,6 +180,80 @@ try {
         `Native UI CLI did not preserve the selected scenario: ${JSON.stringify(evidence.error ?? evidence.normalized_result?.steps?.map(({ outcome, reason }) => ({ outcome, reason })))}`,
       );
     scenarioStatus = "selected-AX-button-action-and-CLI-parity-observed";
+
+    // Attribute and selector coverage against fresh, unmodified fixture state.
+    const fresh = await observeNativeUi(target.value, "observe_native_ui", {
+      ...scope,
+      screenshot: false,
+    });
+    if (!fresh.ok) throw fresh.error;
+    const byIdentifier = (snapshot, identifier) =>
+      snapshot.nodes.find((node) => node.identifier === identifier);
+    const disabledNode = byIdentifier(fresh.value.initial, "rea-disabled");
+    const fieldNode = byIdentifier(fresh.value.initial, "rea-field");
+    const incrementNode = byIdentifier(fresh.value.initial, "rea-increment");
+    if (
+      disabledNode?.enabled !== false ||
+      incrementNode?.enabled !== true ||
+      fieldNode === undefined ||
+      incrementNode.bounds === null ||
+      incrementNode.bounds.width <= 0 ||
+      incrementNode.bounds.height <= 0 ||
+      !/^uik_[a-f0-9]{32}$/u.test(incrementNode.stable_key)
+    )
+      throw new Error(
+        `Native UI attributes were not reported: ${JSON.stringify({ disabledNode, incrementNode, fieldNode })}`,
+      );
+    const selected = await observeNativeUi(
+      target.value,
+      "capture_native_ui_scenario",
+      {
+        ...scope,
+        screenshot: false,
+        steps: [
+          {
+            kind: "key-entry",
+            selector: { identifier: "rea-field" },
+            text: "typed by selector",
+          },
+          { kind: "click", selector: { identifier: "rea-increment" } },
+          { kind: "wait", milliseconds: 200 },
+        ],
+      },
+    );
+    if (!selected.ok) throw selected.error;
+    const final = selected.value.steps.at(-1)?.after;
+    const clicked = selected.value.steps[1];
+    if (
+      selected.value.steps.some((step) => step.outcome !== "completed") ||
+      byIdentifier(final, "rea-field")?.value !== "typed by selector" ||
+      byIdentifier(final, "rea-increment")?.title !==
+        "REA fixture incremented" ||
+      clicked?.target?.stable_key !==
+        byIdentifier(selected.value.initial, "rea-increment")?.stable_key ||
+      byIdentifier(final, "rea-increment")?.stable_key !==
+        clicked.target.stable_key
+    )
+      throw new Error(
+        `Selector scenario failed: ${JSON.stringify(selected.value.steps.map(({ outcome, reason, target }) => ({ outcome, reason, target })))}`,
+      );
+    const ambiguous = await observeNativeUi(
+      target.value,
+      "capture_native_ui_scenario",
+      {
+        ...scope,
+        screenshot: false,
+        steps: [{ kind: "click", selector: { role: "AXButton" } }],
+      },
+    );
+    if (
+      !ambiguous.ok ||
+      ambiguous.value.steps[0]?.outcome !== "failed" ||
+      !ambiguous.value.steps[0]?.reason?.includes("Selector is ambiguous")
+    )
+      throw new Error("Real ambiguous selector was not refused before acting");
+    scenarioStatus =
+      "selected-AX-button-action-CLI-parity-selectors-and-attributes-observed";
   }
   const mismatch = await observeNativeUi(
     { ...target.value, sha256: "0".repeat(64) },

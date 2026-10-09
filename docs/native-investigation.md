@@ -232,9 +232,26 @@ capture or automatic permission prompts. Executable bytes and process launch
 time guard against a different target or PID reuse. AX selection requires one
 unique geometry match; ambiguity fails closed.
 
-`capture_native_ui_scenario` takes AX child-index paths for press, increment/
-decrement scrolling and text-value entry, or bounded waits. No global event
-injection is used. Unsupported AX actions fail explicitly. The result preserves
+Each captured node reports role, subrole, identifier (AXIdentifier), title,
+description, value, enabled, focused, selected, its frame relative to the
+window, available actions and child count. An attribute the element does not
+expose is `null`, never a guessed default. Each node also carries a REA-derived
+`stable_key`: a digest of its identifier (or role, subrole, title and
+description) chained through its parent's key, with sibling order used only to
+separate otherwise identical siblings. Keys survive sibling insertion and value
+or title changes on identified elements, so captures can be compared node by
+node.
+
+`capture_native_ui_scenario` targets each press, increment/decrement scroll or
+text-value entry with exactly one of an AX child-index `path` or a `selector`
+(`role`, `subrole`, `identifier`, `title`, `description`, an optional `within`
+ancestor selector and an optional `index`), or runs a bounded wait. A selector
+resolves against the capture taken just before the step and fails without
+acting when it matches nothing, matches several elements without `index`, or
+the capture is truncated (uniqueness would be unknown). The helper then
+re-checks the element's role, subrole, identifier and title at the resolved
+path and fails if the UI changed in between. Each step records the addressed
+`path` and `stable_key`. No global event injection is used. Unsupported AX actions fail explicitly. The result preserves
 ordered before/after captures and gaps; an action may have occurred before a
 post-action capture fails. Application state is left as-is; REA does not attempt
 to restore it.

@@ -12,7 +12,16 @@ let button = NSButton(frame: NSRect(x: 30, y: 60, width: 280, height: 40))
 button.title = "Increment REA fixture"
 button.target = controller
 button.action = #selector(FixtureController.increment(_:))
+button.setAccessibilityIdentifier("rea-increment")
 window.contentView?.addSubview(button)
+let disabled = NSButton(frame: NSRect(x: 30, y: 110, width: 200, height: 30))
+disabled.title = "Disabled REA fixture"
+disabled.isEnabled = false
+disabled.setAccessibilityIdentifier("rea-disabled")
+window.contentView?.addSubview(disabled)
+let field = NSTextField(frame: NSRect(x: 30, y: 20, width: 280, height: 24))
+field.setAccessibilityIdentifier("rea-field")
+window.contentView?.addSubview(field)
 window.orderFront(nil)
 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
   let record = "{\"pid\":\(ProcessInfo.processInfo.processIdentifier),\"window_id\":\(window.windowNumber)}\n"

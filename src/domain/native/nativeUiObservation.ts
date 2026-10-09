@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { z } from "zod";
 
+import { err, ok, type Result } from "../result.js";
 import { decodeCanonicalBase64 } from "../webScreenshot.js";
 
 const scope = {
@@ -21,41 +22,117 @@ const scope = {
 };
 /** Opt-in passive observation binds one already-running process and window. */
 export const nativeUiObservationInputSchema = z.strictObject(scope);
+const elementPathSchema = z.array(z.number().int().nonnegative()).max(32);
+
+const selectorFields = {
+  role: z.string().min(1).exactOptional(),
+  subrole: z.string().min(1).exactOptional(),
+  identifier: z
+    .string()
+    .min(1)
+    .exactOptional()
+    .describe("Exact accessibility identifier (AXIdentifier)"),
+  title: z.string().exactOptional(),
+  description: z.string().exactOptional(),
+};
+const selectorCriteria = [
+  "role",
+  "subrole",
+  "identifier",
+  "title",
+  "description",
+] as const;
+const hasCriterion = (selector: Partial<Record<string, unknown>>): boolean =>
+  selectorCriteria.some((field) => selector[field] !== undefined);
+const criterionMessage =
+  "A selector needs at least one of role, subrole, identifier, title or description";
+
+/**
+ * Attribute selector resolved against the capture taken just before the
+ * action. Every supplied field must match exactly; `within` requires a
+ * matching ancestor and `index` picks one match in document order.
+ */
+export const nativeUiSelectorSchema = z
+  .strictObject({
+    ...selectorFields,
+    within: z
+      .strictObject(selectorFields)
+      .refine(hasCriterion, criterionMessage)
+      .exactOptional()
+      .describe("Ancestor that must enclose the selected element"),
+    index: z
+      .number()
+      .int()
+      .nonnegative()
+      .exactOptional()
+      .describe(
+        "Zero-based choice among several matches in document order; without it several matches fail as ambiguous",
+      ),
+  })
+  .refine(hasCriterion, criterionMessage);
+export type NativeUiSelector = z.infer<typeof nativeUiSelectorSchema>;
+
+const elementTarget = {
+  path: elementPathSchema
+    .exactOptional()
+    .describe(
+      "Child-index path from the window; exactly one of path or selector",
+    ),
+  selector: nativeUiSelectorSchema
+    .exactOptional()
+    .describe("Attribute selector; exactly one of path or selector"),
+};
+
 /** Active scenarios use explicit actions and leave application state as-is. */
-export const nativeUiScenarioInputSchema = z.strictObject({
-  ...scope,
-  steps: z
-    .array(
-      z.discriminatedUnion("kind", [
-        z.strictObject({
-          kind: z.literal("click"),
-          path: z.array(z.number().int().nonnegative()).max(32),
-        }),
-        z.strictObject({
-          kind: z.literal("scroll"),
-          path: z.array(z.number().int().nonnegative()).max(32),
-          direction: z.enum(["increment", "decrement"]),
-        }),
-        z.strictObject({
-          kind: z.literal("key-entry"),
-          path: z.array(z.number().int().nonnegative()).max(32),
-          text: z.string(),
-        }),
-        z.strictObject({
-          kind: z.literal("wait"),
-          milliseconds: z
-            .number()
-            .int()
-            .min(0)
-            .max(180_000)
-            .describe(
-              "Wait duration in milliseconds, within the 180-second operation deadline.",
-            ),
-        }),
-      ]),
-    )
-    .min(1),
-});
+export const nativeUiScenarioInputSchema = z
+  .strictObject({
+    ...scope,
+    steps: z
+      .array(
+        z.discriminatedUnion("kind", [
+          z.strictObject({ kind: z.literal("click"), ...elementTarget }),
+          z.strictObject({
+            kind: z.literal("scroll"),
+            ...elementTarget,
+            direction: z.enum(["increment", "decrement"]),
+          }),
+          z.strictObject({
+            kind: z.literal("key-entry"),
+            ...elementTarget,
+            text: z.string(),
+          }),
+          z.strictObject({
+            kind: z.literal("wait"),
+            milliseconds: z
+              .number()
+              .int()
+              .min(0)
+              .max(180_000)
+              .describe(
+                "Wait duration in milliseconds, within the 180-second operation deadline.",
+              ),
+          }),
+        ]),
+      )
+      .min(1),
+  })
+  .superRefine((input, context) => {
+    for (const [index, step] of input.steps.entries()) {
+      if (step.kind === "wait") continue;
+      if ((step.path === undefined) === (step.selector === undefined))
+        context.addIssue({
+          code: "custom",
+          path: ["steps", index],
+          message: "Supply exactly one of path or selector",
+        });
+      else if (step.selector !== undefined && !input.accessibility)
+        context.addIssue({
+          code: "custom",
+          path: ["steps", index, "selector"],
+          message: "Selector targeting requires accessibility capture",
+        });
+    }
+  });
 /** Ordered captures and failures distinguish missing observation from a failed action. */
 const nativeUiScreenshotSchema = z
   .strictObject({
@@ -118,28 +195,177 @@ const nativeUiScreenshotSchema = z
 
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 
-export const nativeUiSnapshotSchema = z.strictObject({
-  window: z.strictObject({
-    pid: z.number().int().positive(),
-    window_id: z.number().int().positive(),
-    executable: z.string(),
-    launch_time: z.number(),
-    title: z.string(),
-  }),
-  nodes: z.array(
-    z.strictObject({
-      path: z.array(z.number().int().nonnegative()),
-      role: z.string().nullable(),
-      title: z.string().nullable(),
-      value: z.string().nullable(),
-      actions: z.array(z.string()),
-      children_count: z.number().int().nonnegative().nullable(),
-    }),
-  ),
+const nodeBoundsSchema = z
+  .strictObject({
+    x: z.number(),
+    y: z.number(),
+    width: z.number().nonnegative(),
+    height: z.number().nonnegative(),
+  })
+  .describe(
+    "Element frame in points, relative to the window's top-left corner",
+  );
+
+/** Accessibility attributes reported by the helper; unsupported attributes are null. */
+const helperNodeFields = {
+  path: z.array(z.number().int().nonnegative()),
+  role: z.string().nullable(),
+  subrole: z.string().nullable(),
+  identifier: z.string().nullable(),
+  title: z.string().nullable(),
+  description: z.string().nullable(),
+  value: z.string().nullable(),
+  enabled: z.boolean().nullable(),
+  focused: z.boolean().nullable(),
+  selected: z.boolean().nullable(),
+  bounds: nodeBoundsSchema.nullable(),
+  actions: z.array(z.string()),
+  children_count: z.number().int().nonnegative().nullable(),
+};
+const helperNodeSchema = z.strictObject(helperNodeFields);
+type HelperNode = z.infer<typeof helperNodeSchema>;
+
+const windowSchema = z.strictObject({
+  pid: z.number().int().positive(),
+  window_id: z.number().int().positive(),
+  executable: z.string(),
+  launch_time: z.number(),
+  title: z.string(),
+});
+const snapshotFields = {
+  window: windowSchema,
   truncated: z.boolean(),
   screenshot: nativeUiScreenshotSchema.nullable(),
   gaps: z.array(z.string()),
+};
+
+/** One capture exactly as the native helper reports it. */
+export const nativeUiHelperSnapshotSchema = z.strictObject({
+  ...snapshotFields,
+  nodes: z.array(helperNodeSchema),
 });
+
+/** One capture with REA-derived stable keys for cross-capture node matching. */
+export const nativeUiSnapshotSchema = z.strictObject({
+  ...snapshotFields,
+  nodes: z.array(
+    z.strictObject({
+      ...helperNodeFields,
+      stable_key: z
+        .string()
+        .regex(/^uik_[a-f0-9]{32}$/u)
+        .describe(
+          "Digest of the node's identity (identifier, or role/subrole/title/description) chained through its parent's key; sibling order only breaks ties between identical siblings",
+        ),
+    }),
+  ),
+});
+export type NativeUiSnapshot = z.infer<typeof nativeUiSnapshotSchema>;
+type NativeUiNode = NativeUiSnapshot["nodes"][number];
+
+const nodeIdentity = (node: HelperNode): readonly (string | null)[] =>
+  node.identifier === null
+    ? ["attributes", node.role, node.subrole, node.title, node.description]
+    : ["identifier", node.identifier];
+
+/**
+ * Derive keys that survive sibling insertion and value changes. Parents are
+ * always captured before their children, so each parent key is known first.
+ */
+export const withStableKeys = (
+  snapshot: z.infer<typeof nativeUiHelperSnapshotSchema>,
+): NativeUiSnapshot => {
+  const keys = new Map<string, string>();
+  const seen = new Map<string, number>();
+  const nodes = snapshot.nodes.map((node) => {
+    const parentKey = keys.get(JSON.stringify(node.path.slice(0, -1))) ?? "";
+    const identity = JSON.stringify([parentKey, nodeIdentity(node)]);
+    const ordinal = seen.get(identity) ?? 0;
+    seen.set(identity, ordinal + 1);
+    const stableKey = `uik_${createHash("sha256")
+      .update(JSON.stringify([identity, ordinal]))
+      .digest("hex")
+      .slice(0, 32)}`;
+    keys.set(JSON.stringify(node.path), stableKey);
+    return { ...node, stable_key: stableKey };
+  });
+  return { ...snapshot, nodes };
+};
+
+const matchesSelector = (
+  node: NativeUiNode,
+  selector: Partial<Record<(typeof selectorCriteria)[number], string>>,
+): boolean =>
+  selectorCriteria.every(
+    (field) => selector[field] === undefined || node[field] === selector[field],
+  );
+
+/** The element a selector resolved to, with the identity the helper must re-check. */
+export interface ResolvedNativeUiTarget {
+  readonly path: readonly number[];
+  readonly stable_key: string;
+  readonly expect: {
+    readonly role: string | null;
+    readonly subrole: string | null;
+    readonly identifier: string | null;
+    readonly title: string | null;
+  };
+}
+
+/**
+ * Resolve a selector against one capture. A truncated capture fails closed:
+ * unseen nodes could make a single match ambiguous or hold the only match.
+ */
+export const resolveNativeUiSelector = (
+  snapshot: NativeUiSnapshot,
+  selector: NativeUiSelector,
+): Result<ResolvedNativeUiTarget, string> => {
+  if (snapshot.truncated)
+    return err(
+      "The capture before this step is truncated, so selector uniqueness is unknown; raise max_nodes or target a path",
+    );
+  const encloses = (ancestor: NativeUiNode, node: NativeUiNode) =>
+    ancestor.path.length < node.path.length &&
+    ancestor.path.every((step, index) => node.path[index] === step);
+  const within = selector.within;
+  const matches = snapshot.nodes.filter(
+    (node) =>
+      matchesSelector(node, selector) &&
+      (within === undefined ||
+        snapshot.nodes.some(
+          (ancestor) =>
+            encloses(ancestor, node) && matchesSelector(ancestor, within),
+        )),
+  );
+  const choice =
+    selector.index === undefined
+      ? matches.length === 1
+        ? matches[0]
+        : undefined
+      : matches[selector.index];
+  if (choice === undefined)
+    return err(
+      matches.length === 0
+        ? "No captured element matches the selector"
+        : selector.index === undefined
+          ? `Selector is ambiguous: ${matches.length} elements match (${matches
+              .slice(0, 5)
+              .map((node) => `[${node.path.join(",")}]`)
+              .join(" ")}); add fields, within, or index`
+          : `Selector index ${selector.index} exceeds its ${matches.length} matches`,
+    );
+  return ok({
+    path: choice.path,
+    stable_key: choice.stable_key,
+    expect: {
+      role: choice.role,
+      subrole: choice.subrole,
+      identifier: choice.identifier,
+      title: choice.title,
+    },
+  });
+};
+
 export const nativeUiResultSchema = z.strictObject({
   target_sha256: z.string(),
   initial: nativeUiSnapshotSchema,
@@ -147,6 +373,15 @@ export const nativeUiResultSchema = z.strictObject({
     z.strictObject({
       index: z.number().int().nonnegative(),
       kind: z.string(),
+      target: z
+        .strictObject({
+          path: elementPathSchema,
+          stable_key: z.string().nullable(),
+        })
+        .nullable()
+        .describe(
+          "Element the action addressed; stable_key is null when a path named no captured node",
+        ),
       before: nativeUiSnapshotSchema,
       after: nativeUiSnapshotSchema.nullable(),
       outcome: z.enum(["completed", "failed", "cancelled"]),
