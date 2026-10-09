@@ -155,3 +155,36 @@ describe("IDA provider composition", () => {
     expect(producer.closes).toBe(1);
   });
 });
+
+describe("IDA raw-image admission", () => {
+  it("declines a caller-declared raw-image profile it cannot apply", () => {
+    const config = parseConfig({});
+    if (!config.ok) throw config.error;
+    const provider = new IdaProvider(config.value, () => {
+      throw new Error("support inspection must not connect");
+    });
+    expect(
+      provider.inspectTargetSupport({
+        path: "/tmp/prg.bin",
+        sha256: "a".repeat(64),
+        kind: "executable",
+        format: "raw-image",
+        rawImage: {
+          schema_version: "dcomp.ghidra-profile.v1",
+          profile_id: "nes",
+          platform: "nes",
+          processor_language_id: "6502:LE:16:default",
+          compiler_spec_id: "default",
+          loader: "BinaryLoader",
+          load_address: 0x8000,
+          entry_address: 0x8000,
+          analysis_timeout_seconds: 1,
+          max_instruction_facts: 1,
+        },
+      }),
+    ).toMatchObject({
+      status: "unsupported",
+      code: "target_format_unsupported",
+    });
+  });
+});

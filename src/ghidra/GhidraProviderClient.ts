@@ -117,12 +117,17 @@ export const createGhidraProviderClient = (input: {
     );
   let extensionFailure: AnalysisError | undefined;
   const targetLimitations =
-    target.format === "dos-mz"
+    target.format === "raw-image"
       ? [
-          "DOS MZ uses 16-bit x86 real mode with the Ghidra load segment 0x1000. Returned addresses are linear byte coordinates; they do not identify a unique segment:offset alias.",
-          "Static DOS analysis does not emulate BIOS, DOS interrupts, device ports, or self-modifying unpacking code. Packed targets require a separately identified unpacked artifact for original-program analysis; appended overlays are not the initialized load module.",
+          `Raw image interpreted with caller profile ${target.rawImage.profile_id}: ${target.rawImage.processor_language_id} (${target.rawImage.compiler_spec_id}) loaded at 0x${target.rawImage.load_address.toString(16)} with entry 0x${target.rawImage.entry_address.toString(16)}. The language, base and entry are declarations, not observations from the bytes.`,
+          "A raw image is one flat block in the language's default address space; bank switching, mirrors, overlays and memory-mapped I/O are not modelled.",
         ]
-      : [];
+      : target.format === "dos-mz"
+        ? [
+            "DOS MZ uses 16-bit x86 real mode with the Ghidra load segment 0x1000. Returned addresses are linear byte coordinates; they do not identify a unique segment:offset alias.",
+            "Static DOS analysis does not emulate BIOS, DOS interrupts, device ports, or self-modifying unpacking code. Packed targets require a separately identified unpacked artifact for original-program analysis; appended overlays are not the initialized load module.",
+          ]
+        : [];
   const providerLimitations =
     installation.platform === "win32"
       ? windowsP0Limitations
@@ -141,6 +146,16 @@ export const createGhidraProviderClient = (input: {
       ),
       ...(target.format === "dos-mz" ? { dosMz: true } : {}),
       ...(target.format === "dos-com" ? { dosCom: true } : {}),
+      ...(target.format === "raw-image"
+        ? {
+            rawImage: {
+              languageId: target.rawImage.processor_language_id,
+              compilerSpecId: target.rawImage.compiler_spec_id,
+              baseAddress: `0x${target.rawImage.load_address.toString(16)}`,
+              entryAddress: `0x${target.rawImage.entry_address.toString(16)}`,
+            },
+          }
+        : {}),
       platform: installation.platform,
       ...(extensions.length === 0 ? {} : { analysisExtensions: extensions }),
     }),
@@ -160,7 +175,12 @@ export const createGhidraProviderClient = (input: {
           expectedLanguageId: "x86:LE:16:Real Mode",
           expectedCompilerSpecId: "default",
         }
-      : {}),
+      : target.format === "raw-image"
+        ? {
+            expectedLanguageId: target.rawImage.processor_language_id,
+            expectedCompilerSpecId: target.rawImage.compiler_spec_id,
+          }
+        : {}),
     ...(context === undefined ? {} : { runId: context.runId }),
     logger: logger.child({ layer: "ghidra-bridge" }),
   });

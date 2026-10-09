@@ -26,6 +26,7 @@ import {
   parseDosMzHeader,
   type BoundLinearExecutable,
 } from "../domain/dosMz.js";
+import { validateRawImageLayout } from "../domain/rawImage.js";
 import {
   hasZipSignature,
   zipPackageFormatForPath,
@@ -62,6 +63,28 @@ export const parseBinaryTarget = async (
     try {
       if (!(await handle.stat()).isFile())
         return err(new BinaryTargetError(path, "target is not a regular file"));
+      if (typeof formatHint === "object") {
+        if (targetKind !== undefined && targetKind !== "executable")
+          return err(
+            new BinaryTargetError(
+              path,
+              "raw-image format requires an executable target kind",
+            ),
+          );
+        const layout = validateRawImageLayout(
+          formatHint.profile,
+          (await handle.stat()).size,
+        );
+        if (!layout.ok) return err(new BinaryTargetError(path, layout.error));
+        return ok({
+          path,
+          sourcePath: canonical,
+          sha256: await sha256Handle(handle),
+          kind: "executable",
+          format: "raw-image",
+          rawImage: formatHint.profile,
+        });
+      }
       if (formatHint === "dos-com") {
         if (targetKind !== undefined && targetKind !== "executable")
           return err(
@@ -157,7 +180,13 @@ const detectArtifactFormat = async (
 ): Promise<
   | Exclude<
       BinaryTarget["format"],
-      "analysis-database" | "mach-o" | "elf" | "pe" | "dos-mz" | "dos-com"
+      | "analysis-database"
+      | "mach-o"
+      | "elf"
+      | "pe"
+      | "dos-mz"
+      | "dos-com"
+      | "raw-image"
     >
   | undefined
 > => {
@@ -199,7 +228,13 @@ const namedArtifactFormat = (
 const isArchiveFormat = (
   format: Exclude<
     BinaryTarget["format"],
-    "analysis-database" | "mach-o" | "elf" | "pe" | "dos-mz" | "dos-com"
+    | "analysis-database"
+    | "mach-o"
+    | "elf"
+    | "pe"
+    | "dos-mz"
+    | "dos-com"
+    | "raw-image"
   >,
 ): format is Extract<BinaryTarget, { kind: "archive" }>["format"] =>
   ["zip", "ipa", "apk", "msix", "appx", "asar", "dmg", "pkg"].includes(format);

@@ -1,4 +1,5 @@
 import { executableFormatHintSchema } from "../domain/dosCom.js";
+import { rawImageProfileSchema } from "../domain/rawImage.js";
 import { isAbsoluteLocalPath } from "../domain/localPath.js";
 import { z } from "zod";
 import { analysisProviderSelectorSchema } from "./providerSelection.js";
@@ -33,7 +34,12 @@ export const openBinaryInputSchema = z.strictObject({
   format: executableFormatHintSchema
     .optional()
     .describe(
-      "Explicit headerless DOS COM interpretation; omission preserves header-based detection",
+      "Explicit interpretation for headerless bytes: dos-com, or raw-image with raw_image_profile; omission preserves header-based detection",
+    ),
+  raw_image_profile: rawImageProfileSchema
+    .optional()
+    .describe(
+      "Required with format=raw-image: dcomp.ghidra-profile.v1 declaring the Ghidra processor_language_id, compiler_spec_id, BinaryLoader load_address and entry_address",
     ),
   provider_id: analysisProviderSelectorSchema.optional(),
   snapshot_path: snapshotPathSchema.optional(),

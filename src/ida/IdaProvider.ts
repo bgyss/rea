@@ -96,6 +96,14 @@ export class IdaProvider implements AnalysisProviderCandidate {
       target_kind: target.kind,
       target_format: target.format,
     };
+    if (target.format === "raw-image")
+      return {
+        status: "unsupported",
+        code: "target_format_unsupported",
+        reason:
+          "The IDA adapter cannot apply a caller-declared raw-image processor profile; use the Ghidra provider.",
+        diagnostics,
+      };
     return target.kind === "executable"
       ? { status: "supported", code: null, reason: null, diagnostics }
       : {

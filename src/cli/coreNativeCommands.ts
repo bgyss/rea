@@ -6,7 +6,7 @@ import { logCliCommand } from "../cliLogging.js";
 import type { Logger } from "../logger.js";
 import {
   directAnalysisOptions,
-  formatSelectionOption,
+  formatSelectionOptions,
   providerSelectionOption,
 } from "./options.js";
 import type { CliInstance } from "./types.js";
@@ -22,7 +22,7 @@ export const registerCoreNativeCommands = (
       "Verify loaded native bytes, source mappings, relocations and entry",
     args: z.object({ path: z.string().describe("Local executable path") }),
     options: z.object({
-      "target-format": formatSelectionOption,
+      ...formatSelectionOptions,
       provider: providerSelectionOption,
     }),
     run: ({ args, options }) =>
@@ -31,12 +31,7 @@ export const registerCoreNativeCommands = (
           args.path,
           "inspect_native_load_image",
           {},
-          directAnalysisOptions(
-            logger,
-            undefined,
-            options.provider,
-            options["target-format"],
-          ),
+          directAnalysisOptions(logger, undefined, options.provider, options),
         ),
       ),
   });
@@ -53,7 +48,7 @@ export const registerCoreNativeCommands = (
         .min(1)
         .default(256)
         .describe("Requested byte count"),
-      "target-format": formatSelectionOption,
+      ...formatSelectionOptions,
       provider: providerSelectionOption,
     }),
     run: ({ args, options }) =>
@@ -62,12 +57,7 @@ export const registerCoreNativeCommands = (
           args.path,
           "read_bytes",
           { address: args.address, length: options.length },
-          directAnalysisOptions(
-            logger,
-            undefined,
-            options.provider,
-            options["target-format"],
-          ),
+          directAnalysisOptions(logger, undefined, options.provider, options),
         ),
       ),
   });
@@ -78,7 +68,7 @@ export const registerCoreNativeCommands = (
       address: z.string().describe("Exact provider memory address"),
     }),
     options: z.object({
-      "target-format": formatSelectionOption,
+      ...formatSelectionOptions,
       provider: providerSelectionOption,
     }),
     run: ({ args, options }) =>
@@ -87,12 +77,7 @@ export const registerCoreNativeCommands = (
           args.path,
           "address_to_file_offset",
           { address: args.address },
-          directAnalysisOptions(
-            logger,
-            undefined,
-            options.provider,
-            options["target-format"],
-          ),
+          directAnalysisOptions(logger, undefined, options.provider, options),
         ),
       ),
   });
@@ -153,7 +138,7 @@ export const registerCoreNativeCommands = (
         .max(5000)
         .default(1000)
         .describe("Maximum nodes on this page"),
-      "target-format": formatSelectionOption,
+      ...formatSelectionOptions,
       provider: providerSelectionOption,
     }),
     alias: {
@@ -178,12 +163,7 @@ export const registerCoreNativeCommands = (
             offset: options.offset,
             limit: options.limit,
           },
-          directAnalysisOptions(
-            logger,
-            undefined,
-            options.provider,
-            options["target-format"],
-          ),
+          directAnalysisOptions(logger, undefined, options.provider, options),
         ),
       ),
   });
@@ -195,7 +175,7 @@ export const registerCoreNativeCommands = (
     options: z.object({
       type: z.string().optional().describe("Exact database type category path"),
       address: z.string().describe("Exact native address").optional(),
-      "target-format": formatSelectionOption,
+      ...formatSelectionOptions,
       provider: providerSelectionOption,
     }),
     run: ({ args, options }) =>
@@ -209,12 +189,7 @@ export const registerCoreNativeCommands = (
               ? {}
               : { address: options.address }),
           },
-          directAnalysisOptions(
-            logger,
-            undefined,
-            options.provider,
-            options["target-format"],
-          ),
+          directAnalysisOptions(logger, undefined, options.provider, options),
         ),
       ),
   });
@@ -232,7 +207,7 @@ export const registerCoreNativeCommands = (
         address: z.string().describe("Exact native address"),
       }),
       options: z.object({
-        "target-format": formatSelectionOption,
+        ...formatSelectionOptions,
         provider: providerSelectionOption,
       }),
       run: ({ args, options }) =>
@@ -241,12 +216,7 @@ export const registerCoreNativeCommands = (
             args.path,
             operation,
             { address: args.address },
-            directAnalysisOptions(
-              logger,
-              undefined,
-              options.provider,
-              options["target-format"],
-            ),
+            directAnalysisOptions(logger, undefined, options.provider, options),
           ),
         ),
     });
@@ -278,7 +248,7 @@ const registerNativeDispatchMetadataCommand = (
         .min(1)
         .optional()
         .describe("Load or update the local analysis snapshot"),
-      "target-format": formatSelectionOption,
+      ...formatSelectionOptions,
       provider: providerSelectionOption,
     }),
     alias: { maxRecords: "max-records" },
@@ -292,7 +262,7 @@ const registerNativeDispatchMetadataCommand = (
             logger,
             options.snapshot,
             options.provider,
-            options["target-format"],
+            options,
           ),
         ),
       ),
@@ -337,7 +307,7 @@ const registerNativeUiActionCommand = (
         .max(5_000)
         .default(500)
         .describe("Maximum returned graph edges"),
-      "target-format": formatSelectionOption,
+      ...formatSelectionOptions,
       provider: providerSelectionOption,
     }),
     alias: {
@@ -356,12 +326,7 @@ const registerNativeUiActionCommand = (
             max_nodes: options.maxNodes,
             max_edges: options.maxEdges,
           },
-          directAnalysisOptions(
-            logger,
-            undefined,
-            options.provider,
-            options["target-format"],
-          ),
+          directAnalysisOptions(logger, undefined, options.provider, options),
         ),
       ),
   });
@@ -380,7 +345,7 @@ const registerNativeApiCommand = (cli: CliInstance, logger: Logger): void => {
         .min(1)
         .optional()
         .describe("Load and update a local analysis snapshot"),
-      "target-format": formatSelectionOption,
+      ...formatSelectionOptions,
       provider: providerSelectionOption,
     }),
     run: ({ args, options }) =>
@@ -393,7 +358,7 @@ const registerNativeApiCommand = (cli: CliInstance, logger: Logger): void => {
             logger,
             options.snapshot,
             options.provider,
-            options["target-format"],
+            options,
           ),
         ),
       ),
@@ -419,7 +384,7 @@ const registerAnnotationCommand = (cli: CliInstance, logger: Logger): void => {
         .string()
         .optional()
         .describe("Inline entry comment; empty text clears it"),
-      "target-format": formatSelectionOption,
+      ...formatSelectionOptions,
       provider: providerSelectionOption,
     }),
     run: ({ args, options }) =>
@@ -437,12 +402,7 @@ const registerAnnotationCommand = (cli: CliInstance, logger: Logger): void => {
               ? {}
               : { inline_comment: options["inline-comment"] }),
           },
-          directAnalysisOptions(
-            logger,
-            undefined,
-            options.provider,
-            options["target-format"],
-          ),
+          directAnalysisOptions(logger, undefined, options.provider, options),
         ),
       ),
   });

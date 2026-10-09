@@ -19,6 +19,7 @@ import {
 import { EvidenceIntegrityError } from "../domain/evidenceErrors.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import { type AnalysisError } from "../domain/analysisErrorBase.js";
+import { AnalysisInputError } from "../domain/analysisErrorCore.js";
 import { access } from "node:fs/promises";
 import {
   readAnalysisSnapshot,
@@ -86,21 +87,35 @@ export const runDirectAnalysis = async (
     readonly signal?: AbortSignal;
     readonly providerId?: AnalysisProviderSelector;
     readonly formatHint?: ExecutableFormatHint;
+    /** Inconsistent caller format selection, reported before any I/O. */
+    readonly formatHintError?: string;
   } = {},
 ): Promise<JsonValue> =>
-  withProcessCancellation(options.signal, (signal) =>
-    runAnalysis(dependencies, path, tool, arguments_, {
-      logger: options.logger ?? silentLogger,
-      snapshotPath: options.snapshotPath,
-      signal,
-      ...(options.formatHint === undefined
-        ? {}
-        : { formatHint: options.formatHint }),
-      ...(options.providerId === undefined
-        ? {}
-        : { providerId: options.providerId }),
-    }),
-  );
+  options.formatHintError !== undefined
+    ? Promise.resolve(
+        cliError(
+          new AnalysisInputError(tool, undefined, [
+            {
+              path: ["raw-image-profile"],
+              reason: "invalid_value",
+              message: options.formatHintError,
+            },
+          ]),
+        ),
+      )
+    : withProcessCancellation(options.signal, (signal) =>
+        runAnalysis(dependencies, path, tool, arguments_, {
+          logger: options.logger ?? silentLogger,
+          snapshotPath: options.snapshotPath,
+          signal,
+          ...(options.formatHint === undefined
+            ? {}
+            : { formatHint: options.formatHint }),
+          ...(options.providerId === undefined
+            ? {}
+            : { providerId: options.providerId }),
+        }),
+      );
 
 /** Execute one provider-native semantic operation with atomic provenance. */
 export const runProviderAnalysis = async (

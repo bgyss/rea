@@ -29,6 +29,7 @@ export const resolveGhidraAnalysisProfile = (
   const dosMz = target.format === "dos-mz";
   const dosCom = target.format === "dos-com";
   const dos = dosMz || dosCom;
+  const raw = target.format === "raw-image" ? target.rawImage : undefined;
   return Promise.resolve(
     ok({
       profile: createAnalysisProfile(provider, {
@@ -59,11 +60,23 @@ export const resolveGhidraAnalysisProfile = (
         decompiler_jump_loads: true,
         loader: dosMz
           ? "MzLoader"
-          : dosCom
+          : dosCom || raw !== undefined
             ? "BinaryLoader"
             : "auto-from-header",
-        language_id: dos ? "x86:LE:16:Real Mode" : "auto-from-header",
-        compiler_spec_id: dos ? "default" : "auto-default",
+        language_id: dos
+          ? "x86:LE:16:Real Mode"
+          : (raw?.processor_language_id ?? "auto-from-header"),
+        compiler_spec_id: dos
+          ? "default"
+          : (raw?.compiler_spec_id ?? "auto-default"),
+        ...(raw === undefined
+          ? {}
+          : {
+              raw_image_profile: { ...raw },
+              base_address: hexAddress(raw.load_address),
+              entry_address: hexAddress(raw.entry_address),
+              entry_seed: "external-entry-and-function-before-analysis-v1",
+            }),
         ...(dos
           ? {
               load_segment: "0x1000",
@@ -85,9 +98,14 @@ export const resolveGhidraAnalysisProfile = (
         analyzer_preset: "ghidra-default",
       }),
       compatibility: {
-        languageId: dos ? "x86:LE:16:Real Mode" : "auto",
-        compilerSpecId: dos ? "default" : "auto",
+        languageId: dos
+          ? "x86:LE:16:Real Mode"
+          : (raw?.processor_language_id ?? "auto"),
+        compilerSpecId: dos ? "default" : (raw?.compiler_spec_id ?? "auto"),
       },
     }),
   );
 };
+
+/** Lowercase 0x-prefixed linear address, as Ghidra's BinaryLoader accepts it. */
+const hexAddress = (address: number): string => `0x${address.toString(16)}`;

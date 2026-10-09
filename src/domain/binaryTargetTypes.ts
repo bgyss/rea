@@ -1,3 +1,5 @@
+import type { RawImageProfile } from "./rawImage.js";
+
 /** Provider-neutral CPU families detected from supported executable headers. */
 export type BinaryArchitecture = "x86" | "x86_64" | "arm" | "arm64";
 
@@ -16,11 +18,14 @@ type NonExecutableMetadata = {
   readonly managed?: never;
 };
 
-type ExecutableTarget = BinaryTargetIdentity & {
-  readonly kind: "executable";
-  readonly architecture: BinaryArchitecture;
-  readonly availableArchitectures: readonly BinaryArchitecture[];
-};
+type NonRawImageMetadata = { readonly rawImage?: never };
+
+type ExecutableTarget = BinaryTargetIdentity &
+  NonRawImageMetadata & {
+    readonly kind: "executable";
+    readonly architecture: BinaryArchitecture;
+    readonly availableArchitectures: readonly BinaryArchitecture[];
+  };
 
 /**
  * Canonical local target identity and provider-neutral file classification.
@@ -42,6 +47,16 @@ export type BinaryTarget =
       /** Whether the PE declares a non-empty CLI header data-directory entry. */
       readonly managed: boolean;
     })
+  | (BinaryTargetIdentity &
+      NonExecutableMetadata & {
+        readonly kind: "executable";
+        readonly format: "raw-image";
+        /**
+         * Caller-declared interpretation. The processor is the profile's Ghidra
+         * language ID; no provider-neutral CPU family is inferred from it.
+         */
+        readonly rawImage: RawImageProfile;
+      })
   | (BinaryTargetIdentity &
       NonExecutableMetadata & {
         readonly kind: "database";
