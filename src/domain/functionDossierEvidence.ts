@@ -1,5 +1,8 @@
 import { parseEvidence, type Evidence } from "./evidence.js";
-import { functionDossierSchema, type FunctionDossier } from "./hopperValues.js";
+import {
+  parseCompleteFunctionDossierEvidence,
+  type FunctionDossier,
+} from "./hopperValues.js";
 
 const DOSSIER_COLLECTION_FIELDS = [
   "assembly",
@@ -55,7 +58,11 @@ export const parseFunctionEvidence = (input: unknown): FunctionSnapshot => {
     );
   if (evidence.subject === null)
     throw new TypeError("Function comparison requires artifact-bound Evidence");
-  const dossier = functionDossierSchema.parse(evidence.normalized_result);
+  const dossier = parseCompleteFunctionDossierEvidence(
+    evidence.normalized_result,
+    "Function comparison",
+    "compare_functions",
+  );
   return {
     evidence: [evidence],
     procedure: dossier.procedure,

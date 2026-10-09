@@ -5,7 +5,10 @@ import type { JsonValue } from "./jsonValue.js";
 import { err, ok, type Result } from "./result.js";
 import { nativeApiBoundarySchema } from "./native/nativeApiBoundary.js";
 import { nativeValueFlowSchema } from "./native/nativeValueFlow.js";
-import { AnalysisOutputError } from "./analysisErrorCore.js";
+import {
+  AnalysisInputError,
+  AnalysisOutputError,
+} from "./analysisErrorCore.js";
 import { HopperProtocolError } from "./hopperErrors.js";
 
 export interface AddressedName {
@@ -360,6 +363,142 @@ export const functionDossierSchema = z
 
 /** Strict analyzed-function dossier shared by provider and comparison boundaries. */
 export type FunctionDossier = z.infer<typeof functionDossierSchema>;
+
+/** Dossier sections a caller may select; `procedure` and `limitations` are always returned. */
+export const FUNCTION_DOSSIER_FACETS = [
+  "pseudocode",
+  "assembly",
+  "comments",
+  "callers",
+  "callees",
+  "incoming_references",
+  "outgoing_references",
+  "unresolved_calls",
+  "referenced_strings",
+  "referenced_names",
+  "basic_blocks",
+  "native_api",
+  "native_value_flow",
+] as const satisfies readonly (keyof FunctionDossier)[];
+
+/** One selectable dossier section. */
+export const functionDossierFacetSchema = z.enum(FUNCTION_DOSSIER_FACETS);
+export type FunctionDossierFacet = z.infer<typeof functionDossierFacetSchema>;
+
+/** Omitted sections are absent, never defaulted: `null` would claim "none observed". */
+const dossierShape = functionDossierSchema.shape;
+const projectedFacetShape = {
+  pseudocode: dossierShape.pseudocode.exactOptional(),
+  assembly: dossierShape.assembly.exactOptional(),
+  comments: dossierShape.comments.exactOptional(),
+  callers: dossierShape.callers.exactOptional(),
+  callees: dossierShape.callees.exactOptional(),
+  incoming_references: dossierShape.incoming_references.exactOptional(),
+  outgoing_references: dossierShape.outgoing_references.exactOptional(),
+  unresolved_calls: dossierShape.unresolved_calls,
+  referenced_strings: dossierShape.referenced_strings.exactOptional(),
+  referenced_names: dossierShape.referenced_names.exactOptional(),
+  basic_blocks: dossierShape.basic_blocks.exactOptional(),
+  native_api: dossierShape.native_api.unwrap().exactOptional(),
+  native_value_flow: dossierShape.native_value_flow.unwrap().exactOptional(),
+} satisfies Record<FunctionDossierFacet, z.ZodType>;
+
+/**
+ * Caller-selected subset of one complete dossier. `selected` lists the
+ * requested sections, `omitted` the sections deliberately left out, and
+ * `unavailable` selected sections the provider did not produce.
+ */
+export const projectedFunctionDossierSchema = z
+  .object({
+    procedure: functionDossierSchema.shape.procedure,
+    ...projectedFacetShape,
+    limitations: z.array(z.string()),
+    facets: z.strictObject({
+      selected: z.array(functionDossierFacetSchema).min(1),
+      omitted: z.array(functionDossierFacetSchema),
+      unavailable: z.array(functionDossierFacetSchema),
+    }),
+  })
+  .strict();
+export type ProjectedFunctionDossier = z.infer<
+  typeof projectedFunctionDossierSchema
+>;
+
+/** Complete dossier, or a facet projection of one when the caller selected facets. */
+export const functionDossierResultSchema = z.union([
+  functionDossierSchema,
+  projectedFunctionDossierSchema,
+]);
+
+/** Order facets canonically so equal selections yield equal Evidence parameters. */
+export const canonicalFunctionDossierFacets = (
+  facets: readonly FunctionDossierFacet[],
+): FunctionDossierFacet[] =>
+  FUNCTION_DOSSIER_FACETS.filter((facet) => facets.includes(facet));
+
+/** Select dossier sections without altering any selected observation. */
+export const projectFunctionDossier = (
+  dossier: FunctionDossier,
+  facets: readonly FunctionDossierFacet[],
+): ProjectedFunctionDossier => {
+  const selected = canonicalFunctionDossierFacets(facets);
+  const sections: Record<string, unknown> = {};
+  const unavailable: FunctionDossierFacet[] = [];
+  for (const facet of selected) {
+    const value = dossier[facet];
+    if (value === undefined) unavailable.push(facet);
+    else sections[facet] = value;
+  }
+  return projectedFunctionDossierSchema.parse({
+    procedure: dossier.procedure,
+    ...sections,
+    limitations: dossier.limitations,
+    facets: {
+      selected,
+      omitted: FUNCTION_DOSSIER_FACETS.filter(
+        (facet) => !selected.includes(facet),
+      ),
+      unavailable,
+    },
+  });
+};
+
+/** Facets selected by a projected dossier, or undefined for a complete one. */
+export const projectedDossierFacets = (
+  normalizedResult: unknown,
+): readonly FunctionDossierFacet[] | undefined => {
+  const projected = projectedFunctionDossierSchema.safeParse(normalizedResult);
+  return projected.success ? projected.data.facets.selected : undefined;
+};
+
+/** Recovery guidance for a projected dossier offered where a complete one is required. */
+export const projectedDossierRejection = (
+  purpose: string,
+  facets: readonly FunctionDossierFacet[],
+): string =>
+  `${purpose} requires a complete function dossier; this analyze_function Evidence selected facets ` +
+  `${facets.join(", ")}. Re-run analyze_function without facets.`;
+
+/**
+ * Parse the complete dossier carried by analyze_function Evidence, rejecting a
+ * facet projection with a typed input error that carries recovery guidance.
+ */
+export const parseCompleteFunctionDossierEvidence = (
+  normalizedResult: unknown,
+  purpose: string,
+  operation: string,
+): FunctionDossier => {
+  const facets = projectedDossierFacets(normalizedResult);
+  if (facets !== undefined)
+    throw new AnalysisInputError(operation, undefined, [
+      {
+        path: [],
+        reason: "invalid_value",
+        message: projectedDossierRejection(purpose, facets),
+      },
+    ]);
+  return functionDossierSchema.parse(normalizedResult);
+};
 
 /** Strictly parse a complete provider-neutral function dossier. */
 export const parseFunctionDossier = (

@@ -4,7 +4,7 @@ import { basename } from "node:path";
 import canonicalize from "canonicalize";
 
 import { parseEvidence } from "../evidence.js";
-import { functionDossierSchema } from "../hopperValues.js";
+import { functionDossierResultSchema } from "../hopperValues.js";
 import { inspectMachoSchema } from "../native/nativeInspection.js";
 import type { ManagedNativeBoundaryInspection } from "./managedArtifact.js";
 import type { JsonValue } from "../jsonValue.js";
@@ -58,7 +58,9 @@ const symbolsForEvidence = (
     };
   }
   if (evidence.operation === "analyze_function") {
-    const dossier = functionDossierSchema.parse(evidence.normalized_result);
+    const dossier = functionDossierResultSchema.parse(
+      evidence.normalized_result,
+    );
     return {
       supported: true,
       symbols: [

@@ -144,6 +144,11 @@ Start with the default result and use its inline Evidence and graph context.
 Do not repeat an identical tool call. Make a focused follow-up only when the
 returned result leaves a specific question unanswered.
 
+When reading many functions for their code only, pass `analyze_function`
+`facets` such as `["pseudocode", "assembly"]`; the result names every omitted
+section. Request the complete dossier (no `facets`) for Evidence you will pass
+to `compare_functions` or structural verification.
+
 If MCP reports `resource_constraint` with `details.resource: "transport"`, use
 its reported same-session Evidence reference with a focused application tool,
 or call `export_evidence_bundle` to write the complete session to a selected

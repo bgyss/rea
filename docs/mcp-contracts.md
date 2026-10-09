@@ -180,6 +180,16 @@ directly to `compare_functions`, and `inspect_artifact` Evidence to
 `compare_artifacts`. Use `get_evidence_bundle` when the task needs broader
 retained session history or an explicit bundle for transfer.
 
+`analyze_function` returns the complete dossier by default. Pass `facets` (for
+example `["pseudocode", "assembly"]`, or `rea function --facets
+pseudocode,assembly`) to receive only those sections, plus `procedure`,
+`limitations`, and a `facets` record naming the selected, omitted, and
+unavailable sections. The provider still produces and validates the complete
+dossier; the projection omits `raw_result`, explains that in a limitation, and
+records the canonical selection in the Evidence parameters. Comparison and
+structural verification tools require complete dossiers and reject projected
+Evidence with recovery guidance.
+
 REA prepares complete MCP results within the pinned stdio client's 10 MiB
 receive-buffer budget, including both text and structured representations and
 room for the JSON-RPC envelope. If a result cannot fit, REA returns

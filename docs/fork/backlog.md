@@ -51,6 +51,14 @@ Generalize the DOS COM path into `format: "raw-image"` with a required `profile`
 
 A 63-instruction function returned 179 KB. Add a `facets` selector (`pseudocode`, `cfg`, `instructions`, `xrefs`, `strings`), defaulting to a compact dossier. Keep the full evidence available through `export_evidence_bundle`, so nothing is lost. Check that the token cost changes in representative agent tasks (`src/evaluation/`).
 
+**Status: implemented on `feat/compact-function-results`.** Measured causes: the 179 KB response is one 58.6 KB dossier carried three times (`result`, `evidence.raw_result`, `evidence.normalized_result`). Within it, `outgoing_references` is 29 KB because every edge repeats the full source procedure, and `native_value_flow` is 18 KB.
+
+- **Contract.** `analyze_function` keeps the complete dossier by default, as AGENTS.md requires. An opt-in `facets` array (MCP) or `--facets a,b` (CLI) returns only the selected sections plus `procedure`, `limitations`, and `facets: {selected, omitted, unavailable}`. Omitted sections are absent rather than null, because null would mean "none observed". The output schema is the union of the complete dossier and the projection.
+- **Evidence.** The provider contract is unchanged: it receives only `procedure`, and the complete dossier still validates before projection. Evidence records the canonical facet order, so equal selections share an ID. `raw_result` is omitted with an explicit limitation.
+- **Downstream.** `compare_functions` and structural reconstruction verification refuse projected Evidence with a typed `invalid_value` issue naming `left`/`right` and saying "Re-run analyze_function without facets". Previously that message was flattened into a generic error. Managed-native matching accepts projections, because it reads only `procedure`.
+- **Measured, real Ghidra 12.1.2, same arm64 function.** Complete: 179,222 bytes (unchanged). `pseudocode,assembly`: 12,461 bytes (−93%). Adding `callees` and `basic_blocks`: 17,242 bytes. `outgoing_references` alone: 66,039 bytes.
+- **Follow-ups.** De-duplicate `source_procedure` in reference edges; that's a schema change for all three providers. The global triplication (`result` plus both Evidence copies) is a separate contract question across every Evidence tool. The `src/evaluation/` token measurement hasn't been run yet.
+
 ## P1: decomp workflow
 
 ### B5. Persistent Ghidra projects and annotation ledger
