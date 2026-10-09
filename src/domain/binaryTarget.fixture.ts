@@ -61,6 +61,23 @@ export const pe = (
 };
 
 /** Build a DOS MZ image with a 32-byte header and a 16-bit entry point. */
+/**
+ * Overlay bytes holding an embedded MZ stub whose relative e_lfanew selects a
+ * 386 LE/LX header, as DOS-extender binders append a 32-bit program. The stub
+ * starts `leading` bytes into the overlay; its header lies 128 bytes later.
+ */
+export const boundLinearOverlay = (signature = "LE", leading = 32): Buffer => {
+  const overlay = Buffer.alloc(leading + 128 + 16);
+  overlay.write("MZ", leading, "ascii");
+  overlay.writeUInt16LE(4, leading + 8);
+  overlay.writeUInt32LE(128, leading + 60);
+  const header = leading + 128;
+  overlay.write(signature, header, "ascii");
+  overlay.writeUInt16LE(2, header + 8);
+  overlay.writeUInt16LE(1, header + 10);
+  return overlay;
+};
+
 export const dosMz = (moduleSize = 128): Buffer => {
   const size = 32 + moduleSize;
   const bytes = Buffer.alloc(size);

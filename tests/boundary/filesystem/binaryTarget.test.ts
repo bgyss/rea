@@ -18,6 +18,7 @@ import {
   type AppBundleFileSystem,
 } from "../../../src/application/AppBundleExecutable.js";
 import {
+  boundLinearOverlay,
   dosMz,
   pe,
   thinMach,
@@ -583,6 +584,31 @@ describe("DOS binary target I/O", () => {
     expect(await parseBinaryTarget(path)).toMatchObject({
       ok: false,
       error: { message: "Cannot open artifact: truncated DOS MZ load module" },
+    });
+  });
+
+  it("rejects a DOS extender stub whose overlay binds an LE program", async () => {
+    const directory = await createTestTempDirectory("rea-dos-bound-");
+    const path = join(directory, "bound.exe");
+    // A 4 KiB extender load module, unrelated overlay data, then the binder's
+    // embedded stub: the LE header lies beyond the 4 KiB metadata probe.
+    const extender = dosMz(4064);
+    await writeFile(
+      path,
+      Buffer.concat([extender, boundLinearOverlay("LE", 3000)]),
+    );
+    const result = await parseBinaryTarget(path);
+    if (result.ok) throw new Error("Expected a bound LE rejection");
+    expect(result.error.message).toBe(
+      "Cannot open artifact: unsupported LE executable bound after a DOS extender stub " +
+        "(embedded stub at file offset 0x1bb8, LE header at 0x1c38); " +
+        "the DOS load module is the extender, not the program",
+    );
+
+    await writeFile(path, Buffer.concat([extender, Buffer.alloc(3200, 0x4d)]));
+    expect(await parseBinaryTarget(path)).toMatchObject({
+      ok: true,
+      value: { format: "dos-mz" },
     });
   });
 });
