@@ -115,11 +115,14 @@ export class GhidraProvider implements AnalysisProviderCandidate {
       target_format: target.format,
       architecture: target.architecture ?? null,
       available_architectures:
-        target.kind === "executable"
+        target.kind === "executable" && target.format !== "raw-image"
           ? [...target.availableArchitectures]
           : null,
       executable_role: target.executableRole ?? null,
       managed: target.managed ?? null,
+      ...(target.format === "raw-image"
+        ? { processor_language_id: target.rawImage.processor_language_id }
+        : {}),
     };
     if (target.kind !== "executable")
       return {
@@ -128,8 +131,11 @@ export class GhidraProvider implements AnalysisProviderCandidate {
         reason: `Ghidra v1 imports executable targets, not ${target.kind} targets.`,
         diagnostics,
       };
+
     if (hostPlatform === "win32")
       return inspectWindowsP0TargetSupport(target, diagnostics);
+    if (target.format === "raw-image")
+      return { status: "supported", code: null, reason: null, diagnostics };
     if (target.format === "mach-o" && target.availableArchitectures.length > 1)
       return {
         status: "unsupported",

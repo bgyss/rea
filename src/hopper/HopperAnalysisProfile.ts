@@ -115,7 +115,7 @@ export const hopperLoaderArgsForTarget = (
   ProviderAdapterError | AnalysisCapabilityUnavailableError
 > => {
   if (target.kind === "database") return ok([]);
-  if (target.kind !== "executable")
+  if (target.kind !== "executable" || target.format === "raw-image")
     return err(new ProviderAdapterError("hopper", "resolve_analysis_profile"));
   const architecture = target.architecture;
   const flag = hopperArchitectureFlag(architecture);

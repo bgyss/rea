@@ -20,7 +20,13 @@ import {
   validateDosComLength,
   type ExecutableFormatHint,
 } from "../domain/dosCom.js";
-import { mzWindowsHeaderOffset } from "../domain/dosMz.js";
+import {
+  findBoundLinearExecutable,
+  mzWindowsHeaderOffset,
+  parseDosMzHeader,
+  type BoundLinearExecutable,
+} from "../domain/dosMz.js";
+import { validateRawImageLayout } from "../domain/rawImage.js";
 import {
   hasZipSignature,
   zipPackageFormatForPath,
@@ -57,6 +63,28 @@ export const parseBinaryTarget = async (
     try {
       if (!(await handle.stat()).isFile())
         return err(new BinaryTargetError(path, "target is not a regular file"));
+      if (typeof formatHint === "object") {
+        if (targetKind !== undefined && targetKind !== "executable")
+          return err(
+            new BinaryTargetError(
+              path,
+              "raw-image format requires an executable target kind",
+            ),
+          );
+        const layout = validateRawImageLayout(
+          formatHint.profile,
+          (await handle.stat()).size,
+        );
+        if (!layout.ok) return err(new BinaryTargetError(path, layout.error));
+        return ok({
+          path,
+          sourcePath: canonical,
+          sha256: await sha256Handle(handle),
+          kind: "executable",
+          format: "raw-image",
+          rawImage: formatHint.profile,
+        });
+      }
       if (formatHint === "dos-com") {
         if (targetKind !== undefined && targetKind !== "executable")
           return err(
@@ -152,7 +180,13 @@ const detectArtifactFormat = async (
 ): Promise<
   | Exclude<
       BinaryTarget["format"],
-      "analysis-database" | "mach-o" | "elf" | "pe" | "dos-mz" | "dos-com"
+      | "analysis-database"
+      | "mach-o"
+      | "elf"
+      | "pe"
+      | "dos-mz"
+      | "dos-com"
+      | "raw-image"
     >
   | undefined
 > => {
@@ -194,7 +228,13 @@ const namedArtifactFormat = (
 const isArchiveFormat = (
   format: Exclude<
     BinaryTarget["format"],
-    "analysis-database" | "mach-o" | "elf" | "pe" | "dos-mz" | "dos-com"
+    | "analysis-database"
+    | "mach-o"
+    | "elf"
+    | "pe"
+    | "dos-mz"
+    | "dos-com"
+    | "raw-image"
   >,
 ): format is Extract<BinaryTarget, { kind: "archive" }>["format"] =>
   ["zip", "ipa", "apk", "msix", "appx", "asar", "dmg", "pkg"].includes(format);
@@ -252,6 +292,7 @@ const readExecutableMetadata = async (
         : 0;
     const headerBytes = bytes.length >= 28 ? bytes.readUInt16LE(8) * 16 : 0;
     const fileSize = (await handle.stat()).size;
+    let header = bytes;
     if (
       tableEnd > bytes.length &&
       tableEnd <= headerBytes &&
@@ -259,13 +300,19 @@ const readExecutableMetadata = async (
     ) {
       const table = Buffer.alloc(tableEnd);
       const observed = await handle.read(table, 0, table.length, 0);
-      return parseExecutableHeader(
-        table.subarray(0, observed.bytesRead),
-        hostArchitecture,
-        fileSize,
-      );
+      header = table.subarray(0, observed.bytesRead);
     }
-    return parseExecutableHeader(bytes, hostArchitecture, fileSize);
+    const metadata = parseExecutableHeader(header, hostArchitecture, fileSize);
+    if (!metadata.ok || metadata.value.format !== "dos-mz") return metadata;
+    const bound = await readBoundLinearExecutable(handle, header, fileSize);
+    return bound === null
+      ? metadata
+      : err(
+          `unsupported ${bound.signature} executable bound after a DOS extender stub ` +
+            `(embedded stub at file offset 0x${bound.stubOffset.toString(16)}, ` +
+            `${bound.signature} header at 0x${bound.headerOffset.toString(16)}); ` +
+            "the DOS load module is the extender, not the program",
+        );
   }
   if (bytes.length >= 8) {
     const magic = bytes.readUInt32BE(0);
@@ -284,6 +331,35 @@ const readExecutableMetadata = async (
     }
   }
   return parseExecutableHeader(bytes, hostArchitecture);
+};
+
+/**
+ * DOS-era overlays are small; bound extender programs place their stub within
+ * the first few hundred KiB. Overlay bytes beyond this bound are not scanned.
+ */
+const MAX_BOUND_OVERLAY_SCAN_BYTES = 64 * 1024 * 1024;
+
+/** Scan a DOS load module's appended overlay for a bound LE/LX program. */
+const readBoundLinearExecutable = async (
+  handle: FileHandle,
+  header: Buffer,
+  fileSize: number,
+): Promise<BoundLinearExecutable | null> => {
+  const parsed = parseDosMzHeader(header, fileSize);
+  if (!parsed.ok || parsed.value.overlayBytes === 0) return null;
+  const overlay = Buffer.alloc(
+    Math.min(parsed.value.overlayBytes, MAX_BOUND_OVERLAY_SCAN_BYTES),
+  );
+  const observed = await handle.read(
+    overlay,
+    0,
+    overlay.length,
+    parsed.value.imageBytes,
+  );
+  return findBoundLinearExecutable(
+    overlay.subarray(0, observed.bytesRead),
+    parsed.value.imageBytes,
+  );
 };
 
 const readPeMetadata = async (

@@ -177,10 +177,13 @@ public final class ReaGhidraBridge extends HeadlessScript {
         }
         sessionDefaultAddressSpace =
             currentProgram.getAddressFactory().getDefaultAddressSpace();
-        if (currentProgram.getExecutableFormat().equals("Raw Binary") &&
-            !currentProgram.getOptions(ghidra.program.model.listing.Program.PROGRAM_INFO)
-                .getBoolean("REA DOS COM prepared", false)) {
-            throw new IllegalStateException("REA DOS COM entry/context preparation failed");
+        if (currentProgram.getExecutableFormat().equals("Raw Binary")) {
+            ghidra.framework.options.Options info =
+                currentProgram.getOptions(ghidra.program.model.listing.Program.PROGRAM_INFO);
+            if (!info.getBoolean("REA DOS COM prepared", false) &&
+                !info.getBoolean("REA raw image prepared", false)) {
+                throw new IllegalStateException("REA raw entry/context preparation failed");
+            }
         }
         if (!Application.getApplicationVersion().equals(descriptor.providerVersion)) {
             throw new IllegalStateException("Ghidra provider version does not match the session");

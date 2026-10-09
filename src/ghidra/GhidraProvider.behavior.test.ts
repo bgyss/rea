@@ -216,6 +216,68 @@ describe("Ghidra provider", () => {
   });
 });
 
+describe("Ghidra raw-image profile", () => {
+  it("commits the declared raw-image language, base, and entry without inventing a CPU family", async () => {
+    const ghidra = provider();
+    const rawImage = {
+      schema_version: "dcomp.ghidra-profile.v1",
+      profile_id: "ps1-r3000a-mini-v1",
+      platform: "ps1",
+      processor_language_id: "MIPS:LE:32:default",
+      compiler_spec_id: "default",
+      loader: "BinaryLoader",
+      load_address: 0x80010000,
+      entry_address: 0x80010004,
+      analysis_timeout_seconds: 120,
+      max_instruction_facts: 256,
+    } as const;
+    const target: BinaryTarget = {
+      path: "/tmp/ps1.bin",
+      sha256: "b".repeat(64),
+      kind: "executable",
+      format: "raw-image",
+      rawImage,
+    };
+    expect(ghidra.inspectTargetSupport(target)).toMatchObject({
+      status: "supported",
+      diagnostics: {
+        architecture: null,
+        processor_language_id: "MIPS:LE:32:default",
+      },
+    });
+    const resolved = await ghidra.resolveAnalysisProfile(target);
+    if (!resolved.ok) throw resolved.error;
+    expect(resolved.value).toMatchObject({
+      profile: {
+        parameters: {
+          target_format: "raw-image",
+          architecture: null,
+          loader: "BinaryLoader",
+          language_id: "MIPS:LE:32:default",
+          compiler_spec_id: "default",
+          base_address: "0x80010000",
+          entry_address: "0x80010004",
+          raw_image_profile: rawImage,
+        },
+      },
+      compatibility: {
+        languageId: "MIPS:LE:32:default",
+        compilerSpecId: "default",
+      },
+    });
+    const moved = await ghidra.resolveAnalysisProfile({
+      ...target,
+      rawImage: { ...rawImage, load_address: 0x80000000 },
+    });
+    if (!moved.ok) throw moved.error;
+    expect(moved.value.profile?.digest).not.toBe(
+      resolved.value.profile?.digest,
+    );
+    const windows = provider({ ...installationHost(), platform: "win32" });
+    expect(windows.inspectTargetSupport(target).status).toBe("unsupported");
+  });
+});
+
 describe("Ghidra Mach-O slice support", () => {
   it("refuses universal targets whose selected slice cannot be enforced", () => {
     const ghidra = provider();

@@ -345,7 +345,11 @@ const selectArchitecture = (
   target: BinaryTarget,
   available: readonly string[],
 ): string | null => {
-  if (target.kind !== "executable" || target.availableArchitectures.length < 2)
+  if (
+    target.kind !== "executable" ||
+    target.format === "raw-image" ||
+    target.availableArchitectures.length < 2
+  )
     return null;
   const normalized =
     target.architecture === "x86" ? "i386" : target.architecture;

@@ -71,7 +71,17 @@ export interface GhidraHeadlessLauncherOptions {
   /** Select the admitted 16-bit real-mode MZ import instead of auto-detection. */
   readonly dosMz?: true;
   readonly dosCom?: true;
+  /** Import headerless bytes with a caller-declared language, base and entry. */
+  readonly rawImage?: GhidraRawImageImport;
   readonly analysisExtensions?: readonly GhidraExtension[];
+}
+
+/** Explicit BinaryLoader import for a raw image; addresses are 0x-prefixed hex. */
+export interface GhidraRawImageImport {
+  readonly languageId: string;
+  readonly compilerSpecId: string;
+  readonly baseAddress: string;
+  readonly entryAddress: string;
 }
 
 /** Launch Ghidra without copying scripts into or modifying its installation. */
@@ -124,6 +134,9 @@ export class GhidraHeadlessLauncher implements GhidraLauncher {
         ...(this.options.dosMz === undefined
           ? {}
           : { dosMz: this.options.dosMz }),
+        ...(this.options.rawImage === undefined
+          ? {}
+          : { rawImage: this.options.rawImage }),
       });
       const scriptCommand = ghidraHeadlessCommand({
         platform,
@@ -306,6 +319,7 @@ export interface GhidraHeadlessArgumentOptions {
   readonly scriptLogPath: string;
   readonly dosMz?: true;
   readonly dosCom?: true;
+  readonly rawImage?: GhidraRawImageImport;
 }
 
 /** Build the complete read-only headless invocation in deterministic order. */
@@ -336,7 +350,18 @@ export const ghidraHeadlessArguments = (
           "-cspec",
           "default",
         ]
-      : []),
+      : options.rawImage === undefined
+        ? []
+        : [
+            "-loader",
+            "BinaryLoader",
+            "-loader-baseAddr",
+            options.rawImage.baseAddress,
+            "-processor",
+            options.rawImage.languageId,
+            "-cspec",
+            options.rawImage.compilerSpecId,
+          ]),
   "-readOnly",
   "-deleteProject",
   "-log",
@@ -350,7 +375,13 @@ export const ghidraHeadlessArguments = (
         "-preScript",
         join(dirname(options.bridgeScriptPath), "ReaGhidraPrepareCom.java"),
       ]
-    : []),
+    : options.rawImage === undefined
+      ? []
+      : [
+          "-preScript",
+          join(dirname(options.bridgeScriptPath), "ReaGhidraPrepareRaw.java"),
+          options.rawImage.entryAddress,
+        ]),
   "-postScript",
   // Ghidra checks the caller's cwd before scriptPath for a basename. Select
   // the packaged source explicitly so unrelated entries cannot shadow it.

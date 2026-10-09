@@ -95,6 +95,64 @@ export const parseDosMzHeader = (
   });
 };
 
+/** A linear-executable program bound into a DOS MZ file's appended overlay. */
+export interface BoundLinearExecutable {
+  readonly signature: "LE" | "LX";
+  /** File offset of the embedded MZ stub that declares the linear header. */
+  readonly stubOffset: number;
+  /** File offset of the LE/LX header. */
+  readonly headerOffset: number;
+}
+
+const LINEAR_HEADER_PROBE_BYTES = 12;
+
+/**
+ * Find a linear executable bound after a DOS-extender load module, such as a
+ * DOS/4GW-bound Watcom program. Binders append the 32-bit program as an
+ * embedded MZ stub whose e_lfanew, relative to that stub, selects an LE/LX
+ * header. The outer load module is the extender itself, so analyzing it as
+ * the program would silently describe the wrong code. `overlay` holds the
+ * file bytes beginning at `overlayOffset`.
+ */
+export const findBoundLinearExecutable = (
+  overlay: Buffer,
+  overlayOffset: number,
+): BoundLinearExecutable | null => {
+  for (let stub = 0; stub + 64 <= overlay.length; stub += 1) {
+    if (overlay[stub] !== 0x4d || overlay[stub + 1] !== 0x5a) continue;
+    if (overlay.readUInt16LE(stub + 8) * 16 < 64) continue;
+    const relative = overlay.readUInt32LE(stub + 60);
+    const header = stub + relative;
+    if (relative < 64 || header + LINEAR_HEADER_PROBE_BYTES > overlay.length)
+      continue;
+    const signature = overlay.toString("ascii", header, header + 2);
+    if (signature !== "LE" && signature !== "LX") continue;
+    if (!plausibleLinearHeader(overlay, header)) continue;
+    return {
+      signature,
+      stubOffset: overlayOffset + stub,
+      headerOffset: overlayOffset + header,
+    };
+  }
+  return null;
+};
+
+/** Byte/word order, format level, CPU and OS fields of an LE/LX header. */
+const plausibleLinearHeader = (bytes: Buffer, header: number): boolean => {
+  const byteOrder = bytes[header + 2] ?? 0xff;
+  const wordOrder = bytes[header + 3] ?? 0xff;
+  const cpu = bytes.readUInt16LE(header + 8);
+  const os = bytes.readUInt16LE(header + 10);
+  return (
+    byteOrder <= 1 &&
+    wordOrder <= 1 &&
+    bytes.readUInt32LE(header + 4) === 0 &&
+    cpu >= 1 &&
+    cpu <= 0x42 &&
+    os <= 4
+  );
+};
+
 const validateRelocations = (
   bytes: Buffer,
   relocationTableOffset: number,

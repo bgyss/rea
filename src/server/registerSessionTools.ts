@@ -15,7 +15,9 @@ import { UnknownRegistryError } from "../domain/unknownRegistryError.js";
 import { type AnalysisError } from "../domain/analysisErrorBase.js";
 import type { Evidence } from "../domain/evidence.js";
 import type { ProcessCapture } from "../domain/process/processCapture.js";
-import { ok, type Result } from "../domain/result.js";
+import { AnalysisInputError } from "../domain/analysisErrorCore.js";
+import { resolveExecutableFormatHint } from "../domain/dosCom.js";
+import { err, ok, type Result } from "../domain/result.js";
 import type { Logger } from "../logger.js";
 import { mcpProgressReporter } from "./mcpProgress.js";
 import { registerArtifactComparisonTool } from "./registerArtifactComparisonTool.js";
@@ -170,10 +172,29 @@ const registerOpenLifecycleTool = ({
         if (!loaded.ok) return toCallToolResult(loaded, openContract);
         snapshot = loaded.value;
       }
+      const formatHint = resolveExecutableFormatHint(
+        input.format,
+        input.raw_image_profile,
+      );
+      if (!formatHint.ok)
+        return toCallToolResult(
+          err(
+            new AnalysisInputError("open_binary", undefined, [
+              {
+                path: ["raw_image_profile"],
+                reason: "invalid_value",
+                message: formatHint.error,
+              },
+            ]),
+          ),
+          openContract,
+        );
       const opened = await logToolExecution(logger, openContract.name, () =>
         session.open(input.path, {
           signal: context.mcpReq.signal,
-          ...(input.format === undefined ? {} : { formatHint: input.format }),
+          ...(formatHint.value === undefined
+            ? {}
+            : { formatHint: formatHint.value }),
           ...(input.provider_id === undefined
             ? {}
             : { providerId: input.provider_id }),

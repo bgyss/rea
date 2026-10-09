@@ -113,6 +113,37 @@ describe("Ghidra COM loader", () => {
     expect(arguments_).toContain("-readOnly");
     expect(arguments_).toContain("-deleteProject");
   });
+
+  it("imports a raw image with its declared language, base, and seeded entry", () => {
+    const arguments_ = ghidraHeadlessArguments({
+      projectRoot: "/tmp/project",
+      targetPath: "/tmp/prg.bin",
+      bridgeScriptPath: "/package/bridge/ReaGhidraBridge.java",
+      descriptorPath: "/tmp/session.json",
+      ghidraLogPath: "/tmp/ghidra.log",
+      scriptLogPath: "/tmp/script.log",
+      rawImage: {
+        languageId: "6502:LE:16:default",
+        compilerSpecId: "default",
+        baseAddress: "0x8000",
+        entryAddress: "0x8004",
+      },
+    });
+    expectOptions(arguments_, [
+      ["-loader", "BinaryLoader"],
+      ["-loader-baseAddr", "0x8000"],
+      ["-processor", "6502:LE:16:default"],
+      ["-cspec", "default"],
+    ]);
+    const prepare = arguments_.indexOf("-preScript");
+    expect(arguments_.slice(prepare + 1, prepare + 3)).toEqual([
+      join("/package/bridge", "ReaGhidraPrepareRaw.java"),
+      "0x8004",
+    ]);
+    expect(prepare).toBeLessThan(arguments_.indexOf("-postScript"));
+    expect(arguments_).toContain("-readOnly");
+    expect(arguments_).toContain("-deleteProject");
+  });
 });
 
 describe("Ghidra headless launcher", () => {

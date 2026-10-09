@@ -18,6 +18,7 @@ import {
   type AppBundleFileSystem,
 } from "../../../src/application/AppBundleExecutable.js";
 import {
+  boundLinearOverlay,
   dosMz,
   pe,
   thinMach,
@@ -583,6 +584,86 @@ describe("DOS binary target I/O", () => {
     expect(await parseBinaryTarget(path)).toMatchObject({
       ok: false,
       error: { message: "Cannot open artifact: truncated DOS MZ load module" },
+    });
+  });
+
+  it("resolves a raw image only with an explicit fitting profile", async () => {
+    const directory = await createTestTempDirectory("rea-raw-target-");
+    const path = join(directory, "prg.bin");
+    // LDA #$01; STA $0200; RTS
+    await writeFile(path, Buffer.from([0xa9, 0x01, 0x8d, 0x00, 0x02, 0x60]));
+    const profile = {
+      schema_version: "dcomp.ghidra-profile.v1",
+      profile_id: "authored-6502",
+      platform: "nes",
+      processor_language_id: "6502:LE:16:default",
+      compiler_spec_id: "default",
+      loader: "BinaryLoader",
+      load_address: 0x8000,
+      entry_address: 0x8000,
+      analysis_timeout_seconds: 60,
+      max_instruction_facts: 64,
+    } as const;
+    const hint = { format: "raw-image", profile } as const;
+    const resolved = await parseBinaryTarget(
+      path,
+      directory,
+      "arm64",
+      undefined,
+      hint,
+    );
+    if (!resolved.ok) throw resolved.error;
+    expect(resolved.value).toMatchObject({
+      kind: "executable",
+      format: "raw-image",
+      rawImage: profile,
+    });
+    expect(resolved.value.architecture).toBeUndefined();
+
+    expect(await parseBinaryTarget(path, directory)).toMatchObject({
+      ok: false,
+    });
+    const outside = await parseBinaryTarget(
+      path,
+      directory,
+      "arm64",
+      undefined,
+      {
+        format: "raw-image",
+        profile: { ...profile, entry_address: 0x8006 },
+      },
+    );
+    if (outside.ok) throw new Error("Expected an entry-outside rejection");
+    expect(outside.error.message).toContain(
+      "raw image entry 0x8006 lies outside the loaded bytes 0x8000..0x8005",
+    );
+    expect(
+      await parseBinaryTarget(path, directory, "arm64", "database", hint),
+    ).toMatchObject({ ok: false });
+  });
+
+  it("rejects a DOS extender stub whose overlay binds an LE program", async () => {
+    const directory = await createTestTempDirectory("rea-dos-bound-");
+    const path = join(directory, "bound.exe");
+    // A 4 KiB extender load module, unrelated overlay data, then the binder's
+    // embedded stub: the LE header lies beyond the 4 KiB metadata probe.
+    const extender = dosMz(4064);
+    await writeFile(
+      path,
+      Buffer.concat([extender, boundLinearOverlay("LE", 3000)]),
+    );
+    const result = await parseBinaryTarget(path);
+    if (result.ok) throw new Error("Expected a bound LE rejection");
+    expect(result.error.message).toBe(
+      "Cannot open artifact: unsupported LE executable bound after a DOS extender stub " +
+        "(embedded stub at file offset 0x1bb8, LE header at 0x1c38); " +
+        "the DOS load module is the extender, not the program",
+    );
+
+    await writeFile(path, Buffer.concat([extender, Buffer.alloc(3200, 0x4d)]));
+    expect(await parseBinaryTarget(path)).toMatchObject({
+      ok: true,
+      value: { format: "dos-mz" },
     });
   });
 });

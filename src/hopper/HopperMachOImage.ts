@@ -38,6 +38,8 @@ export const resolveHopperMachOImage = async (
   const invalid = (reason: string) =>
     err(new BinaryTargetError(target.path, reason));
   if (signal?.aborted) return err(new AnalysisCancelledError("open_binary"));
+  if (target.format === "raw-image")
+    return invalid("Hopper FAT64 image preparation requires a Mach-O target");
   let file: FileHandle;
   try {
     file = await open(target.path, "r");

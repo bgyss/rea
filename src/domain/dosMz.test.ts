@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { dosMz, pe } from "./binaryTarget.fixture.js";
+import { boundLinearOverlay, dosMz, pe } from "./binaryTarget.fixture.js";
 import { parseExecutableHeader } from "./binaryTarget.js";
-import { mzWindowsHeaderOffset, parseDosMzHeader } from "./dosMz.js";
+import {
+  findBoundLinearExecutable,
+  mzWindowsHeaderOffset,
+  parseDosMzHeader,
+} from "./dosMz.js";
 
 describe("DOS MZ load-module validation", () => {
   it("separates initialized module and appended overlay bytes", () => {
@@ -114,6 +118,33 @@ describe("DOS MZ load-module validation", () => {
       });
     },
   );
+
+  it.each(["LE", "LX"] as const)(
+    "finds a %s program bound after a DOS extender load module",
+    (signature) => {
+      expect(
+        findBoundLinearExecutable(boundLinearOverlay(signature), 0x1000),
+      ).toEqual({
+        signature,
+        stubOffset: 0x1020,
+        headerOffset: 0x10a0,
+      });
+    },
+  );
+
+  it.each([
+    ["an implausible linear header", (o: Buffer) => o.writeUInt32LE(7, 164)],
+    ["a header beyond the overlay", (o: Buffer) => o.writeUInt32LE(4096, 92)],
+    [
+      "a stub too short for a new header",
+      (o: Buffer) => o.writeUInt16LE(2, 40),
+    ],
+    ["ordinary overlay data", (o: Buffer) => o.fill(0)],
+  ] as const)("ignores %s", (_name, damage) => {
+    const overlay = boundLinearOverlay();
+    damage(overlay);
+    expect(findBoundLinearExecutable(overlay, 512)).toBeNull();
+  });
 
   it("does not fall back to DOS when a Windows declaration is damaged", () => {
     const bytes = Buffer.alloc(256);

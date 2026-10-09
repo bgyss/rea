@@ -9,7 +9,8 @@ import { logCliCommand } from "../cliLogging.js";
 import type { Logger } from "../logger.js";
 import {
   directAnalysisOptions,
-  formatSelectionOption,
+  formatSelectionOptions,
+  type FormatSelection,
   providerSelectionOption,
 } from "./options.js";
 import type { CliInstance } from "./types.js";
@@ -45,7 +46,7 @@ const registerOverviewCommands = (
       .min(1)
       .optional()
       .describe("Load and update a local analysis snapshot"),
-    "target-format": formatSelectionOption,
+    ...formatSelectionOptions,
     provider: providerSelectionOption,
   });
   cli.command(CLI_COMMANDS.analyze, {
@@ -82,7 +83,7 @@ const registerOverviewCommands = (
             logger,
             options.snapshot,
             options.provider,
-            options["target-format"],
+            options,
           ),
         ),
       ),
@@ -113,7 +114,7 @@ const registerDecompileCommand = (cli: CliInstance, logger: Logger): void => {
         .min(1)
         .optional()
         .describe("Load and update a local analysis snapshot"),
-      "target-format": formatSelectionOption,
+      ...formatSelectionOptions,
       provider: providerSelectionOption,
     }),
     run: ({ args, options }) =>
@@ -133,7 +134,7 @@ const registerDecompileCommand = (cli: CliInstance, logger: Logger): void => {
             logger,
             options.snapshot,
             options.provider,
-            options["target-format"],
+            options,
           ),
         ),
       ),
@@ -142,9 +143,8 @@ const registerDecompileCommand = (cli: CliInstance, logger: Logger): void => {
 
 const runRoutedOverview = async (
   path: string,
-  options: {
+  options: FormatSelection & {
     readonly snapshot?: string | undefined;
-    readonly "target-format"?: "dos-com" | undefined;
     readonly provider?: string | undefined;
   },
   logger: Logger,
@@ -154,6 +154,7 @@ const runRoutedOverview = async (
     options.provider === undefined &&
     options.snapshot === undefined &&
     options["target-format"] === undefined &&
+    options["raw-image-profile"] === undefined &&
     (await isJavaScriptApplicationPath(path))
   )
     return runCliJavaScriptApplicationAnalysis(
@@ -164,12 +165,7 @@ const runRoutedOverview = async (
     path,
     "binary_overview",
     {},
-    directAnalysisOptions(
-      logger,
-      options.snapshot,
-      options.provider,
-      options["target-format"],
-    ),
+    directAnalysisOptions(logger, options.snapshot, options.provider, options),
   );
 };
 
@@ -207,7 +203,7 @@ const registerXrefsCommand = (cli: CliInstance, logger: Logger): void => {
         .min(1)
         .optional()
         .describe("Load and update a local analysis snapshot"),
-      "target-format": formatSelectionOption,
+      ...formatSelectionOptions,
       provider: providerSelectionOption,
     }),
     run: ({ args, options }) =>
@@ -227,7 +223,7 @@ const registerXrefsCommand = (cli: CliInstance, logger: Logger): void => {
             logger,
             options.snapshot,
             options.provider,
-            options["target-format"],
+            options,
           ),
         ),
       ),
@@ -258,7 +254,7 @@ const registerTraceCommand = (cli: CliInstance, logger: Logger): void => {
         .min(1)
         .optional()
         .describe("Load and update a local analysis snapshot"),
-      "target-format": formatSelectionOption,
+      ...formatSelectionOptions,
       provider: providerSelectionOption,
     }),
     alias: {
@@ -282,7 +278,7 @@ const registerTraceCommand = (cli: CliInstance, logger: Logger): void => {
             logger,
             options.snapshot,
             options.provider,
-            options["target-format"],
+            options,
           ),
         ),
       ),
@@ -313,7 +309,7 @@ const registerFunctionCommand = (cli: CliInstance, logger: Logger): void => {
         .min(1)
         .optional()
         .describe("Load and update a local analysis snapshot"),
-      "target-format": formatSelectionOption,
+      ...formatSelectionOptions,
       provider: providerSelectionOption,
     }),
     run: ({ args, options }) =>
@@ -333,7 +329,7 @@ const registerFunctionCommand = (cli: CliInstance, logger: Logger): void => {
             logger,
             options.snapshot,
             options.provider,
-            options["target-format"],
+            options,
           ),
         ),
       ),
@@ -367,7 +363,7 @@ const registerInstructionsCommand = (
         .min(1)
         .optional()
         .describe("Load and update a local analysis snapshot"),
-      "target-format": formatSelectionOption,
+      ...formatSelectionOptions,
       provider: providerSelectionOption,
     }),
     run: ({ args, options }) =>
@@ -387,7 +383,7 @@ const registerInstructionsCommand = (
             logger,
             options.snapshot,
             options.provider,
-            options["target-format"],
+            options,
           ),
         ),
       ),
@@ -430,7 +426,7 @@ const registerSearchCommand = (cli: CliInstance, logger: Logger): void => {
         .min(1)
         .optional()
         .describe("Load and update a local analysis snapshot"),
-      "target-format": formatSelectionOption,
+      ...formatSelectionOptions,
       provider: providerSelectionOption,
     }),
     alias: { caseSensitive: "case-sensitive" },
@@ -455,7 +451,7 @@ const registerSearchCommand = (cli: CliInstance, logger: Logger): void => {
             logger,
             options.snapshot,
             options.provider,
-            options["target-format"],
+            options,
           ),
         ),
       ),
