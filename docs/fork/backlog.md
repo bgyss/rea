@@ -79,6 +79,14 @@ Function signature and calling convention, data type and struct definitions (C h
 
 Memory-map overlay spaces per bank. Every address-bearing evidence row gains `{space, bank, physical_offset}`. `compare_functions` matches across banks only by bytes and evidence, never by bare CPU address.
 
+**Status: implemented on `feat/raw-image-memory-map` (rea) and in the dcomp working copy, both uncommitted.** It's a shared `dcomp.ghidra-profile.v2` with `blocks` of file slices (`file_offset`, `length`, `load_address`, `overlay`, `permissions`, `entry_addresses`).
+
+- **rea import.** rea imports a one-byte BinaryLoader stub, then rebuilds memory from the whole source file after checking its SHA-256 against the imported digest. Overlay blocks become separate Ghidra address spaces, so evidence addresses read `bank0:0x8000` and `bank1:0x8000`, and selectors accept them. Each block keeps its file offset, so `address_to_file_offset` returns the exact ROM byte. Entries are named `<block>_entry`. The analysis profile commits the full map. v1 flat profiles are unchanged.
+- **Physical offset.** The planned `{space, bank, physical_offset}` columns turned out to be unnecessary as new fields: the space is in the address string, and the physical offset comes from `address_to_file_offset`.
+- **dcomp.** `raw_profile.rs` adds `GhidraProfileV2` and `AnyGhidraProfile` with the same layout rules plus dcomp's platform qualification. `rea import` accepts v1 and v2. There's a new `ghidra-profile-v2.schema.json` and an authored `nes-banked-mini` fixture with a real rea bundle.
+- **Verified.** `verify:ghidra:raw` (real Ghidra 12.1.2) passes the banked fixture over CLI and MCP: distinct `LDA #1` and `LDA #2` at the same CPU address, all three entries listed, and a file offset of 258 for `bank1:0x8002`. On the rea side, `check:changed` ran 329 tests. dcomp's `mise run check` ran 144 tests.
+- **Not yet.** dcomp's own `ghidra probe` (PyGhidra fact export) is still v1-only. Mirrors and MMIO are not modelled unless declared as blocks. Which bank a run-time bank switch selects is not modelled. `compare_functions` across banks is unchanged.
+
 ### B4. Operator-pinned Ghidra loader extensions
 
 **[D]** · 3–4 days

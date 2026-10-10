@@ -45,7 +45,7 @@ describe("raw image profiles", () => {
   it("admits an image ending exactly at the top of a 16-bit space", () => {
     expect(validateRawImageLayout(nesProfile, 0x8000)).toEqual({
       ok: true,
-      value: { endAddress: 0xffff },
+      value: null,
     });
   });
 
@@ -91,7 +91,7 @@ describe("raw image profiles", () => {
     };
     expect(validateRawImageLayout(mips, 12)).toEqual({
       ok: true,
-      value: { endAddress: 0x8001000b },
+      value: null,
     });
   });
 });
@@ -124,4 +124,125 @@ describe("explicit format selection", () => {
       expect(result.error).toContain(message);
     },
   );
+});
+
+describe("mapped raw image profiles (v2)", () => {
+  const bank = 0x4000;
+  const mapped = {
+    schema_version: "dcomp.ghidra-profile.v2",
+    profile_id: "mmc1-v2",
+    platform: "nes",
+    processor_language_id: "6502:LE:16:default",
+    compiler_spec_id: "default",
+    blocks: [
+      {
+        name: "bank0",
+        file_offset: 0,
+        length: bank,
+        load_address: 0x8000,
+        overlay: true,
+        permissions: "rx",
+        entry_addresses: [0x8000],
+      },
+      {
+        name: "bank1",
+        file_offset: bank,
+        length: bank,
+        load_address: 0x8000,
+        overlay: true,
+        permissions: "rx",
+        entry_addresses: [],
+      },
+      {
+        name: "fixed",
+        file_offset: 2 * bank,
+        length: bank,
+        load_address: 0xc000,
+        overlay: false,
+        permissions: "rx",
+        entry_addresses: [0xfffc],
+      },
+    ],
+    analysis_timeout_seconds: 120,
+    max_instruction_facts: 256,
+  } as const;
+  type Block = (typeof mapped.blocks)[number];
+  const withBlock = (
+    index: number,
+    change: Partial<Record<keyof Block, unknown>>,
+  ) =>
+    rawImageProfileSchema.parse({
+      ...mapped,
+      blocks: mapped.blocks.map((block, at) =>
+        at === index ? { ...block, ...change } : block,
+      ),
+    });
+
+  it("accepts overlay banks that share CPU addresses with a fixed bank", () => {
+    const profile = rawImageProfileSchema.parse(mapped);
+    expect(validateRawImageLayout(profile, 3 * bank)).toEqual({
+      ok: true,
+      value: null,
+    });
+  });
+
+  it.each([
+    ["a block past the end of the file", 3 * bank - 1, {}, 0, "beyond the"],
+    [
+      "overlapping non-overlay blocks",
+      3 * bank,
+      { overlay: false, load_address: 0xc000 },
+      1,
+      "non-overlay blocks",
+    ],
+    [
+      "a duplicate block name",
+      3 * bank,
+      { name: "BANK0" },
+      1,
+      "used more than once",
+    ],
+    [
+      "an entry outside its block",
+      3 * bank,
+      { entry_addresses: [0xc000] },
+      0,
+      "lies outside 0x8000..0xbfff",
+    ],
+    [
+      "a block beyond the address space",
+      3 * bank,
+      { load_address: 0xe000 },
+      2,
+      "exceeds the 16-bit address space",
+    ],
+  ])("rejects %s", (_name, size, change, index, message) => {
+    const layout = validateRawImageLayout(withBlock(index, change), size);
+    if (layout.ok) throw new Error("Expected a layout rejection");
+    expect(layout.error).toContain(message);
+  });
+
+  it("requires at least one entry across all blocks", () => {
+    const profile = rawImageProfileSchema.parse({
+      ...mapped,
+      blocks: mapped.blocks.map((block) => ({ ...block, entry_addresses: [] })),
+    });
+    const layout = validateRawImageLayout(profile, 3 * bank);
+    if (layout.ok) throw new Error("Expected a missing-entry rejection");
+    expect(layout.error).toContain("at least one entry");
+  });
+
+  it("rejects malformed block names and permissions by schema", () => {
+    for (const change of [
+      { name: "1bank" },
+      { name: "bank-1" },
+      { permissions: "x" },
+    ])
+      expect(
+        rawImageProfileSchema.safeParse({
+          ...mapped,
+          blocks: [{ ...mapped.blocks[0], ...change }],
+        }).success,
+      ).toBe(false);
+  });
 });

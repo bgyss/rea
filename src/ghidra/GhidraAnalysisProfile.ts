@@ -72,10 +72,16 @@ export const resolveGhidraAnalysisProfile = (
         ...(raw === undefined
           ? {}
           : {
-              raw_image_profile: { ...raw },
-              base_address: hexAddress(raw.load_address),
-              entry_address: hexAddress(raw.entry_address),
+              raw_image_profile: structuredClone(raw),
               entry_seed: "external-entry-and-function-before-analysis-v1",
+              ...(raw.schema_version === "dcomp.ghidra-profile.v1"
+                ? {
+                    base_address: hexAddress(raw.load_address),
+                    entry_address: hexAddress(raw.entry_address),
+                  }
+                : {
+                    memory_map: "file-bytes-blocks-overlay-space-per-bank-v1",
+                  }),
             }),
         ...(dos
           ? {

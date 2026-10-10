@@ -12,6 +12,7 @@ import { fixtureDosLoadImage } from "./GhidraLoadImage.fixture.js";
 import { jsonValueSchema } from "../domain/jsonValue.js";
 
 import { parseConfig } from "../config.js";
+import { rawImageProfileSchema } from "../domain/rawImage.js";
 import type { BinaryTarget } from "../domain/binaryTarget.js";
 import { parseExecutableHeader } from "../domain/binaryTarget.js";
 import { createAnalysisProfile } from "../domain/analysisProfile.js";
@@ -217,6 +218,46 @@ describe("Ghidra provider", () => {
 });
 
 describe("Ghidra raw-image profile", () => {
+  it("commits a mapped v2 profile without flat base or entry fields", async () => {
+    const rawImage = rawImageProfileSchema.parse({
+      schema_version: "dcomp.ghidra-profile.v2",
+      profile_id: "banked-v2",
+      platform: "nes",
+      processor_language_id: "6502:LE:16:default",
+      compiler_spec_id: "default",
+      blocks: [
+        {
+          name: "bank0",
+          file_offset: 0,
+          length: 16,
+          load_address: 0x8000,
+          overlay: true,
+          permissions: "rx",
+          entry_addresses: [0x8000],
+        },
+      ],
+      analysis_timeout_seconds: 120,
+      max_instruction_facts: 256,
+    });
+    const resolved = await provider().resolveAnalysisProfile({
+      path: "/tmp/banked.bin",
+      sha256: "c".repeat(64),
+      kind: "executable",
+      format: "raw-image",
+      rawImage,
+    });
+    if (!resolved.ok) throw resolved.error;
+    expect(resolved.value.profile?.parameters).toMatchObject({
+      loader: "BinaryLoader",
+      language_id: "6502:LE:16:default",
+      raw_image_profile: rawImage,
+      memory_map: "file-bytes-blocks-overlay-space-per-bank-v1",
+    });
+    expect(resolved.value.profile?.parameters).not.toHaveProperty(
+      "base_address",
+    );
+  });
+
   it("commits the declared raw-image language, base, and entry without inventing a CPU family", async () => {
     const ghidra = provider();
     const rawImage = {
