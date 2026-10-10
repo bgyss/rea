@@ -123,6 +123,7 @@ describe("Ghidra COM loader", () => {
       ghidraLogPath: "/tmp/ghidra.log",
       scriptLogPath: "/tmp/script.log",
       rawImage: {
+        mode: "flat",
         languageId: "6502:LE:16:default",
         compilerSpecId: "default",
         baseAddress: "0x8000",
@@ -143,6 +144,36 @@ describe("Ghidra COM loader", () => {
     expect(prepare).toBeLessThan(arguments_.indexOf("-postScript"));
     expect(arguments_).toContain("-readOnly");
     expect(arguments_).toContain("-deleteProject");
+  });
+
+  it("imports a mapped raw image as a one-byte stub and passes its private map", () => {
+    const arguments_ = ghidraHeadlessArguments({
+      projectRoot: "/tmp/project",
+      targetPath: "/tmp/prg.bin",
+      bridgeScriptPath: "/package/bridge/ReaGhidraBridge.java",
+      descriptorPath: "/tmp/session.json",
+      ghidraLogPath: "/tmp/ghidra.log",
+      scriptLogPath: "/tmp/script.log",
+      rawImage: {
+        mode: "mapped",
+        languageId: "6502:LE:16:default",
+        compilerSpecId: "default",
+        blocks: [],
+      },
+      rawImageMapPath: "/tmp/runtime/raw-image-map.json",
+    });
+    expectOptions(arguments_, [
+      ["-loader", "BinaryLoader"],
+      ["-loader-baseAddr", "0x0"],
+      ["-loader-length", "0x1"],
+      ["-processor", "6502:LE:16:default"],
+      ["-cspec", "default"],
+    ]);
+    const prepare = arguments_.indexOf("-preScript");
+    expect(arguments_.slice(prepare + 1, prepare + 3)).toEqual([
+      join("/package/bridge", "ReaGhidraPrepareRaw.java"),
+      "map=/tmp/runtime/raw-image-map.json",
+    ]);
   });
 });
 

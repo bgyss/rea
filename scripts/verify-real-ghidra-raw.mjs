@@ -82,11 +82,49 @@ const fixtures = [
   },
 ];
 
+// Two switchable banks share $8000 as overlays; a fixed bank sits at $C000.
+const bankSize = 0x100;
+const bankBytes = [
+  [0xa9, 0x01, 0x8d, 0x00, 0x02, 0x60], // LDA #1; STA $0200; RTS
+  [0xa9, 0x02, 0x8d, 0x01, 0x02, 0x60], // LDA #2; STA $0201; RTS
+  [0x20, 0x00, 0x80, 0x60], // JSR $8000; RTS
+];
+const banked = {
+  name: "banked",
+  bytes: Buffer.concat(
+    bankBytes.map((code) =>
+      Buffer.concat([Buffer.from(code), Buffer.alloc(bankSize - code.length)]),
+    ),
+  ),
+  profile: {
+    schema_version: "dcomp.ghidra-profile.v2",
+    profile_id: "authored-banked-6502-v2",
+    platform: "nes",
+    processor_language_id: "6502:LE:16:default",
+    compiler_spec_id: "default",
+    blocks: [
+      ["bank0", 0, 0x8000, true],
+      ["bank1", bankSize, 0x8000, true],
+      ["fixed", 2 * bankSize, 0xc000, false],
+    ].map(([name, offset, address, overlay]) => ({
+      name,
+      file_offset: offset,
+      length: bankSize,
+      load_address: address,
+      overlay,
+      permissions: "rx",
+      entry_addresses: [address],
+    })),
+    analysis_timeout_seconds: 120,
+    max_instruction_facts: 256,
+  },
+};
+
 const run = createVerifierRun();
 const workspace = await mkdtemp(join(tmpdir(), "rea-raw-proof-"));
 const runtime = join(workspace, "runtime");
 await mkdir(runtime);
-for (const fixture of fixtures) {
+for (const fixture of [...fixtures, banked]) {
   fixture.path = join(workspace, `${fixture.name}.bin`);
   fixture.profilePath = join(workspace, `${fixture.name}.profile.json`);
   fixture.sha256 = digest(fixture.bytes);
@@ -190,6 +228,54 @@ try {
       original_unchanged: true,
     };
   }
+  // Banked v2: distinct overlay identities at one CPU address, exact file offsets.
+  const bankedCli = await cli(banked, "instructions", "bank1:0x8000");
+  assert.match(
+    JSON.stringify(bankedCli.normalized_result),
+    /bank1:0x8000: LDA #0x2/u,
+  );
+  const bankedTarget = await call("open_binary", {
+    path: banked.path,
+    format: "raw-image",
+    raw_image_profile: banked.profile,
+    provider_id: "ghidra",
+  });
+  opened = true;
+  assert.equal(bankedTarget.format, "raw-image");
+  const bankedProcedures = await call("list_procedures");
+  for (const [address, name] of [
+    ["bank0:0x8000", "bank0_entry"],
+    ["bank1:0x8000", "bank1_entry"],
+    ["0xc000", "fixed_entry"],
+  ])
+    assert.ok(
+      bankedProcedures.some(
+        (row) => row.address === address && row.value === name,
+      ),
+      `banked procedure ${name} missing at ${address}`,
+    );
+  const bank0 = await call("read_function_instructions", {
+    procedure: "bank0:0x8000",
+  });
+  const bank1 = await call("read_function_instructions", {
+    procedure: "bank1:0x8000",
+  });
+  assert.match(bank0.instructions[0], /^bank0:0x8000: LDA #0x1$/iu);
+  assert.match(bank1.instructions[0], /^bank1:0x8000: LDA #0x2$/iu);
+  const offset = await call("address_to_file_offset", {
+    address: "bank1:0x8002",
+  });
+  assert.equal(offset.file_offset, bankSize + 2);
+  await call("close_binary");
+  opened = false;
+  assert.equal(digest(await readFile(banked.path)), banked.sha256);
+  report.fixtures.banked = {
+    profile: "dcomp.ghidra-profile.v2",
+    overlays_distinct: true,
+    bank1_file_offset: offset.file_offset,
+    cli_mcp_parity: true,
+  };
+
   report.rejections = {
     missing_profile: true,
     stray_profile: true,
@@ -260,10 +346,16 @@ async function cli(fixture, command, procedure) {
   const parameters = evidence.analysis_profile.parameters;
   assert.equal(parameters.loader, "BinaryLoader");
   assert.equal(parameters.language_id, fixture.profile.processor_language_id);
-  assert.equal(
-    parameters.base_address,
-    `0x${fixture.profile.load_address.toString(16)}`,
-  );
+  if (fixture.profile.schema_version === "dcomp.ghidra-profile.v1")
+    assert.equal(
+      parameters.base_address,
+      `0x${fixture.profile.load_address.toString(16)}`,
+    );
+  else
+    assert.equal(
+      parameters.memory_map,
+      "file-bytes-blocks-overlay-space-per-bank-v1",
+    );
   assert.deepEqual(parameters.raw_image_profile, fixture.profile);
   return evidence;
 }

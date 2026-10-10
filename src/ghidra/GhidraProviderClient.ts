@@ -40,7 +40,11 @@ import {
   type GhidraInstallationInspection,
 } from "./GhidraInstallation.js";
 import { unverifiedGhidraBuildLimitation } from "./GhidraInstallationPolicy.js";
-import { GhidraHeadlessLauncher } from "./GhidraLauncher.js";
+import {
+  GhidraHeadlessLauncher,
+  type GhidraRawImageImport,
+} from "./GhidraLauncher.js";
+import type { RawImageProfile } from "../domain/rawImage.js";
 import { attestGhidraNativeLoadImage } from "./GhidraLoadImageAttest.js";
 import {
   GHIDRA_PROVIDER_IDENTITY,
@@ -118,10 +122,7 @@ export const createGhidraProviderClient = (input: {
   let extensionFailure: AnalysisError | undefined;
   const targetLimitations =
     target.format === "raw-image"
-      ? [
-          `Raw image interpreted with caller profile ${target.rawImage.profile_id}: ${target.rawImage.processor_language_id} (${target.rawImage.compiler_spec_id}) loaded at 0x${target.rawImage.load_address.toString(16)} with entry 0x${target.rawImage.entry_address.toString(16)}. The language, base and entry are declarations, not observations from the bytes.`,
-          "A raw image is one flat block in the language's default address space; bank switching, mirrors, overlays and memory-mapped I/O are not modelled.",
-        ]
+      ? rawImageLimitations(target.rawImage)
       : target.format === "dos-mz"
         ? [
             "DOS MZ uses 16-bit x86 real mode with the Ghidra load segment 0x1000. Returned addresses are linear byte coordinates; they do not identify a unique segment:offset alias.",
@@ -148,12 +149,7 @@ export const createGhidraProviderClient = (input: {
       ...(target.format === "dos-com" ? { dosCom: true } : {}),
       ...(target.format === "raw-image"
         ? {
-            rawImage: {
-              languageId: target.rawImage.processor_language_id,
-              compilerSpecId: target.rawImage.compiler_spec_id,
-              baseAddress: `0x${target.rawImage.load_address.toString(16)}`,
-              entryAddress: `0x${target.rawImage.entry_address.toString(16)}`,
-            },
+            rawImage: ghidraRawImageImport(target.rawImage),
           }
         : {}),
       platform: installation.platform,
@@ -406,4 +402,37 @@ const projectSessionError = (
     cause: failure,
     diagnostics: failure.diagnostics,
   });
+};
+
+/** Launcher import for a raw image: one flat block, or a mapped block layout. */
+const ghidraRawImageImport = (
+  profile: RawImageProfile,
+): GhidraRawImageImport =>
+  profile.schema_version === "dcomp.ghidra-profile.v1"
+    ? {
+        mode: "flat",
+        languageId: profile.processor_language_id,
+        compilerSpecId: profile.compiler_spec_id,
+        baseAddress: `0x${profile.load_address.toString(16)}`,
+        entryAddress: `0x${profile.entry_address.toString(16)}`,
+      }
+    : {
+        mode: "mapped",
+        languageId: profile.processor_language_id,
+        compilerSpecId: profile.compiler_spec_id,
+        blocks: profile.blocks,
+      };
+
+/** The declaration is caller-supplied; say so, and say what is not modelled. */
+const rawImageLimitations = (profile: RawImageProfile): string[] => {
+  const declared = `Raw image interpreted with caller profile ${profile.profile_id}: ${profile.processor_language_id} (${profile.compiler_spec_id}).`;
+  return profile.schema_version === "dcomp.ghidra-profile.v1"
+    ? [
+        `${declared} Loaded at 0x${profile.load_address.toString(16)} with entry 0x${profile.entry_address.toString(16)}. The language, base and entry are declarations, not observations from the bytes.`,
+        "A v1 raw image is one flat block in the language's default address space; bank switching, mirrors, overlays and memory-mapped I/O are not modelled.",
+      ]
+    : [
+        `${declared} ${profile.blocks.length} declared block(s) map file slices to CPU addresses; the map, permissions and entries are declarations, not observations from the bytes.`,
+        "Overlay blocks are separate Ghidra address spaces named after the block, so a banked address reads <block>:0x<offset>; non-overlay blocks use the default space. References from banked code to shared addresses resolve in the default space; which bank a run-time bank switch selects is not modelled. Mirrors and memory-mapped I/O registers are not modelled unless declared as blocks.",
+      ];
 };

@@ -6,6 +6,7 @@ import writeFileAtomic from "write-file-atomic";
 import { windowsPrivateRuntime } from "../windows/WindowsPrivateRuntime.js";
 
 import { AnalysisCancelledError } from "../domain/analysisErrorCore.js";
+import type { RawImageBlock } from "../domain/rawImage.js";
 import { err, ok, type Result } from "../domain/result.js";
 import {
   cleanupOwnedProcessGroup,
@@ -77,12 +78,21 @@ export interface GhidraHeadlessLauncherOptions {
 }
 
 /** Explicit BinaryLoader import for a raw image; addresses are 0x-prefixed hex. */
-export interface GhidraRawImageImport {
-  readonly languageId: string;
-  readonly compilerSpecId: string;
-  readonly baseAddress: string;
-  readonly entryAddress: string;
-}
+export type GhidraRawImageImport =
+  | {
+      readonly mode: "flat";
+      readonly languageId: string;
+      readonly compilerSpecId: string;
+      readonly baseAddress: string;
+      readonly entryAddress: string;
+    }
+  | {
+      /** Blocks are rebuilt from verified file bytes by the preparation script. */
+      readonly mode: "mapped";
+      readonly languageId: string;
+      readonly compilerSpecId: string;
+      readonly blocks: readonly RawImageBlock[];
+    };
 
 /** Launch Ghidra without copying scripts into or modifying its installation. */
 export class GhidraHeadlessLauncher implements GhidraLauncher {
@@ -119,6 +129,12 @@ export class GhidraHeadlessLauncher implements GhidraLauncher {
         })}\n`,
         platform,
       );
+      if (this.options.rawImage?.mode === "mapped")
+        await writeGhidraRuntimeFile(
+          paths.rawImageMapPath,
+          `${JSON.stringify({ blocks: this.options.rawImage.blocks })}\n`,
+          platform,
+        );
       if (isAborted(options.signal))
         return err(new AnalysisCancelledError("open_binary"));
       const headlessArguments = ghidraHeadlessArguments({
@@ -136,7 +152,10 @@ export class GhidraHeadlessLauncher implements GhidraLauncher {
           : { dosMz: this.options.dosMz }),
         ...(this.options.rawImage === undefined
           ? {}
-          : { rawImage: this.options.rawImage }),
+          : {
+              rawImage: this.options.rawImage,
+              rawImageMapPath: paths.rawImageMapPath,
+            }),
       });
       const scriptCommand = ghidraHeadlessCommand({
         platform,
@@ -320,7 +339,24 @@ export interface GhidraHeadlessArgumentOptions {
   readonly dosMz?: true;
   readonly dosCom?: true;
   readonly rawImage?: GhidraRawImageImport;
+  /** Private runtime file holding the block map for a mapped raw image. */
+  readonly rawImageMapPath?: string;
 }
+
+/** BinaryLoader import options for a raw image; mapped images import one stub byte. */
+const rawImageImportArguments = (
+  rawImage: GhidraRawImageImport,
+): readonly string[] => [
+  "-loader",
+  "BinaryLoader",
+  "-loader-baseAddr",
+  rawImage.mode === "flat" ? rawImage.baseAddress : "0x0",
+  ...(rawImage.mode === "flat" ? [] : ["-loader-length", "0x1"]),
+  "-processor",
+  rawImage.languageId,
+  "-cspec",
+  rawImage.compilerSpecId,
+];
 
 /** Build the complete read-only headless invocation in deterministic order. */
 export const ghidraHeadlessArguments = (
@@ -352,16 +388,7 @@ export const ghidraHeadlessArguments = (
         ]
       : options.rawImage === undefined
         ? []
-        : [
-            "-loader",
-            "BinaryLoader",
-            "-loader-baseAddr",
-            options.rawImage.baseAddress,
-            "-processor",
-            options.rawImage.languageId,
-            "-cspec",
-            options.rawImage.compilerSpecId,
-          ]),
+        : rawImageImportArguments(options.rawImage)),
   "-readOnly",
   "-deleteProject",
   "-log",
@@ -380,7 +407,9 @@ export const ghidraHeadlessArguments = (
       : [
           "-preScript",
           join(dirname(options.bridgeScriptPath), "ReaGhidraPrepareRaw.java"),
-          options.rawImage.entryAddress,
+          options.rawImage.mode === "flat"
+            ? options.rawImage.entryAddress
+            : `map=${options.rawImageMapPath ?? ""}`,
         ]),
   "-postScript",
   // Ghidra checks the caller's cwd before scriptPath for a basename. Select
@@ -397,6 +426,7 @@ const ghidraRuntimePaths = (runtimeRoot: string) => ({
   configRoot: join(runtimeRoot, "config"),
   dataRoot: join(runtimeRoot, "data"),
   descriptorPath: join(runtimeRoot, "session.json"),
+  rawImageMapPath: join(runtimeRoot, "raw-image-map.json"),
   ownershipPath: join(runtimeRoot, "ownership.json"),
   ghidraLogPath: join(runtimeRoot, "ghidra.log"),
   scriptLogPath: join(runtimeRoot, "script.log"),

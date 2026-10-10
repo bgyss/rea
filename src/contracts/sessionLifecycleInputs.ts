@@ -39,7 +39,7 @@ export const openBinaryInputSchema = z.strictObject({
   raw_image_profile: rawImageProfileSchema
     .optional()
     .describe(
-      "Required with format=raw-image: dcomp.ghidra-profile.v1 declaring the Ghidra processor_language_id, compiler_spec_id, BinaryLoader load_address and entry_address",
+      "Required with format=raw-image: dcomp.ghidra-profile.v1 (one flat block: load_address, entry_address) or dcomp.ghidra-profile.v2 (blocks of file slices mapped to CPU addresses, with overlay banks as separate address spaces and per-block entries), declaring the Ghidra processor_language_id and compiler_spec_id",
     ),
   provider_id: analysisProviderSelectorSchema.optional(),
   snapshot_path: snapshotPathSchema.optional(),

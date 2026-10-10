@@ -509,8 +509,9 @@ truncation constraint, while leading-zero coordinates still resolve correctly.
 It has the same Ghidra/JDK prerequisites as the MZ lane. Neither lane claims DOS
 runtime or PC-98 device execution.
 
-`npm run verify:ghidra:raw` writes authored 6502 and MIPS R3000 raw images and
-their `dcomp.ghidra-profile.v1` declarations, with no ROMs, game data or
+`npm run verify:ghidra:raw` writes authored 6502 and MIPS R3000 raw images with
+`dcomp.ghidra-profile.v1` declarations and a banked 6502 image with a v2 memory
+map, with no ROMs, game data or
 cross-compilers. It checks profile coupling and layout rejections, BinaryLoader
 import at the declared base, entry decoding, decompilation, the complete profile
 in analysis-profile Evidence, CLI/MCP parity, unchanged source bytes and owned
