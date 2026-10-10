@@ -56,6 +56,9 @@ export const parseConfig = (
     ...(env.REA_GHIDRA_NATIVEAOT_JAR === undefined
       ? {}
       : { ghidraNativeAotJar: env.REA_GHIDRA_NATIVEAOT_JAR }),
+    ...(env.REA_GHIDRA_PROJECT_CACHE_DIR === undefined
+      ? {}
+      : { ghidraProjectCacheDir: env.REA_GHIDRA_PROJECT_CACHE_DIR }),
     ilspyCmdPath: env.REA_ILSPY_CMD_PATH,
     hopperLauncherPath: env.HOPPER_LAUNCHER_PATH ?? defaultHopperLauncherPath(),
     hopperTargetPath: env.HOPPER_TARGET_PATH,

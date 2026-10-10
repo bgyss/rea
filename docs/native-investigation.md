@@ -379,7 +379,7 @@ x86-64 PE applications on local NTFS using bundled Job Object ownership,
 protected runtime DACLs, and handle-based path admission. See [Windows Ghidra P0](windows-ghidra-p0.md) and
 [issue #527](https://github.com/morluto/rea/issues/527).
 On Linux and macOS, `annotate_native_function` atomically edits a function name
-and entry comments in the ephemeral database, returning refreshed analysis
+and entry comments in the session's database, returning refreshed analysis
 without changing executable bytes. Annotation text must contain no NUL or
 unpaired Unicode surrogate; a rejection identifies the field and UTF-16 index
 and leaves every annotation unchanged. CRLF, supplementary Unicode characters,
@@ -410,6 +410,68 @@ before any comment or name is changed.
 macOS ARM64 is the real host verified during this implementation. Admission of
 macOS Intel does not claim an Intel verification run. Unsupported metadata and
 unresolved runtime/value semantics remain visible in results.
+
+### Annotation ledger
+
+By default, annotations live in the session's ephemeral database, so they
+disappear when the target closes. To keep them, pass `annotation_ledger_path` to `open_binary` (or
+`--annotation-ledger <file>` to a CLI analysis command). The ledger is a JSON
+Lines file of `rea.annotation-ledger.v1` entries. Each entry holds the target
+SHA-256, the analysis-profile digest, the function entry address, the requested
+`name` and comment changes, the Evidence ID and the time.
+
+- After opening, REA replays the entries recorded for exactly this target digest
+  and analysis profile, in order. Matching digests guarantee identical bytes and
+  address meaning, so entries for other targets or profiles are counted
+  (`skipped_other_target`, `skipped_other_profile`) and never guessed onto
+  different code. `open_binary` returns the replay report as
+  `annotation_ledger`; an entry that fails to apply is listed with its line and
+  reason. The CLI logs such failures as warnings.
+- Each successful `annotate_native_function` appends one synced line. If the
+  append fails, the tool reports that the edit was applied in the session but
+  not recorded.
+- A missing file starts an empty ledger. A malformed line fails the open rather
+  than applying part of the ledger.
+- Ledgers are plain text, so a decompilation project can review and version them
+  without committing Ghidra databases. Entries are tied to one target revision;
+  carrying names across revisions is not attempted.
+
+### Persistent project cache
+
+Set `REA_GHIDRA_PROJECT_CACHE_DIR` to an absolute private directory to keep the
+analysed Ghidra project instead of re-importing on every open. It applies to MCP
+sessions and CLI commands alike.
+
+- The first open of a target and analysis profile runs one import-and-analysis
+  pass into a staging project. Only after Ghidra reports the save does REA write
+  a `cache.json` manifest and rename the project into
+  `<root>/<target sha256>/<profile digest>/`. A failed or cancelled import
+  leaves no entry. When two first opens race, the first rename wins and the
+  other import is discarded.
+- Every session, including the first, then reopens that project with
+  `-process -noanalysis`. On the 83 KB SimCity 2000 `INSTALL.EXE`, a CLI
+  `function` call took 15 s ephemeral, 18 s on the first cached open and 8–9 s
+  afterwards. On a 3.6 MB arm64 Mach-O it was 157 s ephemeral, 158 s cold and
+  8 s warm.
+- `annotate_native_function` saves the project after each committed edit and
+  reports `scope: "persistent-analysis-database"` and
+  `persists_after_close: true`. Later sessions see the edit without a ledger.
+- The cache key is the target SHA-256 plus the analysis-profile digest, which
+  already commits the Ghidra version, loader, language and raw-image layout. A
+  manifest naming another identity is refused, never reused or overwritten.
+- Ghidra locks a project for one process. A second session on the same entry
+  fails with an `exclusive-lock` resource error naming the entry; close the
+  other session, or unset the variable to run ephemeral sessions side by side.
+- To rebuild an entry, delete its directory. Nothing evicts entries
+  automatically.
+- The cache is ignored, with a session limitation saying so, on Windows P0
+  (no mutation authority) and while analysis extensions are configured
+  (extensions rerun at every start and are not proven idempotent).
+
+The ledger and the cache combine: the cache keeps edits fast to reload, and the
+ledger keeps a reviewable, versionable record that rebuilds them on a fresh or
+deleted entry. Replaying a ledger onto a cached project reapplies the same
+names, which is idempotent.
 
 ## Interface Builder hierarchy coverage
 

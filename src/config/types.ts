@@ -8,6 +8,8 @@ export interface AppConfig {
   readonly ghidraInstallDir: string | undefined;
   readonly ghidraJavaHome: string | undefined;
   readonly ghidraNativeAotJar?: string;
+  /** Private root for persistent analysed Ghidra projects; absent keeps imports ephemeral. */
+  readonly ghidraProjectCacheDir?: string;
   readonly ilspyCmdPath: string | undefined;
   readonly hopperLauncherPath: string;
   readonly hopperTargetPath: string | undefined;

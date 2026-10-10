@@ -44,6 +44,7 @@ import {
   GhidraHeadlessLauncher,
   type GhidraRawImageImport,
 } from "./GhidraLauncher.js";
+import { GhidraProjectCacheBusyError } from "./GhidraProjectCache.js";
 import type { RawImageProfile } from "../domain/rawImage.js";
 import { attestGhidraNativeLoadImage } from "./GhidraLoadImageAttest.js";
 import {
@@ -137,6 +138,11 @@ export const createGhidraProviderClient = (input: {
             "macOS sessions require a matching executable Ghidra native decompiler; REA checks for it but does not build native components or change Gatekeeper quarantine state.",
           ]
         : [];
+  const projectCache = ghidraProjectCachePolicy(
+    config.ghidraProjectCacheDir,
+    installation.platform,
+    extensions.length,
+  );
   const client = clientFactory({
     platform: installation.platform,
     launcher: new GhidraHeadlessLauncher({
@@ -154,6 +160,9 @@ export const createGhidraProviderClient = (input: {
         : {}),
       platform: installation.platform,
       ...(extensions.length === 0 ? {} : { analysisExtensions: extensions }),
+      ...(projectCache.root === undefined
+        ? {}
+        : { projectCache: { root: projectCache.root } }),
     }),
     targetPath:
       installation.platform === "win32"
@@ -178,6 +187,7 @@ export const createGhidraProviderClient = (input: {
           }
         : {}),
     ...(context === undefined ? {} : { runId: context.runId }),
+    ...(projectCache.root === undefined ? {} : { persistentProject: true }),
     logger: logger.child({ layer: "ghidra-bridge" }),
   });
   const checkExtensions = async (
@@ -200,6 +210,7 @@ export const createGhidraProviderClient = (input: {
     ...providerLimitations,
     ...targetLimitations,
     ...ghidraExtensionLimitations(extensions),
+    ...projectCache.limitations,
     ...(releaseLimitation === undefined ? [] : [releaseLimitation]),
   ];
   return {
@@ -359,6 +370,18 @@ const projectSessionError = (
     return new AnalysisInputError(operation, { cause: failure }, [
       { path: ["name"], reason: "invalid_value", message: failure.message },
     ]);
+  if (failure.cause instanceof GhidraProjectCacheBusyError)
+    return new AnalysisResourceConstraintError(
+      operation,
+      "exclusive-lock",
+      failure.message,
+      { project_cache_entry: failure.cause.entryRoot },
+      {
+        cause: failure,
+        remediationAction:
+          "Close the other REA session analysing this target and analysis profile, then retry. To run sessions side by side, unset REA_GHIDRA_PROJECT_CACHE_DIR so each uses an ephemeral project.",
+      },
+    );
   if (failure.kind === "cancelled")
     return new AnalysisCancelledError(operation);
   if (failure.kind === "timeout" || failure.kind === "analysis_timeout")
@@ -435,4 +458,31 @@ const rawImageLimitations = (profile: RawImageProfile): string[] => {
         `${declared} ${profile.blocks.length} declared block(s) map file slices to CPU addresses; the map, permissions and entries are declarations, not observations from the bytes.`,
         "Overlay blocks are separate Ghidra address spaces named after the block, so a banked address reads <block>:0x<offset>; non-overlay blocks use the default space. References from banked code to shared addresses resolve in the default space; which bank a run-time bank switch selects is not modelled. Mirrors and memory-mapped I/O registers are not modelled unless declared as blocks.",
       ];
+};
+
+/** Admit the persistent project cache only where sessions may save edits. */
+const ghidraProjectCachePolicy = (
+  root: string | undefined,
+  platform: NodeJS.Platform,
+  extensionCount: number,
+): { readonly root?: string; readonly limitations: readonly string[] } => {
+  if (root === undefined) return { limitations: [] };
+  if (platform === "win32")
+    return {
+      limitations: [
+        "REA_GHIDRA_PROJECT_CACHE_DIR is ignored: Windows P0 sessions have no mutation authority and always use an ephemeral project.",
+      ],
+    };
+  if (extensionCount > 0)
+    return {
+      limitations: [
+        "REA_GHIDRA_PROJECT_CACHE_DIR is ignored while analysis extensions are configured: extensions rerun at every session start and are not proven idempotent over a saved project.",
+      ],
+    };
+  return {
+    root,
+    limitations: [
+      `Persistent project cache: the first open of a target and analysis profile imports and analyses it under ${root}; later sessions reopen that project without re-analysis, and each annotation is saved to it. One session holds an entry at a time; delete an entry directory to rebuild it.`,
+    ],
+  };
 };

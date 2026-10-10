@@ -24,6 +24,7 @@ import type { GhidraInventoryOperation } from "./GhidraInventoryValues.js";
 import type { GhidraFunctionOperation } from "./GhidraFunctionValues.js";
 import { createGhidraDiagnostics } from "./GhidraDiagnostics.js";
 import type { GhidraLaunch } from "./GhidraLauncher.js";
+import { GhidraProjectCacheBusyError } from "./GhidraProjectCache.js";
 import { GhidraResponseBuffer } from "./GhidraResponseBuffer.js";
 import { GhidraResponseRouter } from "./GhidraResponseRouter.js";
 import { GhidraRequestQueue } from "./GhidraRequestQueue.js";
@@ -47,6 +48,7 @@ import { GhidraWire } from "./GhidraClientWire.js";
 import { completeGhidraStartupHandshake } from "./GhidraClientStartup.js";
 
 const SHUTDOWN_TIMEOUT_MS = 10_000;
+const PERSISTENT_PROJECT_EXIT_GRACE_MS = 30_000;
 const SESSION_ROOT = tmpdir();
 
 export type {
@@ -381,7 +383,7 @@ export class GhidraClient {
     });
     const connected = await this.#connect(endpoint, deadline);
     if (!connected.ok) {
-      const failure = connected.error;
+      const failure = this.#projectLockFailure() ?? connected.error;
       await this.#cleanup();
       return err(failure);
     }
@@ -395,10 +397,32 @@ export class GhidraClient {
       startupTimeoutMs: this.#options.startupTimeoutMs,
     });
     if (completed.ok) {
+      const cached = this.#launch.projectCache;
+      if (cached !== undefined)
+        this.#logger.info(
+          { status: cached.status, entry_root: cached.entryRoot },
+          "Ghidra reopened a persistent analysed project",
+        );
       await this.#lineage.observe(this.#launch);
       this.#requestQueue.reopen();
     }
     return completed;
+  }
+
+  /** Name the cache entry when Ghidra exits because another session holds its lock. */
+  #projectLockFailure(): GhidraSessionError | undefined {
+    const cached = this.#launch?.projectCache;
+    const snapshot = this.#process?.snapshot();
+    if (cached === undefined || snapshot === undefined) return undefined;
+    return /Unable to lock project!/u.test(
+      `${snapshot.stdout.text}\n${snapshot.stderr.text}`,
+    )
+      ? this.#failure(
+          "start",
+          `Ghidra project cache entry is open in another session: ${cached.entryRoot}`,
+          new GhidraProjectCacheBusyError(cached.entryRoot),
+        )
+      : undefined;
   }
 
   async #connect(
@@ -488,7 +512,13 @@ export class GhidraClient {
               this.#failure("process", "Ghidra shutdown request failed", cause),
             ),
           );
-        if (!shutdown.ok || !isGhidraShutdownAcknowledgement(shutdown.value))
+        if (
+          !shutdown.ok ||
+          !isGhidraShutdownAcknowledgement(
+            shutdown.value,
+            this.#options.persistentProject === true,
+          )
+        )
           this.#logger.warn(
             {
               status: shutdown.ok ? "invalid-acknowledgement" : "failed",
@@ -509,7 +539,12 @@ export class GhidraClient {
       socket?.destroy();
       this.#socket = undefined;
       if (this.#process !== undefined) {
-        await this.#process.waitForExit(500);
+        // A persistent project is saved and unlocked only when headless exits.
+        await this.#process.waitForExit(
+          this.#options.persistentProject === true
+            ? PERSISTENT_PROJECT_EXIT_GRACE_MS
+            : 500,
+        );
         this.#processSnapshot = this.#process.snapshot();
         const stopped = await this.#process.stop();
         this.#processSnapshot = this.#process.snapshot();

@@ -33,11 +33,18 @@ export const nativeFunctionAnnotationsSchema = z
       inline_comment: z.string().nullable(),
     }),
     dossier: functionDossierSchema,
-    effects: z.strictObject({
-      scope: z.literal("session-analysis-database"),
-      source_bytes_modified: z.literal(false),
-      persists_after_close: z.literal(false),
-    }),
+    effects: z.union([
+      z.strictObject({
+        scope: z.literal("session-analysis-database"),
+        source_bytes_modified: z.literal(false),
+        persists_after_close: z.literal(false),
+      }),
+      z.strictObject({
+        scope: z.literal("persistent-analysis-database"),
+        source_bytes_modified: z.literal(false),
+        persists_after_close: z.literal(true),
+      }),
+    ]),
   })
   .superRefine((value, context) => {
     if (
