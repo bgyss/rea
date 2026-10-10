@@ -111,11 +111,33 @@ Run Ghidra FID or BSim against operator-supplied databases (pinned by digest). M
 
 Add `bounds`, `enabled`, `focused`, `selected`, `automation_id` (AXIdentifier), `subrole`, and `stable_key` to nodes. Add selector-based targets alongside `path`.
 
+**Status: implemented on `feat/native-ui-selectors`.**
+
+- **Nodes.** Each node reports `subrole`, `identifier`, `description`, `enabled`, `focused`, `selected`, and `bounds` (window-relative points); unsupported attributes are `null`.
+- **Stable keys.** `stable_key` (`uik_` plus 32 hex characters) is derived from the identifier, or role, subrole, title and description, chained through the parent key. Sibling order only breaks ties, and `value` is excluded, so keys survive sibling insertion and value or title changes on identified elements.
+- **Selectors.** Element steps take exactly one of `path` or `selector` (`role`, `subrole`, `identifier`, `title`, `description`, `within`, `index`). A selector resolves against the preceding capture and fails without acting on no match, on ambiguity without `index`, or on a truncated capture. The helper re-checks role, subrole, identifier and title at the resolved path (`element-changed`). Each step records the addressed `target: {path, stable_key}`.
+- **Verified.** `npm run verify:native-ui` (macOS, real AX and Screen Recording) passes against the extended source-owned fixture: identified, disabled and field elements, a selector-driven key entry and click, an unchanged stable key across a title change, and an ambiguous selector refused before acting. There are 26 unit tests.
+- **Not yet.** Selector matching is exact-string only (no regex), and `within` takes one ancestor selector. Path-addressed steps don't re-check identity, so they keep their positional meaning.
+
 ### B15. Pointer, keys, wait_for, expect, checkpoint actions (U3–U5)
 
 **[U][R][D]** · 1 week
 
 The scenario union grows as specified. Pointer actions use CGEvent on macOS and `SendInput` on Windows. Every `expect` records pass, fail, or unknown with the nodes and crops it examined.
+
+**Status: keys, wait_for, expect and checkpoint committed in `9200a9f8` (`feat/native-ui-gestures`). System-wide pointer gestures are implemented on `feat/native-ui-pointer`.**
+
+- **Steps.** `keys` posts chords to the selected process only (CGEvent `postToPid`, US ANSI key codes) and reaches its focused element. `wait_for` polls accessibility-only captures (no screenshots, not budgeted) until a condition passes or times out, keeps one capture, and fails the step on timeout. `expect` records pass, fail or unknown on the preceding capture without capturing or stopping. `checkpoint` is a labelled capture.
+- **Conditions.** Element `exists`, `absent`, `enabled`, `disabled`, `focused` and `selected`; exact `title`, `value` or `description`; and window title. A truncated capture or an unexposed attribute yields `unknown`.
+- **Pointer finding.** Mouse events posted to a process (`postToPid`, any window field or event source, background or foreground) never reached AppKit views, so pointer gestures are system-wide by explicit decision.
+- **Pointer safeguards.** Before posting anything the helper:
+  - raises the selected window (AXRaise) and activates its application;
+  - re-resolves element targets from their live frames and re-checks their identity;
+  - requires every event point (start, each drag step, end) to lie inside the window _and_ an accessibility hit test (`AXUIElementCopyElementAtPosition`) there to return an element of that window.
+
+  A window-list topmost check was rejected because the Dock owns an invisible, click-through full-screen window at layer 20. After the gesture, the cursor is restored to within one point (warping snaps to whole points). The previously active application is not restored.
+
+- **Verified.** `verify:native-ui` passes on macOS with real AX: a shift-drag, double-click and right-click on a custom canvas; a system-wide click on a standard `NSButton` (impossible with process-targeted events); a target under a floating window of the same application refused as `point-occluded` with nothing delivered; and the cursor restored. There are 39 native UI unit tests.
 
 ### B16. `rea-uia` Windows helper and `remote-windows-ui` provider (U7, U10)
 

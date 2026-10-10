@@ -180,6 +180,292 @@ try {
         `Native UI CLI did not preserve the selected scenario: ${JSON.stringify(evidence.error ?? evidence.normalized_result?.steps?.map(({ outcome, reason }) => ({ outcome, reason })))}`,
       );
     scenarioStatus = "selected-AX-button-action-and-CLI-parity-observed";
+
+    // Attribute and selector coverage against fresh, unmodified fixture state.
+    const fresh = await observeNativeUi(target.value, "observe_native_ui", {
+      ...scope,
+      screenshot: false,
+    });
+    if (!fresh.ok) throw fresh.error;
+    const byIdentifier = (snapshot, identifier) =>
+      snapshot?.nodes.find((node) => node.identifier === identifier);
+    const disabledNode = byIdentifier(fresh.value.initial, "rea-disabled");
+    const fieldNode = byIdentifier(fresh.value.initial, "rea-field");
+    const incrementNode = byIdentifier(fresh.value.initial, "rea-increment");
+    if (
+      disabledNode?.enabled !== false ||
+      incrementNode?.enabled !== true ||
+      fieldNode === undefined ||
+      incrementNode.bounds === null ||
+      incrementNode.bounds.width <= 0 ||
+      incrementNode.bounds.height <= 0 ||
+      !/^uik_[a-f0-9]{32}$/u.test(incrementNode.stable_key)
+    )
+      throw new Error(
+        `Native UI attributes were not reported: ${JSON.stringify({ disabledNode, incrementNode, fieldNode })}`,
+      );
+    const selected = await observeNativeUi(
+      target.value,
+      "capture_native_ui_scenario",
+      {
+        ...scope,
+        screenshot: false,
+        steps: [
+          {
+            kind: "key-entry",
+            selector: { identifier: "rea-field" },
+            text: "typed by selector",
+          },
+          { kind: "click", selector: { identifier: "rea-increment" } },
+          { kind: "wait", milliseconds: 200 },
+        ],
+      },
+    );
+    if (!selected.ok) throw selected.error;
+    const final = selected.value.steps.at(-1)?.after;
+    const clicked = selected.value.steps[1];
+    if (
+      selected.value.steps.some((step) => step.outcome !== "completed") ||
+      byIdentifier(final, "rea-field")?.value !== "typed by selector" ||
+      byIdentifier(final, "rea-increment")?.title !==
+        "REA fixture incremented" ||
+      clicked?.target?.stable_key !==
+        byIdentifier(selected.value.initial, "rea-increment")?.stable_key ||
+      byIdentifier(final, "rea-increment")?.stable_key !==
+        clicked.target.stable_key
+    )
+      throw new Error(
+        `Selector scenario failed: ${JSON.stringify(selected.value.steps.map(({ outcome, reason, target }) => ({ outcome, reason, target })))}`,
+      );
+    const ambiguous = await observeNativeUi(
+      target.value,
+      "capture_native_ui_scenario",
+      {
+        ...scope,
+        screenshot: false,
+        steps: [{ kind: "click", selector: { role: "AXButton" } }],
+      },
+    );
+    if (
+      !ambiguous.ok ||
+      ambiguous.value.steps[0]?.outcome !== "failed" ||
+      !ambiguous.value.steps[0]?.reason?.includes("Selector is ambiguous")
+    )
+      throw new Error("Real ambiguous selector was not refused before acting");
+    scenarioStatus =
+      "selected-AX-button-action-CLI-parity-selectors-and-attributes-observed";
+
+    // Process-targeted keys, conditions and checkpoints.
+    const scenarioSteps = await observeNativeUi(
+      target.value,
+      "capture_native_ui_scenario",
+      {
+        ...scope,
+        screenshot: false,
+        steps: [
+          {
+            kind: "keys",
+            keys: [
+              { key: "a" },
+              { key: "b" },
+              { key: "s", modifiers: ["command"] },
+            ],
+          },
+          { kind: "checkpoint", name: "after-keys" },
+          { kind: "click", selector: { identifier: "rea-later" } },
+          {
+            kind: "wait_for",
+            condition: {
+              selector: { identifier: "rea-later" },
+              attribute: "title",
+              equals: "REA fixture finished later",
+            },
+            timeout_ms: 5000,
+            poll_ms: 100,
+          },
+          {
+            kind: "expect",
+            condition: {
+              selector: { identifier: "rea-disabled" },
+              state: "disabled",
+            },
+          },
+          {
+            kind: "expect",
+            condition: {
+              selector: { identifier: "rea-disabled" },
+              state: "enabled",
+            },
+          },
+        ],
+      },
+    );
+    if (!scenarioSteps.ok) throw scenarioSteps.error;
+    const steps = scenarioSteps.value.steps;
+    const keyLog = byIdentifier(steps[1]?.after, "rea-canvas")?.value ?? "";
+    const waited = steps[3];
+    if (
+      steps.some((step) => step.outcome !== "completed") ||
+      !keyLog.endsWith("key:a key:b key:cmd+s") ||
+      steps[1]?.label !== "after-keys" ||
+      waited?.assertion?.status !== "pass" ||
+      byIdentifier(waited?.after, "rea-later")?.title !==
+        "REA fixture finished later" ||
+      steps[4]?.assertion?.status !== "pass" ||
+      steps[5]?.assertion?.status !== "fail" ||
+      steps[5]?.after !== null
+    )
+      throw new Error(
+        `Keys and conditions scenario failed: ${JSON.stringify({
+          keyLog,
+          steps: steps.map(({ kind, outcome, reason, assertion, label }) => ({
+            kind,
+            outcome,
+            reason,
+            assertion,
+            label,
+          })),
+        })}`,
+      );
+    const timeout = await observeNativeUi(
+      target.value,
+      "capture_native_ui_scenario",
+      {
+        ...scope,
+        screenshot: false,
+        steps: [
+          {
+            kind: "wait_for",
+            condition: {
+              selector: { identifier: "rea-missing" },
+              state: "exists",
+            },
+            timeout_ms: 300,
+          },
+        ],
+      },
+    );
+    if (
+      !timeout.ok ||
+      timeout.value.steps[0]?.outcome !== "failed" ||
+      timeout.value.steps[0]?.assertion?.status !== "fail"
+    )
+      throw new Error(
+        "wait_for timeout did not fail the step with its verdict",
+      );
+    scenarioStatus =
+      "selectors-attributes-keys-conditions-and-checkpoints-observed";
+
+    // System-wide pointer gestures: raise, topmost check, HID events, cursor restore.
+    const cursor = async () => {
+      const { stdout } = await promisify(execFile)("/usr/bin/swift", [
+        "-e",
+        "import CoreGraphics; let p = CGEvent(source: nil)!.location; print(p.x, p.y)",
+      ]);
+      return stdout.trim();
+    };
+    const cursorBefore = await cursor();
+    const canvas = { identifier: "rea-canvas" };
+    const pointerScenario = await observeNativeUi(
+      target.value,
+      "capture_native_ui_scenario",
+      {
+        ...scope,
+        screenshot: false,
+        steps: [
+          {
+            kind: "pointer",
+            gesture: "drag",
+            at: { selector: canvas, offset: { x: 20, y: 20 } },
+            to: { selector: canvas, offset: { x: 180, y: 80 } },
+            modifiers: ["shift"],
+            duration_ms: 240,
+          },
+          {
+            kind: "pointer",
+            gesture: "double_click",
+            at: { selector: canvas, offset: { x: 60, y: 40 } },
+          },
+          {
+            kind: "pointer",
+            gesture: "right_click",
+            at: { selector: canvas, offset: { x: 60, y: 40 } },
+          },
+          {
+            kind: "pointer",
+            gesture: "click",
+            at: { selector: { identifier: "rea-counter" } },
+          },
+        ],
+      },
+    );
+    if (!pointerScenario.ok) throw pointerScenario.error;
+    const pointerSteps = pointerScenario.value.steps;
+    const dragLog =
+      byIdentifier(pointerSteps[0]?.after, "rea-canvas")?.value ?? "";
+    if (
+      pointerSteps.some((step) => step.outcome !== "completed") ||
+      !/down\+shift@20,20x1 drag\+shift@\d+,\d+x\d+ up\+shift@180,80x1$/u.test(
+        dragLog,
+      ) ||
+      !/down@60,40x2/u.test(
+        byIdentifier(pointerSteps[1]?.after, "rea-canvas")?.value ?? "",
+      ) ||
+      !/right@60,40/u.test(
+        byIdentifier(pointerSteps[2]?.after, "rea-canvas")?.value ?? "",
+      ) ||
+      byIdentifier(pointerSteps[3]?.after, "rea-counter")?.title !==
+        "Pointer clicks: 1"
+    )
+      throw new Error(
+        `Pointer scenario failed: ${JSON.stringify({
+          dragLog,
+          steps: pointerSteps.map(({ kind, outcome, reason }) => ({
+            kind,
+            outcome,
+            reason,
+          })),
+        })}`,
+      );
+    const beforeOccluded = byIdentifier(
+      pointerSteps[3]?.after,
+      "rea-canvas",
+    )?.value;
+    const occluded = await observeNativeUi(
+      target.value,
+      "capture_native_ui_scenario",
+      {
+        ...scope,
+        screenshot: false,
+        steps: [
+          {
+            kind: "pointer",
+            gesture: "click",
+            at: { selector: canvas, offset: { x: 250, y: 50 } },
+          },
+        ],
+      },
+    );
+    if (
+      !occluded.ok ||
+      occluded.value.steps[0]?.outcome !== "failed" ||
+      !occluded.value.steps[0]?.reason?.includes("point-occluded") ||
+      byIdentifier(occluded.value.initial, "rea-canvas")?.value !==
+        beforeOccluded
+    )
+      throw new Error(
+        `Occluded pointer target was not refused: ${JSON.stringify(occluded.ok ? occluded.value.steps : occluded.error.message)}`,
+      );
+    const cursorAfter = await cursor();
+    // Cursor warping snaps fractional positions to whole points.
+    const [bx, by] = cursorBefore.split(" ").map(Number);
+    const [ax, ay] = cursorAfter.split(" ").map(Number);
+    if (Math.abs(ax - bx) > 1 || Math.abs(ay - by) > 1)
+      throw new Error(
+        `Cursor was not restored: ${cursorBefore} -> ${cursorAfter}`,
+      );
+    scenarioStatus =
+      "selectors-attributes-keys-conditions-checkpoints-and-system-wide-pointer-observed";
   }
   const mismatch = await observeNativeUi(
     { ...target.value, sha256: "0".repeat(64) },

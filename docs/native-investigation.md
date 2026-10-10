@@ -232,9 +232,65 @@ capture or automatic permission prompts. Executable bytes and process launch
 time guard against a different target or PID reuse. AX selection requires one
 unique geometry match; ambiguity fails closed.
 
-`capture_native_ui_scenario` takes AX child-index paths for press, increment/
-decrement scrolling and text-value entry, or bounded waits. No global event
-injection is used. Unsupported AX actions fail explicitly. The result preserves
+Each captured node reports role, subrole, identifier (AXIdentifier), title,
+description, value, enabled, focused, selected, its frame relative to the
+window, available actions and child count. An attribute the element does not
+expose is `null`, never a guessed default. Each node also carries a REA-derived
+`stable_key`: a digest of its identifier (or role, subrole, title and
+description) chained through its parent's key, with sibling order used only to
+separate otherwise identical siblings. Keys survive sibling insertion and value
+or title changes on identified elements, so captures can be compared node by
+node.
+
+`capture_native_ui_scenario` targets each press, increment/decrement scroll or
+text-value entry with exactly one of an AX child-index `path` or a `selector`
+(`role`, `subrole`, `identifier`, `title`, `description`, an optional `within`
+ancestor selector and an optional `index`), or runs a bounded wait. A selector
+resolves against the capture taken just before the step and fails without
+acting when it matches nothing, matches several elements without `index`, or
+the capture is truncated (uniqueness would be unknown). The helper then
+re-checks the element's role, subrole, identifier and title at the resolved
+path and fails if the UI changed in between. Each step records the addressed
+`path` and `stable_key`. These accessibility actions use no global events.
+
+Scenarios also accept:
+
+- `keys`: ordered chords (`key` plus optional `modifiers` and `hold_ms`) posted
+  only to the selected process (CGEvent `postToPid`) and delivered to its
+  focused element. Keys use US ANSI virtual key codes, so the produced
+  characters depend on the active keyboard layout. Use `key-entry` to set text
+  independent of layout.
+- `wait_for`: polls accessibility-only captures (no screenshots, not retained)
+  every `poll_ms` until a condition passes or `timeout_ms` expires, then keeps
+  one capture. A timeout fails the step and stops the scenario.
+- `expect`: evaluates a condition on the preceding capture and records `pass`,
+  `fail` or `unknown` without capturing or stopping the scenario.
+- `checkpoint`: a named capture, reported as the step's `label`.
+
+Conditions test an element selector's state (`exists`, `absent`, `enabled`,
+`disabled`, `focused`, `selected`), an element attribute (`title`, `value`,
+`description`) for exact equality, or the window title. Element states other
+than `exists` and `absent` need a single element (a unique match or `index`).
+A truncated capture makes a missing element `unknown`, and an attribute the
+element does not expose is `unknown`; neither is guessed as pass or fail.
+
+- `pointer`: `click`, `double_click`, `right_click` or `drag` (with `to` and
+  `duration_ms`), optional `modifiers`, targeted at an element (`path` or
+  `selector`, plus an optional `offset` from its top-left corner, default its
+  centre) or a `window_point`.
+
+Pointer gestures are system-wide. Mouse events posted to a single process are
+not delivered to AppKit windows, so REA moves the real cursor and posts
+HID-level events. To keep those events on the selected window it first raises
+the window and activates its application, re-reads element frames, and checks
+every event point (start, each drag step, end): the point must lie inside the
+selected window and an accessibility hit test there must return an element of
+that window. A point under the menu bar, the Dock, another application or
+another window of the same application fails the step with `point-occluded`
+before anything is posted. The cursor is restored afterwards to within one
+point. The previously active application is not restored, and user input during
+a gesture can interleave with it, so run pointer scenarios on an idle desktop
+or in a VM. Unsupported AX actions fail explicitly. The result preserves
 ordered before/after captures and gaps; an action may have occurred before a
 post-action capture fails. Application state is left as-is; REA does not attempt
 to restore it.

@@ -31,6 +31,27 @@ const snapshot = {
   truncated: false,
 };
 
+/** Helper-shaped accessibility node with every attribute explicitly reported. */
+const node = (
+  path: number[],
+  attributes: Readonly<Record<string, unknown>> = {},
+) => ({
+  path,
+  role: "AXButton",
+  subrole: null,
+  identifier: null,
+  title: null,
+  description: null,
+  value: null,
+  enabled: true,
+  focused: false,
+  selected: null,
+  bounds: { x: 0, y: 0, width: 10, height: 10 },
+  actions: ["AXPress"],
+  children_count: 0,
+  ...attributes,
+});
+
 const validPng = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jv4sAAAAASUVORK5CYII=",
   "base64",
@@ -115,14 +136,7 @@ describe("native UI screenshot validation", () => {
     const partial = {
       ...snapshot,
       nodes: [
-        {
-          path: [],
-          role: "AXWindow",
-          title: "Fixture",
-          value: null,
-          actions: [],
-          children_count: null,
-        },
+        node([], { role: "AXWindow", title: "Fixture", children_count: null }),
       ],
       truncated: true,
       gaps: ["AX child count unavailable at path []: AXError -25204"],
@@ -360,5 +374,415 @@ describe("native UI target and cancellation failures", () => {
       }),
     });
     expect(replaced.ok).toBe(false);
+  });
+});
+
+const window = node([], {
+  role: "AXWindow",
+  title: "Fixture",
+  actions: [],
+  children_count: 4,
+});
+const toolbar = node([0], {
+  role: "AXToolbar",
+  actions: [],
+  children_count: 2,
+});
+const saveInToolbar = node([0, 0], {
+  title: "Save",
+  identifier: "save-toolbar",
+});
+const okButton = node([1], { title: "OK" });
+const cancelButton = node([2], { title: "Cancel" });
+const secondOk = node([3], { title: "OK" });
+const tree = (nodes: unknown[], truncated = false) => ({
+  ...snapshot,
+  nodes,
+  truncated,
+});
+const scenario = async (
+  steps: unknown[],
+  captured: unknown,
+  accessibility = true,
+) => {
+  const calls: Readonly<Record<string, unknown>>[] = [];
+  const result = await observeNativeUi(
+    target,
+    "capture_native_ui_scenario",
+    { ...scope, accessibility, steps },
+    {
+      invoke: async (parameters) => {
+        calls.push(parameters);
+        return { ok: true, result: captured };
+      },
+    },
+  );
+  return { calls, result };
+};
+
+describe("native UI selectors and stable keys", () => {
+  it("keys nodes by identity so sibling insertion and value changes keep them", async () => {
+    const observe = async (nodes: unknown[]) => {
+      const result = await observeNativeUi(
+        target,
+        "observe_native_ui",
+        { ...scope, accessibility: true },
+        { invoke: async () => ({ ok: true, result: tree(nodes) }) },
+      );
+      if (!result.ok) throw result.error;
+      return result.value.initial.nodes.map((captured) => captured.stable_key);
+    };
+    const before = await observe([window, okButton, cancelButton]);
+    const after = await observe([
+      window,
+      node([1], { role: "AXStaticText", title: "Inserted" }),
+      node([2], { title: "OK", value: "changed" }),
+      node([3], { title: "Cancel" }),
+    ]);
+    expect(new Set(before).size).toBe(3);
+    expect(after[2]).toBe(before[1]);
+    expect(after[3]).toBe(before[2]);
+    expect(after[0]).toBe(before[0]);
+  });
+
+  it("resolves a selector against the preceding capture and pins the element identity", async () => {
+    const { calls, result } = await scenario(
+      [{ kind: "click", selector: { role: "AXButton", title: "Cancel" } }],
+      tree([window, okButton, cancelButton]),
+    );
+    expect(calls[1]).toMatchObject({
+      action: {
+        kind: "click",
+        path: [2],
+        expect: {
+          role: "AXButton",
+          subrole: null,
+          identifier: null,
+          title: "Cancel",
+        },
+      },
+    });
+    if (!result.ok) throw result.error;
+    const [step] = result.value.steps;
+    expect(step?.outcome).toBe("completed");
+    expect(step?.target).toEqual({
+      path: [2],
+      stable_key: result.value.initial.nodes[2]?.stable_key,
+    });
+  });
+
+  it("narrows a selector by ancestor and by index", async () => {
+    const { calls } = await scenario(
+      [
+        {
+          kind: "click",
+          selector: { title: "Save", within: { role: "AXToolbar" } },
+        },
+        { kind: "click", selector: { title: "OK", index: 1 } },
+      ],
+      tree([window, toolbar, saveInToolbar, okButton, secondOk]),
+    );
+    expect(calls[1]).toMatchObject({ action: { path: [0, 0] } });
+    expect(calls[2]).toMatchObject({ action: { path: [3] } });
+  });
+});
+
+describe("native UI selector refusals", () => {
+  it.each([
+    [
+      "an ambiguous selector",
+      { title: "OK" },
+      tree([window, okButton, secondOk]),
+      "Selector is ambiguous: 2 elements match",
+    ],
+    [
+      "a selector without a match",
+      { identifier: "missing" },
+      tree([window, okButton]),
+      "No captured element matches the selector",
+    ],
+    [
+      "a selector on a truncated capture",
+      { title: "OK" },
+      tree([window, okButton], true),
+      "selector uniqueness is unknown",
+    ],
+  ])("fails %s without acting", async (_name, selector, captured, reason) => {
+    const { calls, result } = await scenario(
+      [{ kind: "click", selector }],
+      captured,
+    );
+    expect(calls).toHaveLength(1);
+    if (!result.ok) throw result.error;
+    expect(result.value.steps).toMatchObject([
+      { index: 0, target: null, outcome: "failed", after: null },
+    ]);
+    expect(result.value.steps[0]?.reason).toContain(reason);
+  });
+
+  it.each([
+    [
+      "both path and selector",
+      [{ kind: "click", path: [1], selector: { title: "OK" } }],
+      true,
+    ],
+    ["neither path nor selector", [{ kind: "click" }], true],
+    ["an empty selector", [{ kind: "click", selector: {} }], true],
+    [
+      "a selector without accessibility",
+      [{ kind: "click", selector: { title: "OK" } }],
+      false,
+    ],
+  ])("rejects %s before capturing", async (_name, steps, accessibility) => {
+    const { calls, result } = await scenario(
+      steps,
+      tree([window, okButton]),
+      accessibility,
+    );
+    expect(result.ok).toBe(false);
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe("native UI keys, conditions and checkpoints", () => {
+  const titled = (title: string) =>
+    tree([window, node([1], { identifier: "status", title })]);
+  /** Fake helper returning queued captures, then repeating the last one. */
+  const scripted = (...captures: unknown[]) => {
+    const calls: Readonly<Record<string, unknown>>[] = [];
+    const invoke = async (parameters: Readonly<Record<string, unknown>>) => {
+      calls.push(parameters);
+      const next = captures[Math.min(calls.length - 1, captures.length - 1)];
+      return { ok: true, result: next };
+    };
+    return { calls, invoke };
+  };
+  const run = (steps: unknown[], helper: ReturnType<typeof scripted>) =>
+    observeNativeUi(
+      target,
+      "capture_native_ui_scenario",
+      { ...scope, accessibility: true, steps },
+      { invoke: helper.invoke },
+    );
+
+  it("sends key chords with their modifiers and records a checkpoint label", async () => {
+    const helper = scripted(titled("idle"));
+    const result = await run(
+      [
+        { kind: "keys", keys: [{ key: "s", modifiers: ["command"] }] },
+        { kind: "checkpoint", name: "saved" },
+      ],
+      helper,
+    );
+    if (!result.ok) throw result.error;
+    expect(helper.calls[1]).toMatchObject({
+      action: {
+        kind: "keys",
+        keys: [{ key: "s", modifiers: ["command"], hold_ms: 0 }],
+      },
+    });
+    expect(helper.calls).toHaveLength(3);
+    expect(result.value.steps[1]).toMatchObject({
+      kind: "checkpoint",
+      label: "saved",
+      outcome: "completed",
+    });
+  });
+
+  it("evaluates expect on the preceding capture without capturing or stopping", async () => {
+    const helper = scripted(titled("idle"));
+    const result = await run(
+      [
+        {
+          kind: "expect",
+          condition: {
+            selector: { identifier: "status" },
+            attribute: "title",
+            equals: "done",
+          },
+        },
+        { kind: "checkpoint", name: "still-running" },
+      ],
+      helper,
+    );
+    if (!result.ok) throw result.error;
+    expect(result.value.steps[0]).toMatchObject({
+      outcome: "completed",
+      after: null,
+      assertion: { status: "fail", detail: 'title is "idle"' },
+    });
+    expect(result.value.steps[1]).toMatchObject({ outcome: "completed" });
+    expect(helper.calls).toHaveLength(2);
+  });
+
+  it("polls without screenshots until the condition passes, then keeps one capture", async () => {
+    const helper = scripted(
+      titled("idle"),
+      titled("busy"),
+      titled("done"),
+      titled("done"),
+    );
+    const result = await run(
+      [
+        {
+          kind: "wait_for",
+          condition: {
+            selector: { identifier: "status" },
+            attribute: "title",
+            equals: "done",
+          },
+          timeout_ms: 5_000,
+          poll_ms: 50,
+        },
+      ],
+      helper,
+    );
+    if (!result.ok) throw result.error;
+    expect(helper.calls.slice(1, 3).map((call) => call["screenshot"])).toEqual([
+      false,
+      false,
+    ]);
+    expect(helper.calls[3]?.["screenshot"]).toBe(scope.screenshot);
+    expect(result.value.steps[0]).toMatchObject({
+      outcome: "completed",
+      assertion: { status: "pass" },
+    });
+  });
+
+  it("fails a wait_for that times out and stops the scenario", async () => {
+    const helper = scripted(titled("idle"));
+    const result = await run(
+      [
+        {
+          kind: "wait_for",
+          condition: { window_title: "Never" },
+          timeout_ms: 120,
+          poll_ms: 50,
+        },
+        { kind: "checkpoint", name: "unreached" },
+      ],
+      helper,
+    );
+    if (!result.ok) throw result.error;
+    expect(result.value.steps).toHaveLength(1);
+    expect(result.value.steps[0]).toMatchObject({
+      outcome: "failed",
+      assertion: { status: "fail" },
+      reason: expect.stringContaining("Condition not met within 120 ms"),
+    });
+  });
+
+  it.each([
+    [
+      "an element condition without accessibility",
+      [
+        {
+          kind: "expect",
+          condition: { selector: { title: "OK" }, state: "exists" },
+        },
+      ],
+    ],
+    ["an unknown key", [{ kind: "keys", keys: [{ key: "hyper" }] }]],
+    ["an empty chord list", [{ kind: "keys", keys: [] }]],
+  ])("rejects %s before capturing", async (_name, steps) => {
+    const helper = scripted(titled("idle"));
+    const result = await observeNativeUi(
+      target,
+      "capture_native_ui_scenario",
+      { ...scope, accessibility: false, screenshot: true, steps },
+      { invoke: helper.invoke },
+    );
+    expect(result.ok).toBe(false);
+    expect(helper.calls).toHaveLength(0);
+  });
+});
+
+describe("native UI pointer requests", () => {
+  const canvasNode = node([1], {
+    role: "AXGroup",
+    identifier: "canvas",
+    bounds: { x: 30, y: 50, width: 200, height: 100 },
+  });
+  const pointerTree = tree([window, canvasNode]);
+  const run = async (steps: unknown[]) => {
+    const calls: Readonly<Record<string, unknown>>[] = [];
+    const result = await observeNativeUi(
+      target,
+      "capture_native_ui_scenario",
+      { ...scope, accessibility: true, steps },
+      {
+        invoke: async (parameters) => {
+          calls.push(parameters);
+          return { ok: true, result: pointerTree };
+        },
+      },
+    );
+    return { calls, result };
+  };
+
+  it("sends both drag endpoints with pinned identities, offsets and modifiers", async () => {
+    const { calls, result } = await run([
+      {
+        kind: "pointer",
+        gesture: "drag",
+        at: { selector: { identifier: "canvas" }, offset: { x: 5, y: 6 } },
+        to: { window_point: { x: 100, y: 120 } },
+        modifiers: ["shift"],
+      },
+    ]);
+    if (!result.ok) throw result.error;
+    expect(calls[1]).toMatchObject({
+      action: {
+        kind: "pointer",
+        gesture: "drag",
+        at: {
+          path: [1],
+          offset: { x: 5, y: 6 },
+          expect: { role: "AXGroup", identifier: "canvas" },
+        },
+        to: { window_point: { x: 100, y: 120 } },
+        modifiers: ["shift"],
+        duration_ms: 200,
+      },
+    });
+    expect(result.value.steps[0]?.target).toEqual({
+      path: [1],
+      stable_key: result.value.initial.nodes[1]?.stable_key,
+    });
+  });
+
+  it("records no element target for a window point", async () => {
+    const { result } = await run([
+      {
+        kind: "pointer",
+        gesture: "click",
+        at: { window_point: { x: 10, y: 10 } },
+      },
+    ]);
+    if (!result.ok) throw result.error;
+    expect(result.value.steps[0]?.target).toBeNull();
+  });
+
+  it.each([
+    ["a drag without to", { gesture: "drag", at: { path: [1] } }],
+    [
+      "to on a click",
+      { gesture: "click", at: { path: [1] }, to: { path: [1] } },
+    ],
+    [
+      "an offset on a window point",
+      {
+        gesture: "click",
+        at: { window_point: { x: 1, y: 1 }, offset: { x: 1, y: 1 } },
+      },
+    ],
+    [
+      "two point addresses",
+      { gesture: "click", at: { path: [1], window_point: { x: 1, y: 1 } } },
+    ],
+  ])("rejects %s before capturing", async (_name, step) => {
+    const { calls, result } = await run([{ kind: "pointer", ...step }]);
+    expect(result.ok).toBe(false);
+    expect(calls).toHaveLength(0);
   });
 });
