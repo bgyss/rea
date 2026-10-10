@@ -18,6 +18,11 @@ import type { ProcessCapture } from "../domain/process/processCapture.js";
 import { AnalysisInputError } from "../domain/analysisErrorCore.js";
 import { resolveExecutableFormatHint } from "../domain/dosCom.js";
 import { err, ok, type Result } from "../domain/result.js";
+import {
+  AnnotationLedgerBinding,
+  replayAnnotationLedger,
+} from "../application/AnnotationLedger.js";
+import type { AnnotationLedgerReplay } from "../domain/annotationLedger.js";
 import type { Logger } from "../logger.js";
 import { mcpProgressReporter } from "./mcpProgress.js";
 import { registerArtifactComparisonTool } from "./registerArtifactComparisonTool.js";
@@ -138,6 +143,7 @@ export interface LifecycleToolRegistration {
   readonly statusContract: ReturnType<typeof toolContract<"binary_session">>;
   readonly startedAt: string;
   readonly availabilityPolicy: () => SessionAvailability;
+  readonly annotationLedger: AnnotationLedgerBinding;
 }
 
 const registerLifecycleTools = (
@@ -161,6 +167,7 @@ const registerOpenLifecycleTool = ({
   session,
   logger,
   openContract,
+  annotationLedger,
 }: LifecycleToolRegistration): void => {
   server.registerTool(
     openContract.name,
@@ -201,11 +208,24 @@ const registerOpenLifecycleTool = ({
           ...(snapshot === undefined ? {} : { snapshot }),
         }),
       );
+      if (!opened.ok) {
+        annotationLedger.clear();
+        return toCallToolResult(opened, openContract);
+      }
+      const ledger = await bindAnnotationLedger(
+        annotationLedger,
+        session,
+        opened.value.sha256,
+        input.annotation_ledger_path,
+        context.mcpReq.signal,
+      );
+      if (!ledger.ok) return toCallToolResult(ledger, openContract);
       return opened.ok
         ? toCallToolResult(
             {
               ok: true,
               value: {
+                annotation_ledger: ledger.value,
                 path: opened.value.path,
                 format: opened.value.format,
                 kind: opened.value.kind,
@@ -227,6 +247,8 @@ const registerOpenLifecycleTool = ({
 export interface SessionToolOptions {
   readonly startedAt?: string;
   readonly availabilityPolicy?: () => SessionAvailability;
+  /** Shared with annotate_native_function so edits append to the bound ledger. */
+  readonly annotationLedger?: AnnotationLedgerBinding;
 }
 
 const registerContextTools = (
@@ -282,6 +304,7 @@ export const registerSessionTools = (
     closeContract,
     statusContract,
     startedAt: options.startedAt ?? new Date().toISOString(),
+    annotationLedger: options.annotationLedger ?? new AnnotationLedgerBinding(),
     availabilityPolicy: sessionAvailabilityPolicy(
       options.availabilityPolicy,
       {},
@@ -307,4 +330,28 @@ export const registerSessionTools = (
   registerInvestigationTools(server, session);
   registerUnknownTools({ server, session });
   registerContextTools(server, session);
+};
+
+/**
+ * Bind the opened target to its ledger and replay matching entries, or clear
+ * the binding when the caller did not name a ledger for this target.
+ */
+const bindAnnotationLedger = async (
+  binding: AnnotationLedgerBinding,
+  session: BinarySessionPort,
+  targetSha256: string,
+  path: string | undefined,
+  signal: AbortSignal,
+): Promise<Result<AnnotationLedgerReplay | null, AnalysisError>> => {
+  if (path === undefined) {
+    binding.clear();
+    return ok(null);
+  }
+  const target = {
+    path,
+    targetSha256,
+    profileDigest: session.analysisProfile()?.digest ?? null,
+  };
+  binding.bind(target);
+  return replayAnnotationLedger(session, target, { signal });
 };

@@ -6,6 +6,7 @@ import { logCliCommand } from "../cliLogging.js";
 import type { Logger } from "../logger.js";
 import {
   directAnalysisOptions,
+  annotationLedgerOptions,
   formatSelectionOptions,
   providerSelectionOption,
 } from "./options.js";
@@ -23,6 +24,7 @@ export const registerCoreNativeCommands = (
     args: z.object({ path: z.string().describe("Local executable path") }),
     options: z.object({
       ...formatSelectionOptions,
+      ...annotationLedgerOptions,
       provider: providerSelectionOption,
     }),
     run: ({ args, options }) =>
@@ -49,6 +51,7 @@ export const registerCoreNativeCommands = (
         .default(256)
         .describe("Requested byte count"),
       ...formatSelectionOptions,
+      ...annotationLedgerOptions,
       provider: providerSelectionOption,
     }),
     run: ({ args, options }) =>
@@ -69,6 +72,7 @@ export const registerCoreNativeCommands = (
     }),
     options: z.object({
       ...formatSelectionOptions,
+      ...annotationLedgerOptions,
       provider: providerSelectionOption,
     }),
     run: ({ args, options }) =>
@@ -139,6 +143,7 @@ export const registerCoreNativeCommands = (
         .default(1000)
         .describe("Maximum nodes on this page"),
       ...formatSelectionOptions,
+      ...annotationLedgerOptions,
       provider: providerSelectionOption,
     }),
     alias: {
@@ -176,6 +181,7 @@ export const registerCoreNativeCommands = (
       type: z.string().optional().describe("Exact database type category path"),
       address: z.string().describe("Exact native address").optional(),
       ...formatSelectionOptions,
+      ...annotationLedgerOptions,
       provider: providerSelectionOption,
     }),
     run: ({ args, options }) =>
@@ -208,6 +214,7 @@ export const registerCoreNativeCommands = (
       }),
       options: z.object({
         ...formatSelectionOptions,
+        ...annotationLedgerOptions,
         provider: providerSelectionOption,
       }),
       run: ({ args, options }) =>
@@ -249,6 +256,7 @@ const registerNativeDispatchMetadataCommand = (
         .optional()
         .describe("Load or update the local analysis snapshot"),
       ...formatSelectionOptions,
+      ...annotationLedgerOptions,
       provider: providerSelectionOption,
     }),
     alias: { maxRecords: "max-records" },
@@ -308,6 +316,7 @@ const registerNativeUiActionCommand = (
         .default(500)
         .describe("Maximum returned graph edges"),
       ...formatSelectionOptions,
+      ...annotationLedgerOptions,
       provider: providerSelectionOption,
     }),
     alias: {
@@ -346,6 +355,7 @@ const registerNativeApiCommand = (cli: CliInstance, logger: Logger): void => {
         .optional()
         .describe("Load and update a local analysis snapshot"),
       ...formatSelectionOptions,
+      ...annotationLedgerOptions,
       provider: providerSelectionOption,
     }),
     run: ({ args, options }) =>
@@ -385,6 +395,7 @@ const registerAnnotationCommand = (cli: CliInstance, logger: Logger): void => {
         .optional()
         .describe("Inline entry comment; empty text clears it"),
       ...formatSelectionOptions,
+      ...annotationLedgerOptions,
       provider: providerSelectionOption,
     }),
     run: ({ args, options }) =>

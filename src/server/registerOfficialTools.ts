@@ -1,3 +1,7 @@
+import {
+  AnnotationLedgerBinding,
+  appendAnnotationFromEvidence,
+} from "../application/AnnotationLedger.js";
 import type { EvidenceWriter } from "../application/investigation/InvestigationRecordPort.js";
 import type { McpServer, ServerContext } from "@modelcontextprotocol/server";
 import { z } from "zod";
@@ -11,13 +15,13 @@ import type { ToolContract } from "../contracts/toolContracts.js";
 import { OFFICIAL_TOOL_CONTRACTS } from "../contracts/officialToolContracts.js";
 import type { BinaryTarget } from "../domain/binaryTarget.js";
 import type { AnalysisError } from "../domain/analysisErrorBase.js";
-import { createEvidence } from "../domain/evidence.js";
+import { createEvidence, type Evidence } from "../domain/evidence.js";
 import {
   jsonObjectSchema,
   jsonValueSchema,
   type JsonValue,
 } from "../domain/jsonValue.js";
-import type { Result } from "../domain/result.js";
+import { ok, type Result } from "../domain/result.js";
 import type { Logger } from "../logger.js";
 import { mcpProgressReporter } from "./mcpProgress.js";
 import { logToolExecution } from "./toolLogging.js";
@@ -29,6 +33,8 @@ export interface OfficialToolRegistration {
   readonly logger: Logger;
   readonly activeTarget: (() => BinaryTarget | undefined) | undefined;
   readonly recordEvidence: EvidenceWriter["recordEvidence"] | undefined;
+  /** Ledger bound by open_binary; annotate_native_function appends to it. */
+  readonly annotationLedger?: AnnotationLedgerBinding;
 }
 
 /** Register direct bridge proxies, preserving MCP cancellation and typed errors. */
@@ -42,6 +48,9 @@ export const registerOfficialTools = (
       logger: options.logger,
       activeTarget: options.activeTarget,
       recordEvidence: options.recordEvidence,
+      ...(options.annotationLedger === undefined
+        ? {}
+        : { annotationLedger: options.annotationLedger }),
     });
   }
 };
@@ -54,6 +63,7 @@ const registerOfficialTool = (
     readonly logger: Logger;
     readonly activeTarget: (() => BinaryTarget | undefined) | undefined;
     readonly recordEvidence: EvidenceWriter["recordEvidence"] | undefined;
+    readonly annotationLedger?: AnnotationLedgerBinding;
   },
 ): void => {
   server.registerTool(
@@ -93,6 +103,15 @@ const registerOfficialTool = (
       const recorded = registration.recordEvidence?.(evidence);
       if (recorded !== undefined && !recorded.ok)
         return toCallToolResult(recorded, contract);
+      if (contract.name === "annotate_native_function") {
+        const appended = await recordAnnotation(
+          registration.annotationLedger,
+          registration.activeTarget?.(),
+          arguments_,
+          evidence,
+        );
+        if (!appended.ok) return toCallToolResult(appended, contract);
+      }
       return toCallToolResult({ ok: true, value: evidence }, contract);
     },
   );
@@ -148,4 +167,17 @@ const projectOfficialArguments = (
     projected[key] = jsonValueSchema.parse(parsed[key] ?? null);
   }
   return projected;
+};
+
+/** Append to the ledger bound for the active target, if any. */
+const recordAnnotation = (
+  ledger: AnnotationLedgerBinding | undefined,
+  target: BinaryTarget | undefined,
+  arguments_: Readonly<Record<string, JsonValue>>,
+  evidence: Evidence,
+): Promise<Result<null, AnalysisError>> => {
+  const bound = ledger?.current();
+  return bound === undefined || target?.sha256 !== bound.targetSha256
+    ? Promise.resolve(ok(null))
+    : appendAnnotationFromEvidence(bound, arguments_, evidence);
 };

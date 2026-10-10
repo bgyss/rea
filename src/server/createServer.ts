@@ -1,3 +1,4 @@
+import { AnnotationLedgerBinding } from "../application/AnnotationLedger.js";
 import type { EvmInterfaceService } from "../application/evm/EvmInterfaceService.js";
 import { createEvmInterfaceService } from "../composition/evm.js";
 import { registerEvmTools } from "./registerEvmTools.js";
@@ -180,7 +181,9 @@ export const createServer = (
     recordEvidence,
     recordEvidenceWithUnknown,
   } = createSessionRecorders(server, session);
+  const annotationLedger = new AnnotationLedgerBinding();
   const toolContext: ServerToolContext = {
+    annotationLedger,
     server,
     analysis,
     session,
@@ -278,6 +281,7 @@ export const createServer = (
   if (session !== undefined) {
     registerSessionTools(server, session, toolLogger, {
       ...options,
+      annotationLedger,
       ...(availability === undefined
         ? {}
         : { availabilityPolicy: availability.policy }),
@@ -319,6 +323,7 @@ const createSessionRecorders = (
 });
 
 interface ServerToolContext extends ReturnType<typeof createSessionRecorders> {
+  readonly annotationLedger: AnnotationLedgerBinding;
   readonly server: McpServer;
   readonly analysis: AnalysisOperationPort;
   readonly session: BinarySessionPort | undefined;
@@ -334,6 +339,7 @@ const registerBinaryAnalysisTools = ({
   activeTarget,
   recordEvidence,
   recordEvidenceWithUnknown,
+  annotationLedger,
 }: ServerToolContext): void => {
   const recordUnknown =
     session === undefined
@@ -346,7 +352,10 @@ const registerBinaryAnalysisTools = ({
     recordEvidence,
     recordUnknown,
   };
-  registerOfficialTools(server, analysis, analysisOptions);
+  registerOfficialTools(server, analysis, {
+    ...analysisOptions,
+    annotationLedger,
+  });
   registerEnhancedTools(server, analysis, {
     ...analysisOptions,
     analysisProfile:

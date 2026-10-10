@@ -284,6 +284,7 @@ export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
   evaluate_reconstruction_coverage: effects(),
   project_android_application_graph: evidence,
   project_apple_application_graph: evidence,
+  // A named annotation ledger is replayed into the session database.
   open_binary: effects({ mutatesSession: true, launchesProcess: true }),
   close_binary: effects({
     mutatesSession: true,

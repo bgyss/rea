@@ -9,6 +9,7 @@ import { logCliCommand } from "../cliLogging.js";
 import type { Logger } from "../logger.js";
 import {
   directAnalysisOptions,
+  annotationLedgerOptions,
   formatSelectionOptions,
   type FormatSelection,
   providerSelectionOption,
@@ -47,6 +48,7 @@ const registerOverviewCommands = (
       .optional()
       .describe("Load and update a local analysis snapshot"),
     ...formatSelectionOptions,
+    ...annotationLedgerOptions,
     provider: providerSelectionOption,
   });
   cli.command(CLI_COMMANDS.analyze, {
@@ -115,6 +117,7 @@ const registerDecompileCommand = (cli: CliInstance, logger: Logger): void => {
         .optional()
         .describe("Load and update a local analysis snapshot"),
       ...formatSelectionOptions,
+      ...annotationLedgerOptions,
       provider: providerSelectionOption,
     }),
     run: ({ args, options }) =>
@@ -204,6 +207,7 @@ const registerXrefsCommand = (cli: CliInstance, logger: Logger): void => {
         .optional()
         .describe("Load and update a local analysis snapshot"),
       ...formatSelectionOptions,
+      ...annotationLedgerOptions,
       provider: providerSelectionOption,
     }),
     run: ({ args, options }) =>
@@ -255,6 +259,7 @@ const registerTraceCommand = (cli: CliInstance, logger: Logger): void => {
         .optional()
         .describe("Load and update a local analysis snapshot"),
       ...formatSelectionOptions,
+      ...annotationLedgerOptions,
       provider: providerSelectionOption,
     }),
     alias: {
@@ -317,6 +322,7 @@ const registerFunctionCommand = (cli: CliInstance, logger: Logger): void => {
           "Comma-separated dossier sections to return (for example pseudocode,assembly); omit for the complete dossier",
         ),
       ...formatSelectionOptions,
+      ...annotationLedgerOptions,
       provider: providerSelectionOption,
     }),
     run: ({ args, options }) =>
@@ -378,6 +384,7 @@ const registerInstructionsCommand = (
         .optional()
         .describe("Load and update a local analysis snapshot"),
       ...formatSelectionOptions,
+      ...annotationLedgerOptions,
       provider: providerSelectionOption,
     }),
     run: ({ args, options }) =>
@@ -441,6 +448,7 @@ const registerSearchCommand = (cli: CliInstance, logger: Logger): void => {
         .optional()
         .describe("Load and update a local analysis snapshot"),
       ...formatSelectionOptions,
+      ...annotationLedgerOptions,
       provider: providerSelectionOption,
     }),
     alias: { caseSensitive: "case-sensitive" },
