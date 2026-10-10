@@ -7,7 +7,12 @@ import {
   parseEvidence,
   type Evidence,
 } from "../domain/evidence.js";
+import { AnalysisInputError } from "../domain/analysisErrorCore.js";
 import { EvidenceIntegrityError } from "../domain/evidenceErrors.js";
+import {
+  projectedDossierFacets,
+  projectedDossierRejection,
+} from "../domain/hopperValues.js";
 import { err } from "../domain/result.js";
 import { compareFunctions } from "../domain/functionComparison.js";
 import { jsonValueSchema } from "../domain/jsonValue.js";
@@ -52,6 +57,31 @@ export const registerFunctionComparisonTool = (
       )
         return toCallToolResult(
           err(new EvidenceIntegrityError("Expected analyze_function Evidence")),
+          contract,
+        );
+      const projected = (
+        [
+          ["left", leftEvidence],
+          ["right", rightEvidence],
+        ] as const
+      ).flatMap(([side, evidence]) => {
+        const facets = projectedDossierFacets(evidence.normalized_result);
+        return facets === undefined
+          ? []
+          : [
+              {
+                path: [side],
+                reason: "invalid_value" as const,
+                message: projectedDossierRejection(
+                  "Function comparison",
+                  facets,
+                ),
+              },
+            ];
+      });
+      if (projected.length > 0)
+        return toCallToolResult(
+          err(new AnalysisInputError(contract.name, undefined, projected)),
           contract,
         );
       const leftIds = [leftEvidence.evidence_id];

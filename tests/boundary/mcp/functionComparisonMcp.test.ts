@@ -4,7 +4,14 @@ import { describe, expect, it } from "vitest";
 import { createTestBinarySession } from "../../fixtures/binarySession.js";
 import { FUNCTION_COMPARISON_EXAMPLE } from "../../../src/contracts/functionComparisonExample.js";
 import { createEvidence, parseEvidence } from "../../../src/domain/evidence.js";
-import { jsonObjectSchema } from "../../../src/domain/jsonValue.js";
+import {
+  functionDossierSchema,
+  projectFunctionDossier,
+} from "../../../src/domain/hopperValues.js";
+import {
+  jsonObjectSchema,
+  jsonValueSchema,
+} from "../../../src/domain/jsonValue.js";
 import { createServer } from "../../../src/server/createServer.js";
 import { observed } from "../../fixtures/analysisExecution.js";
 
@@ -263,6 +270,70 @@ describe("function comparison MCP integration", () => {
       });
       expect(result.isError).toBe(true);
       expect(session.exportEvidenceBundle().records).toHaveLength(2);
+    } finally {
+      await Promise.allSettled([
+        client.close(),
+        server.close(),
+        session.close(),
+      ]);
+    }
+  });
+});
+
+describe("function comparison facet projections", () => {
+  it("rejects a facet-projected dossier with recovery guidance", async () => {
+    const session = createTestBinarySession(() => ({
+      health: () => Promise.resolve(),
+      execute: () => Promise.resolve(observed(null)),
+      close: () => Promise.resolve(),
+    }));
+    const complete = FUNCTION_COMPARISON_EXAMPLE.left;
+    const projected = createEvidence(
+      {
+        path: "/tmp/function-projected",
+        sha256: "3".repeat(64),
+        format: "mach-o",
+      },
+      complete.provider,
+      {
+        operation: complete.operation,
+        parameters: { ...complete.parameters, facets: ["pseudocode"] },
+        result: jsonValueSchema.parse(
+          projectFunctionDossier(
+            functionDossierSchema.parse(complete.normalized_result),
+            ["pseudocode"],
+          ),
+        ),
+      },
+    );
+    const server = createServer(session, session);
+    const client = new Client({ name: "function-facets-test", version: "1" });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    try {
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      const result = await client.callTool({
+        name: "compare_functions",
+        arguments: { left: complete, right: projected },
+      });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: "invalid_request",
+          details: {
+            operation: "compare_functions",
+            issues: [
+              {
+                path: ["right"],
+                message: expect.stringContaining(
+                  "Re-run analyze_function without facets",
+                ),
+              },
+            ],
+          },
+        },
+      });
     } finally {
       await Promise.allSettled([
         client.close(),

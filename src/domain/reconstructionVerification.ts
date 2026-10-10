@@ -13,7 +13,7 @@ import {
   PROCESS_PROVIDER,
   isProcessEvidenceProvider,
 } from "./process/processEvidenceProvider.js";
-import { functionDossierSchema } from "./hopperValues.js";
+import { parseCompleteFunctionDossierEvidence } from "./hopperValues.js";
 import {
   deriveProcessComparisonStatus,
   PROCESS_COMPARISON_DIMENSIONS,
@@ -201,7 +201,11 @@ const validateSourceKinds = (
     if (claim.kind === "behavioral")
       parseProcessCapture(source.normalized_result);
     else if (claim.kind === "structural-function")
-      functionDossierSchema.parse(source.normalized_result);
+      parseCompleteFunctionDossierEvidence(
+        source.normalized_result,
+        "Structural function verification",
+        "verify_reconstruction",
+      );
     else artifactInventoryResultSchema.parse(source.normalized_result);
   }
 };

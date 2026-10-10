@@ -16,6 +16,7 @@ import {
   addressDistance,
   functionDossierSchema,
   parseFunctionDossier,
+  projectFunctionDossier,
   parseListCount,
   parseRelatedAddresses,
   parseSegments,
@@ -208,11 +209,22 @@ export class EnhancedTools {
   }
 
   async #analyzeFunction(
-    input: Readonly<Record<string, JsonValue>>,
+    input: z.output<typeof enhancedInputSchemas.analyze_function>,
     signal?: AbortSignal,
   ): EnhancedResult {
-    const result = await this.#call("analyze_function", input, signal);
-    return result.ok ? parseFunctionDossier(result.value) : result;
+    const { facets, ...providerInput } = input;
+    const result = await this.#call("analyze_function", providerInput, signal);
+    if (!result.ok) return result;
+    const parsed = parseFunctionDossier(result.value);
+    if (!parsed.ok || facets === undefined) return parsed;
+    return ok(
+      jsonValueSchema.parse(
+        projectFunctionDossier(
+          functionDossierSchema.parse(parsed.value),
+          facets,
+        ),
+      ),
+    );
   }
 
   async #inspectNativeApi(

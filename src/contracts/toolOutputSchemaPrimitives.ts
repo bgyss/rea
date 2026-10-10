@@ -4,7 +4,7 @@ import {
   procedureClassificationSchema,
   procedureIdentitySchema,
   localVariableSchema,
-  functionDossierSchema,
+  functionDossierResultSchema,
   functionBodySchema,
 } from "../domain/hopperValues.js";
 import { analysisProfileSchema } from "../domain/analysisProfile.js";
@@ -518,4 +518,5 @@ export const graphNode = z.discriminatedUnion("status", [
   }),
 ]);
 
-export const functionDossierOutput = resultOf(functionDossierSchema);
+/** Complete dossier, or the caller-selected facet projection of one. */
+export const functionDossierOutput = resultOf(functionDossierResultSchema);

@@ -309,6 +309,13 @@ const registerFunctionCommand = (cli: CliInstance, logger: Logger): void => {
         .min(1)
         .optional()
         .describe("Load and update a local analysis snapshot"),
+      facets: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Comma-separated dossier sections to return (for example pseudocode,assembly); omit for the complete dossier",
+        ),
       ...formatSelectionOptions,
       provider: providerSelectionOption,
     }),
@@ -324,6 +331,13 @@ const registerFunctionCommand = (cli: CliInstance, logger: Logger): void => {
               "procedure",
               "analyze_function",
             ),
+            ...(options.facets === undefined
+              ? {}
+              : {
+                  facets: options.facets
+                    .split(",")
+                    .map((facet) => facet.trim()),
+                }),
           },
           directAnalysisOptions(
             logger,

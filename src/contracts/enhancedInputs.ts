@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { functionDossierFacetSchema } from "../domain/hopperValues.js";
 import { nativeValueTraceInputSchema } from "../domain/native/nativeValueTrace.js";
 const traceLiteralInputSchema = z.strictObject({
   query: z.string().min(1),
@@ -42,6 +43,13 @@ export const enhancedInputSchemas = {
   binary_overview: z.strictObject({}),
   analyze_function: z.strictObject({
     procedure: z.string().describe("A procedure name or address"),
+    facets: z
+      .array(functionDossierFacetSchema)
+      .min(1)
+      .exactOptional()
+      .describe(
+        "Optional dossier sections to return; omit for the complete dossier. procedure and limitations are always included, and the result lists selected, omitted and unavailable sections.",
+      ),
   }),
   inspect_native_api: z.strictObject({
     procedure: z.string().describe("A procedure name or address"),
