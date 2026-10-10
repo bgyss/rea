@@ -9,6 +9,7 @@ The canonical repository guidelines live in AGENTS.md (product direction, layeri
 ## Quick reference (supplements AGENTS.md)
 
 - Toolchain: Node 24.18.0 / npm 11.16.0 (`.nvmrc`, `packageManager`). Most npm scripts first run `scripts/check-dependency-install.mjs`; rerun `npm ci` if it reports a stale install.
+- Pinned environment: `nix develop` (Ghidra 12.1.4, JDK 21, mise; Apple clang on macOS) then `mise install` (Node 24.18.0). Run real Ghidra lanes inside it; see "Pinned local toolchain" in `docs/testing.md`.
 - Single test file: `npm run test:local -- tests/path/to/file.test.ts` (no build) or `npm run test:focused -- PATH...`. Plain `npx vitest run PATH` also works for unit-level projects.
 - Vitest projects (`vitest.config.ts`): fast, no build needed — `domain`, `services`, `adapters`, `composition`, `conformance`, `evaluation` (`npm run test:fast`); require `npm run build:cached` first — `boundary`, `process-boundary`, `mcp-boundary`, `process-global`, `acceptance` (`npm run test:boundary`, `test:mcp`, `test:acceptance`). Select one with `npx vitest run --project <name>`.
 - `npm run lint` is Oxlint plus `scripts/verify-module-boundaries.mjs`, which enforces the inward dependency direction described in AGENTS.md. A layering violation fails lint, not typecheck.

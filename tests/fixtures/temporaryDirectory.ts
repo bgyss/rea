@@ -21,6 +21,28 @@ const TEMPORARY_PREFIX = /^[A-Za-z0-9][A-Za-z0-9._-]*-$/u;
  */
 export const createTestTempDirectory = async (
   prefix: string,
+): Promise<string> => createTemporaryDirectoryIn(tmpdir(), prefix);
+
+/**
+ * Like {@link createTestTempDirectory}, for files a fake Node inspector will
+ * report through discovery metadata. Node rewrites quotes and backslashes in
+ * that metadata to underscores, so REA treats any reported path containing
+ * `_`, `"` or `\` as unverifiable. macOS per-user temporary directories such
+ * as `/var/folders/ab/c_d/T` contain underscores; use `/tmp` there instead.
+ */
+export const createNodeDiscoveryTempDirectory = async (
+  prefix: string,
+): Promise<string> => {
+  const system = await realpath(tmpdir());
+  return createTemporaryDirectoryIn(
+    process.platform !== "win32" && /[_"\\]/u.test(system) ? "/tmp" : system,
+    prefix,
+  );
+};
+
+const createTemporaryDirectoryIn = async (
+  base: string,
+  prefix: string,
 ): Promise<string> => {
   if (!TEMPORARY_PREFIX.test(prefix) || prefix.length > 80) {
     throw new TypeError(
@@ -29,7 +51,7 @@ export const createTestTempDirectory = async (
   }
 
   const canonicalDirectory = await realpath(
-    await mkdtemp(join(await realpath(tmpdir()), prefix)),
+    await mkdtemp(join(await realpath(base), prefix)),
   );
   onTestFinished(async () => {
     await removeTestWorkspace(canonicalDirectory);

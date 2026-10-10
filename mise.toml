@@ -1,0 +1,11 @@
+[tools]
+# Matches .nvmrc and package.json packageManager.
+node = "24.18.0"
+
+[tasks.check]
+description = "Cached static checks and tests affected since origin/main"
+run = "npm run check:changed"
+
+[tasks.verify-ghidra]
+description = "Real Ghidra lanes: native fixtures and raw images (run inside `nix develop`)"
+run = ["npm run verify:ghidra", "npm run verify:ghidra:raw"]
