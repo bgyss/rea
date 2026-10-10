@@ -66,3 +66,7 @@ src/generatedMcpToolCatalog.ts
 /docs/public/product-catalog.json
 /docs/verification/managed-conformance-manifest.json
 /docs/verification/managed-conformance-ledger.json
+
+# nix build output
+/result
+/result-*

@@ -295,6 +295,23 @@ prove behavior on the verified Ghidra 12.1.4 and JDK 21 build.
 | `npm run verify:ghidra:cross-format`       | Any supported Ghidra host; also analyzes AArch64 ELF, x86-64 PE, and x86-64 Mach-O | `clang`, LLD, and `lld-link` in addition to host-lane prerequisites |
 | `npm run verify:ghidra:windows`            | Controlled Windows x64 with native x86-64 PE; `-- --x86` selects native x86 PE     | Ghidra 12.1.4, full JDK 21, and the matching native artifact        |
 
+### Pinned local toolchain (Nix and mise)
+
+`nix develop` provides a shell with the verified Ghidra 12.1.4, Zulu JDK 21 and
+mise, and sets `GHIDRA_INSTALL_DIR` and `JAVA_HOME`. Inside it, `mise install`
+installs the pinned Node 24.18.0 from `mise.toml` (matching `.nvmrc`);
+`mise run verify-ghidra` runs `verify:ghidra` and `verify:ghidra:raw`.
+
+- The `flake.nix` Ghidra package is the official release zip, pinned by its
+  published SHA-256. It rebuilds the native tools (`decompile`, `sleigh`,
+  demanglers) with Ghidra's own offline `buildNatives` task, because the zip
+  ships only `linux_x86_64` and `win_x86_64` natives.
+- The shell deliberately adds no Nix C compiler. On macOS it sets `CC`,
+  `REA_CC` and `REA_CLANG` to `/usr/bin` tools, because a Nix-profile `cc`/`ld`
+  cannot link against newer macOS SDK stubs.
+- This is a development convenience only; REA itself still treats Ghidra, Java
+  and Node as bring-your-own.
+
 Windows native conformance runs with `npm run verify:windows-native` and does
 not require Ghidra or Java. An optional independently compiled Windows fixture
 adds in-place reparse, breakaway, environment, and token observations.
