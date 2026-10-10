@@ -356,6 +356,20 @@ const ANNOTATION_FAILURE_FIELDS: Readonly<Record<string, string>> = {
   invalid_declarations: "declarations",
 };
 
+// Where a bridge annotation rejection belongs in the caller's input. A set
+// rejection names its failing item in the message and applies to the whole
+// request, whether it named a built-in pack or inline annotations.
+const annotationFailurePath = (
+  operation: AnalysisOperation,
+  failure: GhidraSessionError,
+): readonly string[] | undefined => {
+  if (!isAnnotationOperation(operation) || failure.kind !== "remote")
+    return undefined;
+  if (failure.remoteCode === "invalid_annotation_set") return [];
+  const field = ANNOTATION_FAILURE_FIELDS[failure.remoteCode ?? ""];
+  return field === undefined ? undefined : [field];
+};
+
 const projectSessionError = (
   operation: AnalysisOperation,
   failure: GhidraSessionError,
@@ -374,14 +388,11 @@ const projectSessionError = (
       failure.cause.reason,
       { cause: failure },
     );
-  const annotationField =
-    isAnnotationOperation(operation) && failure.kind === "remote"
-      ? ANNOTATION_FAILURE_FIELDS[failure.remoteCode ?? ""]
-      : undefined;
-  if (annotationField !== undefined)
+  const annotationPath = annotationFailurePath(operation, failure);
+  if (annotationPath !== undefined)
     return new AnalysisInputError(operation, { cause: failure }, [
       {
-        path: [annotationField],
+        path: [...annotationPath],
         reason: "invalid_value",
         message: failure.message,
       },

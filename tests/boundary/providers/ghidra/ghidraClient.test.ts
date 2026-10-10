@@ -177,7 +177,8 @@ describe("GhidraClient", () => {
             HOST_TRANSPORT === "unix-socket" ||
             (value !== "annotate_native_function" &&
               value !== "annotate_native_data" &&
-              value !== "define_native_types"),
+              value !== "define_native_types" &&
+              value !== "apply_native_annotations"),
         ),
         target: {
           image_base: "0x1000",

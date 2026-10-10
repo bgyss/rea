@@ -13,6 +13,8 @@ import {
   providerSelectionOption,
 } from "./options.js";
 import type { CliInstance } from "./types.js";
+import { LABEL_PACKS } from "../domain/native/nativeLabelPacks.js";
+import { jsonObjectSchema } from "../domain/jsonValue.js";
 
 /** Register native load-image, memory, and annotation CLI commands. */
 export const registerCoreNativeCommands = (
@@ -22,6 +24,7 @@ export const registerCoreNativeCommands = (
   registerAnnotationCommand(cli, logger);
   registerDataAnnotationCommand(cli, logger);
   registerTypeDefinitionCommand(cli, logger);
+  registerAnnotationSetCommand(cli, logger);
   cli.command(CLI_COMMANDS.inspectNativeLoadImage, {
     description:
       "Verify loaded native bytes, source mappings, relocations and entry",
@@ -581,6 +584,86 @@ const registerTypeDefinitionCommand = (
                 ...analysis,
                 optionError: { option: "header", message: header.error },
               },
+        );
+      }),
+  });
+};
+
+// The annotation set in a rea.label-pack.v1 file or a bare set file, as the
+// request's annotations; the provider validates its contents.
+const readAnnotationSetFile = (
+  path: string,
+): { readonly annotations: unknown } | { readonly error: string } => {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch (cause: unknown) {
+    return {
+      error: `Cannot read annotation set ${path}: ${cause instanceof Error ? cause.message : String(cause)}`,
+    };
+  }
+  const pack = z
+    .object({
+      schema_version: z.literal("rea.label-pack.v1"),
+      annotations: z.unknown(),
+    })
+    .safeParse(parsed);
+  return { annotations: pack.success ? pack.data.annotations : parsed };
+};
+
+const registerAnnotationSetCommand = (
+  cli: CliInstance,
+  logger: Logger,
+): void => {
+  cli.command(CLI_COMMANDS.applyNativeAnnotations, {
+    description:
+      "Apply a built-in hardware label pack or an annotation set file atomically and return the readback",
+    args: z.object({ path: z.string().describe("Local executable path") }),
+    options: z.object({
+      pack: z
+        .enum(Object.keys(LABEL_PACKS) as [string, ...string[]])
+        .optional()
+        .describe("Built-in label pack"),
+      file: z
+        .string()
+        .optional()
+        .describe(
+          "rea.label-pack.v1 file, or a JSON annotation set with memory_blocks, declarations, data and functions",
+        ),
+      ...formatSelectionOptions,
+      ...annotationLedgerOptions,
+      provider: providerSelectionOption,
+    }),
+    run: ({ args, options }) =>
+      logCliCommand(logger, CLI_COMMANDS.applyNativeAnnotations, () => {
+        const analysis = directAnalysisOptions(
+          logger,
+          undefined,
+          options.provider,
+          options,
+        );
+        const file =
+          options.file === undefined
+            ? undefined
+            : readAnnotationSetFile(options.file);
+        if (file !== undefined && "error" in file)
+          return runDirectAnalysis(
+            args.path,
+            "apply_native_annotations",
+            {},
+            {
+              ...analysis,
+              optionError: { option: "file", message: file.error },
+            },
+          );
+        return runDirectAnalysis(
+          args.path,
+          "apply_native_annotations",
+          jsonObjectSchema.parse({
+            ...(options.pack === undefined ? {} : { pack: options.pack }),
+            ...(file === undefined ? {} : { annotations: file.annotations }),
+          }),
+          analysis,
         );
       }),
   });

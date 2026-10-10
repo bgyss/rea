@@ -89,6 +89,36 @@ const fixtures = [
     firstInstruction: /^0x80010000: li v0,\s*0x1$/iu,
     pseudocode: /return 1;/u,
   },
+  {
+    name: "nes-mmio",
+    // LDA #$80; STA $2000 (PPUCTRL); RTS. Nothing maps $2000 until the
+    // nes-registers pack adds its PPU block.
+    bytes: Buffer.from([0xa9, 0x80, 0x8d, 0x00, 0x20, 0x60]),
+    profile: profile(
+      "authored-nes-mmio-v1",
+      "nes",
+      "6502:LE:16:default",
+      0x8000,
+    ),
+    firstInstruction: /^0x8000: LDA #0x80$/iu,
+    pseudocode: /2000/u,
+  },
+  {
+    name: "ps1-mmio",
+    // lui v0, 0x1f80; sw zero, 0x1070(v0) (I_STAT); jr ra; nop.
+    bytes: Buffer.from([
+      0x80, 0x1f, 0x02, 0x3c, 0x70, 0x10, 0x40, 0xac, 0x08, 0x00, 0xe0, 0x03,
+      0x00, 0x00, 0x00, 0x00,
+    ]),
+    profile: profile(
+      "authored-ps1-mmio-v1",
+      "ps1",
+      "MIPS:LE:32:default",
+      0x80010000,
+    ),
+    firstInstruction: /^0x80010000: lui v0,\s*0x1f80$/iu,
+    pseudocode: /1f801070/iu,
+  },
 ];
 
 // Two switchable banks share $8000 as overlays; a fixed bank sits at $C000.
@@ -372,6 +402,160 @@ try {
     cli_replayed: true,
   };
 
+  // Label packs and annotation sets: MMIO blocks, register labels, and the
+  // decompiler naming the registers; atomic rejection; CLI; ledger replay.
+  const packFixture = (name) => fixtures.find((item) => item.name === name);
+  const packLedger = join(workspace, "pack-annotations.jsonl");
+  const packOpen = (fixture, ledgerPath) =>
+    call("open_binary", {
+      path: fixture.path,
+      format: "raw-image",
+      raw_image_profile: fixture.profile,
+      provider_id: "ghidra",
+      ...(ledgerPath === undefined
+        ? {}
+        : { annotation_ledger_path: ledgerPath }),
+    });
+  const packReject = async (args, diagnostic) => {
+    const reply = await client.callTool({
+      name: "apply_native_annotations",
+      arguments: args,
+    });
+    assert.equal(reply.isError, true, `accepted ${JSON.stringify(args)}`);
+    const error = reply.structuredContent?.error;
+    assert.equal(error?.code, "invalid_request");
+    assert.match(JSON.stringify(error.details.issues), diagnostic);
+  };
+  const packReport = {};
+  for (const [fixtureName, packId, register, statement] of [
+    ["nes-mmio", "nes-registers", ["0x2000", "PPUCTRL"], /PPUCTRL = 0x80;/u],
+    ["ps1-mmio", "ps1-registers", ["0x1f801070", "I_STAT"], /I_STAT = 0;/u],
+  ]) {
+    const fixture = packFixture(fixtureName);
+    await packOpen(
+      fixture,
+      fixtureName === "nes-mmio" ? packLedger : undefined,
+    );
+    opened = true;
+    // The other platform's pack names a different processor.
+    await packReject(
+      { pack: packId === "nes-registers" ? "ps1-registers" : "nes-registers" },
+      /The set applies to .*this program's processor is/u,
+    );
+    // A rejected item rolls back the block created before it.
+    await packReject(
+      {
+        annotations: {
+          memory_blocks: [
+            {
+              name: "REA_ROLLBACK",
+              address: register[0],
+              size_bytes: 4,
+              volatile: true,
+            },
+          ],
+          data: [{ address: register[0], data_type: "struct rea_missing" }],
+        },
+      },
+      /data\[0\]: Unknown or variable-length data type struct rea_missing/u,
+    );
+    const applied = await call("apply_native_annotations", { pack: packId });
+    assert.equal(applied.pack.id, packId);
+    assert.ok(
+      applied.memory_blocks.every((block) => block.outcome === "created"),
+      `blocks not created: ${JSON.stringify(applied.memory_blocks)}`,
+    );
+    const labelled = applied.data.find((item) => item.address === register[0]);
+    assert.equal(labelled?.label, register[1]);
+    assert.equal(
+      await call("address_name", { address: register[0] }),
+      register[1],
+    );
+    const { pseudocode } = await call("analyze_function", {
+      procedure: "entry",
+    });
+    assert.match(pseudocode, statement);
+    // Applying again keeps the blocks and changes nothing else.
+    const again = await call("apply_native_annotations", { pack: packId });
+    assert.ok(
+      again.memory_blocks.every((block) => block.outcome === "existing"),
+    );
+    await call("close_binary");
+    opened = false;
+    assert.equal(digest(await readFile(fixture.path)), fixture.sha256);
+    packReport[packId] = {
+      blocks: applied.memory_blocks.length,
+      registers: applied.data.length,
+      decompiler_named_register: register[1],
+    };
+  }
+  const nes = packFixture("nes-mmio");
+  const replayedPack = await packOpen(nes, packLedger);
+  opened = true;
+  assert.deepEqual(
+    {
+      entries: replayedPack.annotation_ledger.entries,
+      applied: replayedPack.annotation_ledger.applied,
+      failed: replayedPack.annotation_ledger.failed,
+    },
+    { entries: 2, applied: 2, failed: [] },
+  );
+  const replayedCode = await call("analyze_function", { procedure: "entry" });
+  assert.match(replayedCode.pseudocode, /PPUCTRL = 0x80;/u);
+  await call("close_binary");
+  opened = false;
+  const cliPack = await cli(nes, "apply-native-annotations", null, [
+    "--pack",
+    "nes-registers",
+  ]);
+  assert.equal(cliPack.normalized_result.pack.id, "nes-registers");
+  const customPack = join(workspace, "custom-pack.json");
+  await writeFile(
+    customPack,
+    JSON.stringify({
+      schema_version: "rea.label-pack.v1",
+      id: "rea-custom",
+      version: 1,
+      title: "Custom",
+      platform: "nes",
+      sources: ["authored"],
+      limitations: [],
+      annotations: {
+        memory_blocks: [
+          {
+            name: "WRAM",
+            address: "0x6000",
+            size_bytes: 0x2000,
+            volatile: false,
+          },
+        ],
+        data: [{ address: "0x6000", label: "save_magic", data_type: "word" }],
+      },
+    }),
+    { mode: 0o600 },
+  );
+  const cliFile = await cli(nes, "apply-native-annotations", null, [
+    "--file",
+    customPack,
+  ]);
+  assert.equal(cliFile.normalized_result.pack, null);
+  assert.deepEqual(
+    cliFile.normalized_result.data.map(({ label, size_bytes }) => [
+      label,
+      size_bytes,
+    ]),
+    [["save_magic", 2]],
+  );
+  report.label_packs = {
+    ...packReport,
+    processor_mismatch_rejected: true,
+    item_rejection_rolled_back: true,
+    reapplied_unchanged: true,
+    ledger_replayed: true,
+    cli_pack: true,
+    cli_file: true,
+  };
+
   // Persistent project cache: analyse once, keep CLI annotations across runs.
   const projects = join(workspace, "projects");
   const cacheEnv = { ...env, REA_GHIDRA_PROJECT_CACHE_DIR: projects };
@@ -457,7 +641,7 @@ async function cli(fixture, command, procedure, extra = [], cliEnv = env) {
       entrypoint,
       command,
       fixture.path,
-      procedure,
+      ...(procedure === null ? [] : [procedure]),
       "--target-format",
       "raw-image",
       "--raw-image-profile",

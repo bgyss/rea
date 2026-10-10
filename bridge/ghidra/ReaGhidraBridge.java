@@ -127,12 +127,14 @@ public final class ReaGhidraBridge extends HeadlessScript {
     private static final Set<String> MUTATING_METHODS = Set.of(
         "annotate_native_function",
         "annotate_native_data",
-        "define_native_types"
+        "define_native_types",
+        "apply_native_annotations"
     );
     private static final String[] CAPABILITIES = {
         "annotate_native_function",
         "annotate_native_data",
         "define_native_types",
+        "apply_native_annotations",
         "inspect_native_load_image",
         "read_bytes",
         "address_to_file_offset",
@@ -408,6 +410,11 @@ public final class ReaGhidraBridge extends HeadlessScript {
                 if (!descriptor.transport.equals("unix-socket"))
                     throw new RequestFailure("method_unavailable", "Windows P0 does not admit database mutation");
                 yield defineNativeTypes(request.params);
+            }
+            case "apply_native_annotations" -> {
+                if (!descriptor.transport.equals("unix-socket"))
+                    throw new RequestFailure("method_unavailable", "Windows P0 does not admit database mutation");
+                yield applyNativeAnnotations(request.params);
             }
             default -> throw new RequestFailure(
                 "method_unavailable",
@@ -1208,7 +1215,12 @@ public final class ReaGhidraBridge extends HeadlessScript {
 
     private record VariableEdit(String name, String newName, DataType dataType) {}
 
-    private JsonObject annotateNativeFunction(JsonObject params) throws Exception {
+    private record FunctionEdit(
+        JsonObject params, Function function, Address entry, String leafName,
+        String convention, List<VariableEdit> variables
+    ) {}
+
+    private FunctionEdit prepareFunctionEdit(JsonObject params) throws Exception {
         for (String key : params.keySet()) {
             if (!key.equals("procedure") && !ANNOTATION_CHANGES.contains(key))
                 throw new RequestFailure("invalid_request", "Unknown function annotation field: " + key);
@@ -1228,54 +1240,80 @@ public final class ReaGhidraBridge extends HeadlessScript {
             ? requireCallingConvention(requireText(params, "calling_convention")) : null;
         List<VariableEdit> variableEdits = params.has("variables")
             ? variableEdits(params.get("variables")) : List.of();
+        return new FunctionEdit(params, function, entry, leafName, convention, variableEdits);
+    }
+
+    // Edits go through Ghidra's own setters, including name rules; callers
+    // run this inside a transaction so a later rejection rolls it all back.
+    private void applyFunctionEdit(FunctionEdit edit) throws Exception {
+        JsonObject params = edit.params();
+        Function function = edit.function();
+        Address entry = edit.entry();
+        for (String field : List.of("comment", "inline_comment")) {
+            if (params.has(field)) {
+                String text = requireText(params, field);
+                CommentType type = field.equals("comment") ? CommentType.PRE : CommentType.EOL;
+                currentProgram.getListing().setComment(entry, type, text.isEmpty() ? null : text);
+            }
+        }
+        if (params.has("name")) {
+            try {
+                function.setName(edit.leafName(), SourceType.USER_DEFINED);
+            }
+            catch (ghidra.util.exception.InvalidInputException | ghidra.util.exception.DuplicateNameException exception) {
+                throw new RequestFailure("invalid_function_name", "Invalid function name at " + canonicalAddress(entry) + ": " + safeMessage(exception));
+            }
+        }
+        // Signature before convention, so an explicit calling_convention
+        // wins; variables last, because both rebuild the parameters.
+        if (params.has("signature"))
+            applyFunctionSignature(function, requireText(params, "signature"), edit.convention() != null);
+        if (edit.convention() != null) {
+            try {
+                function.setCallingConvention(edit.convention());
+            }
+            catch (ghidra.util.exception.InvalidInputException exception) {
+                throw new RequestFailure("invalid_calling_convention", "Ghidra rejected calling convention " + edit.convention() + " at " + canonicalAddress(entry) + ": " + safeMessage(exception));
+            }
+        }
+        for (VariableEdit variable : edit.variables()) applyVariableEdit(function, variable);
+    }
+
+    private JsonObject functionEditReadback(FunctionEdit edit) throws Exception {
+        JsonObject params = edit.params();
+        Function function = edit.function();
+        Address entry = edit.entry();
+        JsonObject readback = annotationReadback(function);
+        if (edit.convention() != null && !edit.convention().equals(function.getCallingConventionName()))
+            throw new RequestFailure("annotation_readback_mismatch",
+                "Annotation readback differs for calling_convention at " + canonicalAddress(entry));
+        if (!edit.variables().isEmpty())
+            readback.add("variables", variableReadback(function, edit.variables()));
+        for (String field : List.of("name", "comment", "inline_comment")) {
+            if (!params.has(field)) continue;
+            String requested = requireText(params, field);
+            JsonElement measured = readback.get(field);
+            String expected = field.equals("name") ? edit.leafName() : requested.isEmpty() ? null : requested;
+            String observed = field.equals("name") ? function.getName() :
+                (measured.isJsonNull() ? null : measured.getAsString());
+            if (!java.util.Objects.equals(expected, observed))
+                throw new RequestFailure("annotation_readback_mismatch", "Annotation readback differs for " + field + " at " + canonicalAddress(entry));
+        }
+        return readback;
+    }
+
+    private JsonObject annotateNativeFunction(JsonObject params) throws Exception {
+        FunctionEdit edit = prepareFunctionEdit(params);
         int transaction = currentProgram.startTransaction("REA function annotations");
         boolean commit = false;
         JsonObject annotated;
         try {
-            // Validate edits through Ghidra's own setters, including name rules.
-            // A later invalid name must roll back earlier comment writes.
-            for (String field : List.of("comment", "inline_comment")) {
-                if (params.has(field)) {
-                    String text = requireText(params, field);
-                    CommentType type = field.equals("comment") ? CommentType.PRE : CommentType.EOL;
-                    currentProgram.getListing().setComment(entry, type, text.isEmpty() ? null : text);
-                }
-            }
-            if (params.has("name"))
-                function.setName(leafName, SourceType.USER_DEFINED);
-            // Signature before convention, so an explicit calling_convention
-            // wins; variables last, because both rebuild the parameters.
-            if (params.has("signature"))
-                applyFunctionSignature(function, requireText(params, "signature"), convention != null);
-            if (convention != null) {
-                try {
-                    function.setCallingConvention(convention);
-                }
-                catch (ghidra.util.exception.InvalidInputException exception) {
-                    throw new RequestFailure("invalid_calling_convention", "Ghidra rejected calling convention " + convention + " at " + canonicalAddress(entry) + ": " + safeMessage(exception));
-                }
-            }
-            for (VariableEdit edit : variableEdits) applyVariableEdit(function, edit);
+            applyFunctionEdit(edit);
             monitor.checkCancelled();
             invalidateAnalysisCaches();
-            JsonObject readback = annotationReadback(function);
-            if (convention != null && !convention.equals(function.getCallingConventionName()))
-                throw new RequestFailure("annotation_readback_mismatch",
-                    "Annotation readback differs for calling_convention at " + canonicalAddress(entry));
-            if (!variableEdits.isEmpty())
-                readback.add("variables", variableReadback(function, variableEdits));
-            for (String field : List.of("name", "comment", "inline_comment")) {
-                if (!params.has(field)) continue;
-                String requested = requireText(params, field);
-                JsonElement measured = readback.get(field);
-                String expected = field.equals("name") ? leafName : requested.isEmpty() ? null : requested;
-                String observed = field.equals("name") ? function.getName() :
-                    (measured.isJsonNull() ? null : measured.getAsString());
-                if (!java.util.Objects.equals(expected, observed))
-                    throw new RequestFailure("annotation_readback_mismatch", "Annotation readback differs for " + field + " at " + canonicalAddress(entry));
-            }
+            JsonObject readback = functionEditReadback(edit);
             JsonObject query = new JsonObject();
-            query.addProperty("procedure", canonicalAddress(entry));
+            query.addProperty("procedure", canonicalAddress(edit.entry()));
             JsonObject result = new JsonObject();
             result.add("annotations", readback);
             result.add("dossier", analyzeFunction(query));
@@ -1284,17 +1322,12 @@ public final class ReaGhidraBridge extends HeadlessScript {
             commit = true;
             annotated = result;
         }
-        catch (ghidra.util.exception.InvalidInputException | ghidra.util.exception.DuplicateNameException exception) {
-            // Variable and convention edits wrap their own Ghidra failures,
-            // so what reaches here is the function rename.
-            throw new RequestFailure("invalid_function_name", "Invalid function name at " + canonicalAddress(entry) + ": " + safeMessage(exception));
-        }
         finally {
             currentProgram.endTransaction(transaction, commit);
             // Rollback also invalidates inventory and decompiler views.
             invalidateAnalysisCaches();
         }
-        persistAnnotation(entry);
+        persistAnnotation(edit.entry());
         return annotated;
     }
 
@@ -1324,7 +1357,9 @@ public final class ReaGhidraBridge extends HeadlessScript {
     private static final List<String> DATA_ANNOTATION_CHANGES = List.of(
         "label", "data_type", "comment", "inline_comment");
 
-    private JsonObject annotateNativeData(JsonObject params) throws Exception {
+    private record DataEdit(JsonObject params, Address address, String label, DataType type) {}
+
+    private DataEdit prepareDataEdit(JsonObject params) {
         for (String key : params.keySet()) {
             if (!key.equals("address") && !DATA_ANNOTATION_CHANGES.contains(key))
                 throw new RequestFailure("invalid_request", "Unknown data annotation field: " + key);
@@ -1345,37 +1380,52 @@ public final class ReaGhidraBridge extends HeadlessScript {
         DataType type = params.has("data_type")
             ? parseAnnotationDataType(requireText(params, "data_type"), "data_type", "invalid_data_edit", "address " + canonical)
             : null;
+        return new DataEdit(params, address, label, type);
+    }
+
+    private void applyDataEdit(DataEdit edit) {
+        if (edit.label() != null) applyDataLabel(edit.address(), edit.label());
+        if (edit.type() != null) applyDataType(edit.address(), edit.type());
+        for (String field : List.of("comment", "inline_comment")) {
+            if (edit.params().has(field)) {
+                String comment = requireText(edit.params(), field);
+                CommentType kind = field.equals("comment") ? CommentType.PRE : CommentType.EOL;
+                currentProgram.getListing().setComment(edit.address(), kind, comment.isEmpty() ? null : comment);
+            }
+        }
+    }
+
+    private JsonObject dataEditReadback(DataEdit edit) {
+        JsonObject readback = dataAnnotationReadback(edit.address());
+        Data data = currentProgram.getListing().getDefinedDataAt(edit.address());
+        String label = edit.label();
+        boolean agrees =
+            (label == null || label.equals(readback.get("label").isJsonNull() ? null : readback.get("label").getAsString())) &&
+            (edit.type() == null || (data != null && data.getDataType().isEquivalent(edit.type())));
+        for (String field : List.of("comment", "inline_comment")) {
+            if (!edit.params().has(field)) continue;
+            String requested = requireText(edit.params(), field);
+            JsonElement measured = readback.get(field);
+            agrees &= java.util.Objects.equals(requested.isEmpty() ? null : requested,
+                measured.isJsonNull() ? null : measured.getAsString());
+        }
+        if (!agrees)
+            throw new RequestFailure("annotation_readback_mismatch",
+                "Data annotation readback differs at " + canonicalAddress(edit.address()));
+        return readback;
+    }
+
+    private JsonObject annotateNativeData(JsonObject params) throws Exception {
+        DataEdit edit = prepareDataEdit(params);
         int transaction = currentProgram.startTransaction("REA data annotations");
         boolean commit = false;
         JsonObject annotated;
         try {
-            if (label != null) applyDataLabel(address, label);
-            if (type != null) applyDataType(address, type);
-            for (String field : List.of("comment", "inline_comment")) {
-                if (params.has(field)) {
-                    String comment = requireText(params, field);
-                    CommentType kind = field.equals("comment") ? CommentType.PRE : CommentType.EOL;
-                    currentProgram.getListing().setComment(address, kind, comment.isEmpty() ? null : comment);
-                }
-            }
+            applyDataEdit(edit);
             monitor.checkCancelled();
             invalidateAnalysisCaches();
-            JsonObject readback = dataAnnotationReadback(address);
-            Data data = currentProgram.getListing().getDefinedDataAt(address);
-            boolean agrees =
-                (label == null || label.equals(readback.get("label").isJsonNull() ? null : readback.get("label").getAsString())) &&
-                (type == null || (data != null && data.getDataType().isEquivalent(type)));
-            for (String field : List.of("comment", "inline_comment")) {
-                if (!params.has(field)) continue;
-                String requested = requireText(params, field);
-                JsonElement measured = readback.get(field);
-                agrees &= java.util.Objects.equals(requested.isEmpty() ? null : requested,
-                    measured.isJsonNull() ? null : measured.getAsString());
-            }
-            if (!agrees)
-                throw new RequestFailure("annotation_readback_mismatch", "Data annotation readback differs at " + canonical);
             JsonObject result = new JsonObject();
-            result.add("annotations", readback);
+            result.add("annotations", dataEditReadback(edit));
             result.add("effects", annotationEffects());
             commit = true;
             annotated = result;
@@ -1384,7 +1434,7 @@ public final class ReaGhidraBridge extends HeadlessScript {
             currentProgram.endTransaction(transaction, commit);
             invalidateAnalysisCaches();
         }
-        persistAnnotation(address);
+        persistAnnotation(edit.address());
         return annotated;
     }
 
@@ -1433,99 +1483,26 @@ public final class ReaGhidraBridge extends HeadlessScript {
     // caller's first line. A later #line marker selects its own category.
     private static final String TYPE_CATEGORY_MARKER = "#line 1 \"rea\"\n";
 
+    private static String validDeclarations(String declarations) {
+        validateAnnotationText(declarations, "declarations");
+        if (declarations.isBlank())
+            throw new RequestFailure("invalid_declarations", "Supply at least one C declaration");
+        return declarations;
+    }
+
     private JsonObject defineNativeTypes(JsonObject params) throws Exception {
         for (String key : params.keySet()) {
             if (!key.equals("declarations"))
                 throw new RequestFailure("invalid_request", "Unknown type definition field: " + key);
         }
-        String declarations = requireText(params, "declarations");
-        validateAnnotationText(declarations, "declarations");
-        if (declarations.isBlank())
-            throw new RequestFailure("invalid_declarations", "Supply at least one C declaration");
-        DataTypeManager types = currentProgram.getDataTypeManager();
+        String declarations = validDeclarations(requireText(params, "declarations"));
         int transaction = currentProgram.startTransaction("REA type definitions");
         boolean commit = false;
         JsonObject defined;
         try {
-            // Parse without storing, so only the collected definitions are
-            // resolved below, each through the same conflict handler.
-            CParser parser = new CParser(types, false, null);
-            parser.setMonitor(monitor);
-            try {
-                parser.parse(TYPE_CATEGORY_MARKER + declarations);
-            }
-            catch (ghidra.app.util.cparser.C.ParseException | ghidra.app.util.cparser.C.TokenMgrError exception) {
-                throw new RequestFailure("invalid_declarations",
-                    "Ghidra's C parser rejected the declarations: " + safeMessage(exception));
-            }
-            // The parser files a function typedef's signature under the
-            // typedef's own name, which would make that name ambiguous.
-            for (DataType type : parser.getTypes().values()) {
-                if (!(type instanceof ghidra.program.model.data.TypeDef alias)) continue;
-                DataType base = alias.getDataType();
-                while (base instanceof ghidra.program.model.data.Pointer pointer) base = pointer.getDataType();
-                if (base instanceof ghidra.program.model.data.FunctionDefinition signature &&
-                    signature.getName().equals(alias.getName())) {
-                    try {
-                        signature.setName(alias.getName() + "_fn");
-                    }
-                    catch (ghidra.util.InvalidNameException | ghidra.util.exception.DuplicateNameException exception) {
-                        throw new RequestFailure("invalid_declarations",
-                            "Cannot name the signature of typedef " + alias.getName() + ": " + safeMessage(exception));
-                    }
-                }
-            }
-            Map<String, DataType> parsed = new TreeMap<>();
-            for (Map<String, DataType> table : List.of(parser.getComposites(), parser.getEnums(), parser.getTypes())) {
-                for (DataType type : table.values()) {
-                    if (!(type instanceof ghidra.program.model.data.BuiltInDataType))
-                        parsed.putIfAbsent(type.getPathName(), type);
-                }
-            }
-            if (parsed.isEmpty())
-                throw new RequestFailure("invalid_declarations",
-                    "The declarations define no struct, union, enum or typedef");
-            // Classify against the database before any resolve replaces a type.
-            Map<String, String> outcomes = new TreeMap<>();
-            for (Map.Entry<String, DataType> entry : parsed.entrySet()) {
-                DataType existing = types.getDataType(entry.getKey());
-                outcomes.put(entry.getKey(), existing == null ? "created"
-                    : existing.isEquivalent(entry.getValue()) ? "unchanged" : "replaced");
-            }
-            for (Map.Entry<String, DataType> entry : parsed.entrySet()) {
-                monitor.checkCancelled();
-                DataType stored = types.resolve(entry.getValue(), DataTypeConflictHandler.REPLACE_HANDLER);
-                if (!stored.getPathName().equals(entry.getKey()))
-                    throw new RequestFailure("annotation_readback_mismatch",
-                        "Ghidra stored " + entry.getKey() + " as " + stored.getPathName());
-            }
-            JsonArray readback = new JsonArray();
-            for (Map.Entry<String, DataType> entry : parsed.entrySet()) {
-                DataType stored = types.getDataType(entry.getKey());
-                if (stored == null || !stored.isEquivalent(entry.getValue()))
-                    throw new RequestFailure("annotation_readback_mismatch",
-                        "Type definition readback differs for " + entry.getKey());
-                readback.add(typeDefinitionReadback(types, stored, outcomes.get(entry.getKey())));
-            }
-            JsonArray skipped = new JsonArray();
-            for (String name : new java.util.TreeSet<>(parser.getFunctions().keySet())) {
-                // A function typedef also files its signature under its name.
-                if (parser.getTypes().containsKey(name)) continue;
-                JsonObject item = new JsonObject();
-                item.addProperty("name", name);
-                item.addProperty("kind", "function");
-                skipped.add(item);
-            }
-            JsonArray messages = new JsonArray();
-            for (String line : parser.getParseMessages().split("\n")) {
-                if (!line.isBlank()) messages.add(line.strip());
-            }
+            JsonObject result = defineTypes(declarations);
             monitor.checkCancelled();
             invalidateAnalysisCaches();
-            JsonObject result = new JsonObject();
-            result.add("types", readback);
-            result.add("skipped", skipped);
-            result.add("parser_messages", messages);
             result.add("effects", annotationEffects());
             commit = true;
             defined = result;
@@ -1536,6 +1513,89 @@ public final class ReaGhidraBridge extends HeadlessScript {
         }
         persistAnnotation(currentProgram.getImageBase());
         return defined;
+    }
+
+    // Parses and resolves the declarations inside the caller's transaction.
+    private JsonObject defineTypes(String declarations) throws Exception {
+        DataTypeManager types = currentProgram.getDataTypeManager();
+        // Parse without storing, so only the collected definitions are
+        // resolved below, each through the same conflict handler.
+        CParser parser = new CParser(types, false, null);
+        parser.setMonitor(monitor);
+        try {
+            parser.parse(TYPE_CATEGORY_MARKER + declarations);
+        }
+        catch (ghidra.app.util.cparser.C.ParseException | ghidra.app.util.cparser.C.TokenMgrError exception) {
+            throw new RequestFailure("invalid_declarations",
+                "Ghidra's C parser rejected the declarations: " + safeMessage(exception));
+        }
+        // The parser files a function typedef's signature under the
+        // typedef's own name, which would make that name ambiguous.
+        for (DataType type : parser.getTypes().values()) {
+            if (!(type instanceof ghidra.program.model.data.TypeDef alias)) continue;
+            DataType base = alias.getDataType();
+            while (base instanceof ghidra.program.model.data.Pointer pointer) base = pointer.getDataType();
+            if (base instanceof ghidra.program.model.data.FunctionDefinition signature &&
+                signature.getName().equals(alias.getName())) {
+                try {
+                    signature.setName(alias.getName() + "_fn");
+                }
+                catch (ghidra.util.InvalidNameException | ghidra.util.exception.DuplicateNameException exception) {
+                    throw new RequestFailure("invalid_declarations",
+                        "Cannot name the signature of typedef " + alias.getName() + ": " + safeMessage(exception));
+                }
+            }
+        }
+        Map<String, DataType> parsed = new TreeMap<>();
+        for (Map<String, DataType> table : List.of(parser.getComposites(), parser.getEnums(), parser.getTypes())) {
+            for (DataType type : table.values()) {
+                if (!(type instanceof ghidra.program.model.data.BuiltInDataType))
+                    parsed.putIfAbsent(type.getPathName(), type);
+            }
+        }
+        if (parsed.isEmpty())
+            throw new RequestFailure("invalid_declarations",
+                "The declarations define no struct, union, enum or typedef");
+        // Classify against the database before any resolve replaces a type.
+        Map<String, String> outcomes = new TreeMap<>();
+        for (Map.Entry<String, DataType> entry : parsed.entrySet()) {
+            DataType existing = types.getDataType(entry.getKey());
+            outcomes.put(entry.getKey(), existing == null ? "created"
+                : existing.isEquivalent(entry.getValue()) ? "unchanged" : "replaced");
+        }
+        for (Map.Entry<String, DataType> entry : parsed.entrySet()) {
+            monitor.checkCancelled();
+            DataType stored = types.resolve(entry.getValue(), DataTypeConflictHandler.REPLACE_HANDLER);
+            if (!stored.getPathName().equals(entry.getKey()))
+                throw new RequestFailure("annotation_readback_mismatch",
+                    "Ghidra stored " + entry.getKey() + " as " + stored.getPathName());
+        }
+        JsonArray readback = new JsonArray();
+        for (Map.Entry<String, DataType> entry : parsed.entrySet()) {
+            DataType stored = types.getDataType(entry.getKey());
+            if (stored == null || !stored.isEquivalent(entry.getValue()))
+                throw new RequestFailure("annotation_readback_mismatch",
+                    "Type definition readback differs for " + entry.getKey());
+            readback.add(typeDefinitionReadback(types, stored, outcomes.get(entry.getKey())));
+        }
+        JsonArray skipped = new JsonArray();
+        for (String name : new java.util.TreeSet<>(parser.getFunctions().keySet())) {
+            // A function typedef also files its signature under its name.
+            if (parser.getTypes().containsKey(name)) continue;
+            JsonObject item = new JsonObject();
+            item.addProperty("name", name);
+            item.addProperty("kind", "function");
+            skipped.add(item);
+        }
+        JsonArray messages = new JsonArray();
+        for (String line : parser.getParseMessages().split("\n")) {
+            if (!line.isBlank()) messages.add(line.strip());
+        }
+        JsonObject result = new JsonObject();
+        result.add("types", readback);
+        result.add("skipped", skipped);
+        result.add("parser_messages", messages);
+        return result;
     }
 
     private static JsonObject typeDefinitionReadback(DataTypeManager types, DataType type, String outcome) {
@@ -1570,6 +1630,198 @@ public final class ReaGhidraBridge extends HeadlessScript {
         sameName.stream().map(DataType::getPathName).filter(path -> !path.equals(type.getPathName()))
             .sorted().forEach(others::add);
         value.add("other_ids", others);
+        return value;
+    }
+
+    private static final List<String> ANNOTATION_SET_SECTIONS = List.of(
+        "processors", "memory_blocks", "declarations", "data", "functions");
+
+    // Item rejections a set reports against the failing item. Other failures,
+    // such as readback mismatches and cancellation, keep their own meaning.
+    private static final Set<String> ANNOTATION_ITEM_FAILURES = Set.of(
+        "invalid_request", "invalid_function_name", "invalid_function_signature",
+        "invalid_calling_convention", "invalid_variable_edit", "invalid_label",
+        "invalid_data_edit", "invalid_declarations", "invalid_memory_block", "not_found", "ambiguous");
+
+    private interface AnnotationItem<T> {
+        T apply() throws Exception;
+    }
+
+    private static <T> T annotationSetItem(String item, AnnotationItem<T> body) throws Exception {
+        try {
+            return body.apply();
+        }
+        catch (RequestFailure failure) {
+            if (!ANNOTATION_ITEM_FAILURES.contains(failure.code)) throw failure;
+            throw new RequestFailure("invalid_annotation_set", item + ": " + safeMessage(failure));
+        }
+    }
+
+    private static JsonArray annotationSetSection(JsonObject set, String section) {
+        JsonElement value = set.get(section);
+        if (value == null) return new JsonArray();
+        if (!value.isJsonArray() || value.getAsJsonArray().isEmpty())
+            throw new RequestFailure("invalid_annotation_set", section + " must be a non-empty array");
+        return value.getAsJsonArray();
+    }
+
+    private static JsonObject annotationSetObject(JsonElement value, String item) {
+        if (value == null || !value.isJsonObject())
+            throw new RequestFailure("invalid_annotation_set", item + " must be an object");
+        return value.getAsJsonObject();
+    }
+
+    private void requireAnnotationSetProcessor(JsonObject set) {
+        JsonArray processors = annotationSetSection(set, "processors");
+        if (processors.isEmpty()) return;
+        String processor = currentProgram.getLanguage().getProcessor().toString();
+        List<String> accepted = new ArrayList<>();
+        for (JsonElement value : processors) {
+            if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isString())
+                throw new RequestFailure("invalid_annotation_set", "processors must be names");
+            accepted.add(value.getAsString());
+        }
+        if (!accepted.contains(processor))
+            throw new RequestFailure("invalid_annotation_set",
+                "The set applies to " + String.join(", ", accepted) + "; this program's processor is " + processor);
+    }
+
+    private JsonObject applyNativeAnnotations(JsonObject params) throws Exception {
+        for (String key : params.keySet()) {
+            if (!key.equals("annotations") && !key.equals("pack"))
+                throw new RequestFailure("invalid_request", "Unknown annotation set field: " + key);
+        }
+        JsonObject set = annotationSetObject(params.get("annotations"), "annotations");
+        for (String key : set.keySet()) {
+            if (!ANNOTATION_SET_SECTIONS.contains(key))
+                throw new RequestFailure("invalid_annotation_set", "Unknown annotation set section: " + key);
+        }
+        if (ANNOTATION_SET_SECTIONS.stream().skip(1).noneMatch(set::has))
+            throw new RequestFailure("invalid_annotation_set",
+                "Supply at least one memory block, declaration, data edit or function edit");
+        JsonElement pack = params.has("pack") ? params.get("pack") : JsonNull.INSTANCE;
+        requireAnnotationSetProcessor(set);
+        int transaction = currentProgram.startTransaction("REA annotation set");
+        boolean commit = false;
+        JsonObject applied;
+        try {
+            // Blocks first so data edits can address them, and types before
+            // the data and function edits that name them.
+            JsonArray blocks = new JsonArray();
+            JsonArray memoryBlocks = annotationSetSection(set, "memory_blocks");
+            for (int index = 0; index < memoryBlocks.size(); index++) {
+                JsonElement value = memoryBlocks.get(index);
+                String item = "memory_blocks[" + index + "]";
+                blocks.add(annotationSetItem(item, () -> applyMemoryBlock(annotationSetObject(value, item))));
+            }
+            JsonObject types = set.has("declarations")
+                ? annotationSetItem("declarations", () -> defineTypes(validDeclarations(requireText(set, "declarations"))))
+                : null;
+            JsonArray data = new JsonArray();
+            JsonArray dataEdits = annotationSetSection(set, "data");
+            for (int index = 0; index < dataEdits.size(); index++) {
+                monitor.checkCancelled();
+                JsonElement value = dataEdits.get(index);
+                String item = "data[" + index + "]";
+                data.add(annotationSetItem(item, () -> {
+                    DataEdit edit = prepareDataEdit(annotationSetObject(value, item));
+                    applyDataEdit(edit);
+                    return dataEditReadback(edit);
+                }));
+            }
+            JsonArray functions = new JsonArray();
+            JsonArray functionEdits = annotationSetSection(set, "functions");
+            for (int index = 0; index < functionEdits.size(); index++) {
+                monitor.checkCancelled();
+                JsonElement value = functionEdits.get(index);
+                String item = "functions[" + index + "]";
+                functions.add(annotationSetItem(item, () -> {
+                    FunctionEdit edit = prepareFunctionEdit(annotationSetObject(value, item));
+                    applyFunctionEdit(edit);
+                    invalidateAnalysisCaches();
+                    return functionEditReadback(edit);
+                }));
+            }
+            monitor.checkCancelled();
+            invalidateAnalysisCaches();
+            JsonObject result = new JsonObject();
+            result.add("pack", pack);
+            result.add("memory_blocks", blocks);
+            result.add("types", types == null ? new JsonArray() : types.get("types"));
+            result.add("skipped", types == null ? new JsonArray() : types.get("skipped"));
+            result.add("parser_messages", types == null ? new JsonArray() : types.get("parser_messages"));
+            result.add("data", data);
+            result.add("functions", functions);
+            result.add("effects", annotationEffects());
+            commit = true;
+            applied = result;
+        }
+        finally {
+            currentProgram.endTransaction(transaction, commit);
+            invalidateAnalysisCaches();
+        }
+        persistAnnotation(currentProgram.getImageBase());
+        return applied;
+    }
+
+    private static final Set<String> MEMORY_BLOCK_KEYS = Set.of("name", "address", "size_bytes", "volatile");
+
+    private JsonObject applyMemoryBlock(JsonObject spec) {
+        if (!spec.keySet().equals(MEMORY_BLOCK_KEYS))
+            throw new RequestFailure("invalid_memory_block", "A memory block has exactly name, address, size_bytes and volatile");
+        String name = requireText(spec, "name");
+        validateAnnotationText(name, "name");
+        Address start = requireAddress(spec, "address");
+        JsonElement sizeValue = spec.get("size_bytes");
+        JsonElement volatileValue = spec.get("volatile");
+        if (!sizeValue.isJsonPrimitive() || !sizeValue.getAsJsonPrimitive().isNumber() ||
+            !volatileValue.isJsonPrimitive() || !volatileValue.getAsJsonPrimitive().isBoolean())
+            throw new RequestFailure("invalid_memory_block", "Memory block " + name + " needs a numeric size_bytes and a boolean volatile");
+        long size = sizeValue.getAsLong();
+        if (size <= 0)
+            throw new RequestFailure("invalid_memory_block", "Memory block " + name + " size must be positive");
+        Address end;
+        try {
+            end = start.addNoWrap(size - 1);
+        }
+        catch (ghidra.program.model.address.AddressOverflowException exception) {
+            throw new RequestFailure("invalid_memory_block", "Memory block " + name + " runs past the end of its address space");
+        }
+        ghidra.program.model.mem.Memory memory = currentProgram.getMemory();
+        AddressSet range = new AddressSet(start, end);
+        String outcome;
+        MemoryBlock block;
+        if (memory.contains(range)) {
+            // Already mapped, by the loader or an earlier (replayed) set.
+            block = memory.getBlock(start);
+            outcome = "existing";
+        }
+        else if (memory.intersects(range)) {
+            throw new RequestFailure("invalid_memory_block",
+                "Memory block " + name + " at " + canonicalAddress(start) + "-" + canonicalAddress(end) +
+                " partly overlaps mapped memory; map the unmapped part or omit it");
+        }
+        else {
+            try {
+                block = memory.createUninitializedBlock(name, start, size, false);
+            }
+            catch (Exception exception) {
+                throw new RequestFailure("invalid_memory_block",
+                    "Ghidra could not add memory block " + name + " at " + canonicalAddress(start) + ": " + safeMessage(exception));
+            }
+            block.setRead(true);
+            block.setWrite(true);
+            block.setExecute(false);
+            block.setVolatile(volatileValue.getAsBoolean());
+            outcome = "created";
+        }
+        JsonObject value = new JsonObject();
+        value.addProperty("name", block.getName());
+        value.addProperty("start", canonicalAddress(start));
+        value.addProperty("end", canonicalAddress(end));
+        value.addProperty("volatile", block.isVolatile());
+        value.addProperty("initialized", block.isInitialized());
+        value.addProperty("outcome", outcome);
         return value;
     }
 

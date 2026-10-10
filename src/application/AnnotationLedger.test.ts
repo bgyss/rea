@@ -247,3 +247,40 @@ describe("annotation ledger type definitions", () => {
     });
   });
 });
+
+describe("annotation ledger sets", () => {
+  it("replays the recorded set through apply_native_annotations and reports its pack", async () => {
+    const path = await ledgerPath();
+    const { procedure: _procedure, name: _name, ...identity } = entry();
+    const annotations = {
+      processors: ["6502"],
+      memory_blocks: [
+        { name: "PPU_REGS", address: "0x2000", size_bytes: 8, volatile: true },
+      ],
+      data: [{ address: "0x2000", label: "PPUCTRL", data_type: "byte" }],
+    };
+    expect(
+      await appendAnnotationLedger(path, {
+        ...identity,
+        annotations,
+        pack: { id: "nes-registers", version: 1 },
+      }),
+    ).toEqual(ok(null));
+    const calls: unknown[] = [];
+    const replay = await replayAnnotationLedger(
+      {
+        execute: (operation, parameters) => {
+          calls.push([operation, parameters]);
+          return Promise.resolve(err(new AnalysisInputError(operation)));
+        },
+      },
+      { path, targetSha256: sha, profileDigest: profile },
+    );
+    if (!replay.ok) throw replay.error;
+    expect(calls).toEqual([["apply_native_annotations", { annotations }]]);
+    expect(replay.value).toMatchObject({
+      applied: 0,
+      failed: [{ line: 1, pack: "nes-registers@1" }],
+    });
+  });
+});

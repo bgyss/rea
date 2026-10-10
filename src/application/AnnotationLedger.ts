@@ -20,6 +20,10 @@ import {
   type AnnotationLedgerReplay,
 } from "../domain/annotationLedger.js";
 import type { AnnotationOperation } from "../domain/native/nativeDataAnnotations.js";
+import {
+  nativeAnnotationSetInputSchema,
+  resolveAnnotationSet,
+} from "../domain/native/nativeLabelPacks.js";
 import { err, ok, type Result } from "../domain/result.js";
 
 /** Ledgers are text journals; anything larger is not one. */
@@ -72,9 +76,19 @@ const replayRequest = (
   readonly location:
     | { procedure: string }
     | { address: string }
-    | { types: string[] };
+    | { types: string[] }
+    | { pack: string | null };
   readonly arguments: Readonly<Record<string, JsonValue>>;
 } => {
+  if ("annotations" in entry)
+    return {
+      operation: "apply_native_annotations",
+      location: {
+        pack:
+          entry.pack === null ? null : `${entry.pack.id}@${entry.pack.version}`,
+      },
+      arguments: jsonObjectSchema.parse({ annotations: entry.annotations }),
+    };
   if ("declarations" in entry)
     return {
       operation: "define_native_types",
@@ -137,7 +151,33 @@ const CHANGE_SCHEMAS = {
   annotate_native_function: functionChangesSchema,
   annotate_native_data: dataChangesSchema,
   define_native_types: typeChangesSchema,
-} as const satisfies Record<AnnotationOperation, unknown>;
+} as const satisfies Record<
+  Exclude<AnnotationOperation, "apply_native_annotations">,
+  unknown
+>;
+
+// What a ledger entry records for an applied edit: an annotation set records
+// its resolved contents, so replay does not depend on later pack versions.
+const recordedEdit = (
+  operation: AnnotationOperation,
+  arguments_: Readonly<Record<string, JsonValue>>,
+  readback: unknown,
+): Result<Record<string, unknown>, string> => {
+  if (operation === "apply_native_annotations") {
+    const request = nativeAnnotationSetInputSchema.safeParse(arguments_);
+    return request.success
+      ? ok({ ...resolveAnnotationSet(request.data) })
+      : err(
+          `its request could not be recorded in the ledger: ${request.error.message}`,
+        );
+  }
+  const location = recordedLocation(operation, readback);
+  if (!location.ok) return location;
+  const recorded = changes(CHANGE_SCHEMAS[operation], arguments_);
+  return recorded.ok
+    ? ok({ ...location.value, ...recorded.value })
+    : err(`its request could not be recorded in the ledger: ${recorded.error}`);
+};
 
 /** The ledger an open target records into, with the identity it was opened under. */
 export interface AnnotationLedgerTarget {
@@ -315,18 +355,16 @@ export const appendAnnotationFromEvidence = async (
         `The annotation was applied in this session but ${reason}`,
       ),
     );
-  const location = recordedLocation(operation, evidence.normalized_result);
-  if (!location.ok) return notRecorded(location.error);
-  const recorded = changes(CHANGE_SCHEMAS[operation], arguments_);
-  if (!recorded.ok)
-    return notRecorded(
-      `its request could not be recorded in the ledger: ${recorded.error}`,
-    );
+  const recorded = recordedEdit(
+    operation,
+    arguments_,
+    evidence.normalized_result,
+  );
+  if (!recorded.ok) return notRecorded(recorded.error);
   const entry = annotationLedgerEntrySchema.safeParse({
     schema_version: "rea.annotation-ledger.v1",
     target_sha256: bound.targetSha256,
     analysis_profile_digest: bound.profileDigest,
-    ...location.value,
     ...recorded.value,
     evidence_id: evidence.evidence_id,
     recorded_at: new Date().toISOString(),

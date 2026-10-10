@@ -65,6 +65,13 @@ export const limitationsFor = (operation: string): readonly string[] => {
         "Each parsed type is resolved with Ghidra's replace conflict handler: a different definition at the same path replaces the earlier one, including in data and signatures that use it; an equivalent one is unchanged. Bare-name lookups in other annotation edits reject names shared by non-equivalent types in different categories. All types commit together after readback; any failure rolls them all back.",
         "Metadata edits invalidate immutable analysis snapshots and are discarded on close unless the persistent project cache is enabled.",
       ];
+    case "apply_native_annotations":
+      return [
+        ...common,
+        "A set applies in one transaction: memory blocks, then C declarations, then data edits, then function edits, each in order and with the same rules as define_native_types, annotate_native_data and annotate_native_function. The first rejected item rolls back the whole set and is named in the error. Function readback omits the refreshed dossier; call analyze_function for one.",
+        "Memory blocks are uninitialized, readable and writable, and are added only where no memory is mapped; a range already fully mapped is kept as it is, and a partial overlap is rejected. Volatile blocks make the decompiler keep each register access. A processors list is compared with Ghidra's processor name, e.g. 6502 or MIPS.",
+        "Built-in label packs are versioned rea.label-pack.v1 data; the ledger records the resolved set, so replay is unaffected by later pack versions. Metadata edits invalidate immutable analysis snapshots and are discarded on close unless the persistent project cache is enabled.",
+      ];
     case "inspect_native_load_image":
       return [
         ...common,

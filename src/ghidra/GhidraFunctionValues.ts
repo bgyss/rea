@@ -11,6 +11,11 @@ import {
   nativeTypeDefinitionsInputSchema,
   nativeTypeDefinitionsSchema,
 } from "../domain/native/nativeTypeDefinitions.js";
+import { nativeAnnotationSetResultSchema } from "../domain/native/nativeAnnotationSets.js";
+import {
+  nativeAnnotationSetInputSchema,
+  resolveAnnotationSet,
+} from "../domain/native/nativeLabelPacks.js";
 import { nativeDataTypeSchema } from "../domain/native/nativeDataType.js";
 import {
   nativeInstructionSchema,
@@ -50,6 +55,7 @@ export const GHIDRA_FUNCTION_OPERATIONS = [
   "annotate_native_function",
   "annotate_native_data",
   "define_native_types",
+  "apply_native_annotations",
   "inspect_native_data_type",
   "inspect_native_instruction",
   "resolve_native_call_targets",
@@ -83,6 +89,9 @@ const inputSchemas = {
   annotate_native_function: nativeFunctionAnnotationsInputSchema,
   annotate_native_data: nativeDataAnnotationsInputSchema,
   define_native_types: nativeTypeDefinitionsInputSchema,
+  // The bridge applies the resolved set; packs never cross the socket by id.
+  apply_native_annotations:
+    nativeAnnotationSetInputSchema.transform(resolveAnnotationSet),
   inspect_native_data_type: z
     .object({
       document,
@@ -389,6 +398,7 @@ const resultSchemas = {
   }),
   annotate_native_data: nativeDataAnnotationsSchema,
   define_native_types: nativeTypeDefinitionsSchema,
+  apply_native_annotations: nativeAnnotationSetResultSchema,
   analyze_function: ghidraFunctionDossier,
   procedure_assembly: z.string(),
   procedure_callees: z.array(ghidraCanonicalAddressSchema),

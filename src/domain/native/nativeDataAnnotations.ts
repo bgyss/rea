@@ -6,6 +6,7 @@ export const ANNOTATION_OPERATIONS = [
   "annotate_native_function",
   "annotate_native_data",
   "define_native_types",
+  "apply_native_annotations",
 ] as const;
 
 /** One annotation operation. */
