@@ -457,6 +457,38 @@ and commits them all or none:
 }
 ```
 
+`apply_native_annotations` (CLI `apply-native-annotations <path>` with
+`--pack ID` or `--file FILE`) applies many edits in one transaction. An
+annotation set has optional sections, applied in this order:
+
+1. `memory_blocks`: `{name, address, size_bytes, volatile}` ranges to map, such
+   as an MMIO window the loader left unmapped. A block is added, uninitialized
+   and read/write, only where nothing is mapped; a range already fully mapped is
+   kept (`outcome: "existing"`), and a partial overlap rejects the set.
+   `volatile: true` keeps the decompiler from merging or dropping register
+   accesses.
+2. `declarations`: C text, as `define_native_types` takes.
+3. `data`: `annotate_native_data` edits.
+4. `functions`: `annotate_native_function` edits.
+
+`processors` (for example `["6502"]`) restricts a set to Ghidra processors.
+The first rejected item rolls back everything, and the error names it, for
+example `data[3]: …`. The readback lists every block, type, address and
+function; function readback omits the refreshed dossier.
+
+Built-in label packs are versioned `rea.label-pack.v1` documents: `id`,
+`version`, `title`, `platform`, `sources`, `limitations` and `annotations`.
+
+| Pack            | Covers                                                                                                                                                    |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `nes-registers` | PPU `$2000-$2007`, APU and I/O `$4000-$4017`, as `PPU_REGS` and `APU_IO_REGS` volatile blocks                                                             |
+| `ps1-registers` | Scratchpad `0x1F800000`, and `0x1F801000-0x1F801FFF` I/O: memory control, controller and serial ports, interrupts, DMA, timers, CD-ROM, GPU, MDEC and SPU |
+
+Each pack lists what it leaves out, such as register mirrors. Pass `pack` by
+id, or pass another pack's `annotations` inline (the CLI's `--file` accepts a
+whole `rea.label-pack.v1` file). With a pack applied, the decompiler names the
+registers, for example `PPUCTRL = 0x80;` or `I_STAT = 0;`.
+
 - `npm run verify:ghidra`: host-native debug/stripped targets, native type layout,
   instruction/call facts, value dependencies and process/project cleanup.
 - `npm run verify:ghidra:aarch64-jump-table`: optimized ELF and byte/halfword
@@ -486,8 +518,11 @@ SHA-256, the analysis-profile digest, the function entry address (or, for
 `annotate_native_data`, the annotated address), the requested
 `name`, comment, signature, calling-convention and variable changes, the
 Evidence ID and the time. A `define_native_types` entry instead holds the
-declarations and the ids of the types they defined; entries replay in order,
-so types are defined before later edits that name them.
+declarations and the ids of the types they defined, and an
+`apply_native_annotations` entry holds the resolved set and the built-in pack
+`{id, version}` it came from, so a later pack version never changes replay.
+Entries replay in order, so types are defined before later edits that name
+them.
 
 - After opening, REA replays the entries recorded for exactly this target digest
   and analysis profile, in order. Matching digests guarantee identical bytes and
@@ -496,8 +531,8 @@ so types are defined before later edits that name them.
   different code. `open_binary` returns the replay report as
   `annotation_ledger`; an entry that fails to apply is listed with its line and
   reason. The CLI logs such failures as warnings.
-- Each successful `annotate_native_function`, `annotate_native_data` or
-  `define_native_types` appends one synced line. If the
+- Each successful `annotate_native_function`, `annotate_native_data`,
+  `define_native_types` or `apply_native_annotations` appends one synced line. If the
   append fails, the tool reports that the edit was applied in the session but
   not recorded.
 - A missing file starts an empty ledger. A malformed line fails the open rather

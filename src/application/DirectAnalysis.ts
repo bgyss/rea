@@ -59,6 +59,7 @@ type DirectAnalysisTool =
   | "annotate_native_function"
   | "annotate_native_data"
   | "define_native_types"
+  | "apply_native_annotations"
   | "inspect_native_load_image"
   | "read_bytes"
   | "address_to_file_offset"

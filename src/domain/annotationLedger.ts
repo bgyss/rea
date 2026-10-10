@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { nativeVariableAnnotationSchema } from "./native/nativeFunctionAnnotations.js";
+import { nativeAnnotationSetSchema } from "./native/nativeAnnotationSets.js";
 
 const ledgerIdentity = {
   schema_version: z.literal("rea.annotation-ledger.v1"),
@@ -58,11 +59,27 @@ export const typeDefinitionLedgerEntrySchema = z.strictObject({
   ...ledgerProvenance,
 });
 
-/** JSON Lines record of one applied annotation: a function, an address, or type definitions. */
+/** JSON Lines record of one applied apply_native_annotations set. */
+export const annotationSetLedgerEntrySchema = z.strictObject({
+  ...ledgerIdentity,
+  annotations: nativeAnnotationSetSchema.describe(
+    "The resolved set that was applied, including a built-in pack's contents",
+  ),
+  pack: z
+    .strictObject({
+      id: z.string().min(1),
+      version: z.number().int().positive(),
+    })
+    .nullable(),
+  ...ledgerProvenance,
+});
+
+/** JSON Lines record of one applied annotation: a function, an address, type definitions, or a set. */
 export const annotationLedgerEntrySchema = z.union([
   functionAnnotationLedgerEntrySchema,
   dataAnnotationLedgerEntrySchema,
   typeDefinitionLedgerEntrySchema,
+  annotationSetLedgerEntrySchema,
 ]);
 export type AnnotationLedgerEntry = z.infer<typeof annotationLedgerEntrySchema>;
 
@@ -88,6 +105,14 @@ export const annotationLedgerReplaySchema = z.strictObject({
       z.strictObject({
         line: z.number().int().positive(),
         types: z.array(z.string()),
+        reason: z.string(),
+      }),
+      z.strictObject({
+        line: z.number().int().positive(),
+        pack: z
+          .string()
+          .nullable()
+          .describe("id@version, or null for an inline set"),
         reason: z.string(),
       }),
     ]),

@@ -90,6 +90,13 @@ const REJECTED_ANNOTATION_FIELDS = [
     message:
       "Ghidra's C parser rejected the declarations: C Parser:  Encountered errors during parse.",
   },
+  {
+    operation: "apply_native_annotations" as const,
+    remoteCode: "invalid_annotation_set",
+    field: undefined,
+    input: { pack: "nes-registers" },
+    message: "The set applies to 6502; this program's processor is x86",
+  },
 ];
 
 describe("Ghidra jump-table profile", () => {
@@ -720,7 +727,13 @@ describe("Ghidra result projection", () => {
         ok: false,
         error: {
           _tag: "AnalysisInputError",
-          issues: [{ path: [field], reason: "invalid_value", message }],
+          issues: [
+            {
+              path: field === undefined ? [] : [field],
+              reason: "invalid_value",
+              message,
+            },
+          ],
         },
       });
     },

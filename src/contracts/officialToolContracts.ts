@@ -2,6 +2,7 @@ import { z } from "zod";
 import { nativeDataAnnotationsInputSchema } from "../domain/native/nativeDataAnnotations.js";
 import { nativeFunctionAnnotationsInputSchema } from "../domain/native/nativeFunctionAnnotations.js";
 import { nativeTypeDefinitionsInputSchema } from "../domain/native/nativeTypeDefinitions.js";
+import { nativeAnnotationSetInputSchema } from "../domain/native/nativeLabelPacks.js";
 
 import {
   officialOutputSchemas,
@@ -55,6 +56,11 @@ export const OFFICIAL_TOOL_CONTRACTS = [
     "define_native_types",
     "Atomically define C struct, union, enum and typedef declarations in the analysis database through Ghidra's C parser, then read back each type's id, layout, fields and enum members. Types are placed in the /rea category (or the category a #line marker names) and sized for the target's data organization; redefining a type at the same path replaces it everywhere it is used, and an identical definition is unchanged. Declarations are not preprocessed. Defined types can then be named as data_type in annotate_native_data and in annotate_native_function signatures and variables, and inspected with inspect_native_data_type. Ghidra changes its session analysis database (or the persistent project cache when enabled); original executable bytes remain unchanged. When open_binary (or the CLI) names an annotation_ledger_path, the declarations are appended to that ledger and replayed, in order, in later sessions of the same target and profile. Windows P0 and providers without this capability are unsupported.",
     nativeTypeDefinitionsInputSchema,
+  ),
+  official(
+    "apply_native_annotations",
+    "Atomically apply a built-in hardware label pack (NES or PS1 registers) or an inline annotation set: memory blocks for unmapped ranges such as MMIO windows (volatile for registers), then C declarations, then annotate_native_data edits, then annotate_native_function edits, each in order. Any rejected edit rolls back the whole set; the error names the failing item. Returns readback for every block, type, address and function. A set may name the processors it applies to. Ghidra changes its session analysis database (or the persistent project cache when enabled); original executable bytes remain unchanged. When open_binary (or the CLI) names an annotation_ledger_path, the resolved set is appended to that ledger and replayed in later sessions of the same target and profile. Windows P0 and providers without this capability are unsupported.",
+    nativeAnnotationSetInputSchema,
   ),
   official(
     "inspect_native_load_image",

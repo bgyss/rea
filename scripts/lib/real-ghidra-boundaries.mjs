@@ -13,6 +13,7 @@ import { verifyGhidraSnapshotLifecycle } from "./real-ghidra-snapshot-lifecycle.
 import { verifyGhidraTargetAdmission } from "./real-ghidra-target-admission.mjs";
 import { verifyGhidraNamespaceAnnotations } from "./real-ghidra-namespace-annotations.mjs";
 import {
+  verifyAnnotationSets,
   verifyDataAnnotations,
   verifyTypeDefinitions,
   verifyTypedAnnotations,
@@ -644,6 +645,11 @@ export async function verifyGhidraBoundaries(
     globalName.address,
     headerPath,
   );
+  const annotationSets = await verifyAnnotationSets(
+    { call, invalid },
+    indirectProcedure,
+    globalName.address,
+  );
   for (const renamed of ["0xordinary", "probe::qualified", "🧪probe"]) {
     await call("annotate_native_function", {
       procedure: address,
@@ -726,6 +732,7 @@ export async function verifyGhidraBoundaries(
     typed_annotations: typedAnnotations,
     data_annotations: dataAnnotations,
     type_definitions: typeDefinitions,
+    annotation_sets: annotationSets,
     mutation_rollback: true,
     annotation_native_text_validation: true,
     lossless_unicode_transport: true,

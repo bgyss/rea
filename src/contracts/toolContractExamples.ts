@@ -51,6 +51,7 @@ export const TOOL_EXAMPLE_OVERRIDES: Readonly<
     label: "ppu_ctrl",
     data_type: "uint8_t",
   },
+  apply_native_annotations: { pack: "nes-registers" },
   define_native_types: {
     declarations:
       "typedef struct oam_entry { unsigned char y, tile, attributes, x; } oam_entry;",

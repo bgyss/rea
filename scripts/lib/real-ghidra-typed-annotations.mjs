@@ -313,3 +313,55 @@ export const verifyTypeDefinitions = async (
     cli_defined: true,
   };
 };
+
+/**
+ * An inline annotation set (B6 bulk apply): declarations, a data edit and a
+ * function edit naming the declared type, applied atomically; a rejected
+ * function item rolls back the type and label applied before it.
+ */
+export const verifyAnnotationSets = async (
+  { call, invalid },
+  { address: entry, value: name },
+  dataAddress,
+) => {
+  const annotations = {
+    declarations: "typedef int (*rea_set_callback)(int);",
+    data: [{ address: dataAddress, label: "rea_set_counter" }],
+    functions: [
+      {
+        procedure: entry,
+        signature: `int ${name}(rea_set_callback callback, int value)`,
+        comment: "set probe",
+      },
+    ],
+  };
+  await invalid(
+    "apply_native_annotations",
+    {
+      annotations: {
+        ...annotations,
+        declarations: "typedef int (*rea_set_rolled_back)(int);",
+        functions: [{ procedure: "rea_missing_function", comment: "x" }],
+      },
+    },
+    /functions\[0\]: Unknown Ghidra procedure name or address: rea_missing_function/u,
+  );
+  const rolledBack = await call("inspect_native_data_type", {
+    type: "/rea/rea_set_rolled_back",
+  });
+  assert.equal(rolledBack.status, "unavailable");
+  assert.notEqual(
+    await call("address_name", { address: dataAddress }),
+    "rea_set_counter",
+  );
+  const applied = await call("apply_native_annotations", { annotations });
+  assert.equal(applied.pack, null);
+  assert.deepEqual(
+    applied.types.map((type) => type.id),
+    ["/rea/rea_set_callback"],
+  );
+  assert.equal(applied.data[0].label, "rea_set_counter");
+  assert.match(applied.functions[0].signature, /rea_set_callback callback/u);
+  assert.equal(applied.functions[0].comment, "set probe");
+  return { applied: true, item_rejection_rolled_back: true };
+};
