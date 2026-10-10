@@ -83,7 +83,7 @@ Add an opt-in project mode, keyed by target SHA-256 and profile digest, under a 
 
 Function signature and calling convention, data type and struct definitions (C header import through Ghidra's CParser), data labels, local and parameter names, bulk apply, and platform MMIO label packs (NES PPU and APU registers, PS1 hardware registers) as versioned JSON.
 
-**Status: function typing and data annotations are merged ([PR #7](https://github.com/bgyss/rea/pull/7)), and so are C type definitions ([PR #9](https://github.com/bgyss/rea/pull/9)). Bulk apply and the MMIO label packs are on `feat/bulk-annotations`.**
+**Status: function typing and data annotations are merged ([PR #7](https://github.com/bgyss/rea/pull/7)), and so are C type definitions ([PR #9](https://github.com/bgyss/rea/pull/9)). Bulk apply and the MMIO label packs followed in [PR #10](https://github.com/bgyss/rea/pull/10).**
 
 - **Contract.** `annotate_native_function` gains `signature` (a C prototype parsed by Ghidra's `FunctionSignatureParser`), `calling_convention` (validated against the compiler spec), and `variables` (rename and/or retype decompiler locals and parameters through `HighFunctionDBUtil.updateDBVariable`). They share the existing transaction, so any rejection rolls back the whole request. Bridge rejections map to `invalid_request` issues on the offending field.
 - **Readback.** It always includes `signature` and `calling_convention`, plus each edited variable's re-decompiled name, type, parameter flag and storage.
