@@ -188,7 +188,7 @@ try {
     });
     if (!fresh.ok) throw fresh.error;
     const byIdentifier = (snapshot, identifier) =>
-      snapshot.nodes.find((node) => node.identifier === identifier);
+      snapshot?.nodes.find((node) => node.identifier === identifier);
     const disabledNode = byIdentifier(fresh.value.initial, "rea-disabled");
     const fieldNode = byIdentifier(fresh.value.initial, "rea-field");
     const incrementNode = byIdentifier(fresh.value.initial, "rea-increment");
@@ -355,6 +355,117 @@ try {
       );
     scenarioStatus =
       "selectors-attributes-keys-conditions-and-checkpoints-observed";
+
+    // System-wide pointer gestures: raise, topmost check, HID events, cursor restore.
+    const cursor = async () => {
+      const { stdout } = await promisify(execFile)("/usr/bin/swift", [
+        "-e",
+        "import CoreGraphics; let p = CGEvent(source: nil)!.location; print(p.x, p.y)",
+      ]);
+      return stdout.trim();
+    };
+    const cursorBefore = await cursor();
+    const canvas = { identifier: "rea-canvas" };
+    const pointerScenario = await observeNativeUi(
+      target.value,
+      "capture_native_ui_scenario",
+      {
+        ...scope,
+        screenshot: false,
+        steps: [
+          {
+            kind: "pointer",
+            gesture: "drag",
+            at: { selector: canvas, offset: { x: 20, y: 20 } },
+            to: { selector: canvas, offset: { x: 180, y: 80 } },
+            modifiers: ["shift"],
+            duration_ms: 240,
+          },
+          {
+            kind: "pointer",
+            gesture: "double_click",
+            at: { selector: canvas, offset: { x: 60, y: 40 } },
+          },
+          {
+            kind: "pointer",
+            gesture: "right_click",
+            at: { selector: canvas, offset: { x: 60, y: 40 } },
+          },
+          {
+            kind: "pointer",
+            gesture: "click",
+            at: { selector: { identifier: "rea-counter" } },
+          },
+        ],
+      },
+    );
+    if (!pointerScenario.ok) throw pointerScenario.error;
+    const pointerSteps = pointerScenario.value.steps;
+    const dragLog =
+      byIdentifier(pointerSteps[0]?.after, "rea-canvas")?.value ?? "";
+    if (
+      pointerSteps.some((step) => step.outcome !== "completed") ||
+      !/down\+shift@20,20x1 drag\+shift@\d+,\d+x\d+ up\+shift@180,80x1$/u.test(
+        dragLog,
+      ) ||
+      !/down@60,40x2/u.test(
+        byIdentifier(pointerSteps[1]?.after, "rea-canvas")?.value ?? "",
+      ) ||
+      !/right@60,40/u.test(
+        byIdentifier(pointerSteps[2]?.after, "rea-canvas")?.value ?? "",
+      ) ||
+      byIdentifier(pointerSteps[3]?.after, "rea-counter")?.title !==
+        "Pointer clicks: 1"
+    )
+      throw new Error(
+        `Pointer scenario failed: ${JSON.stringify({
+          dragLog,
+          steps: pointerSteps.map(({ kind, outcome, reason }) => ({
+            kind,
+            outcome,
+            reason,
+          })),
+        })}`,
+      );
+    const beforeOccluded = byIdentifier(
+      pointerSteps[3]?.after,
+      "rea-canvas",
+    )?.value;
+    const occluded = await observeNativeUi(
+      target.value,
+      "capture_native_ui_scenario",
+      {
+        ...scope,
+        screenshot: false,
+        steps: [
+          {
+            kind: "pointer",
+            gesture: "click",
+            at: { selector: canvas, offset: { x: 250, y: 50 } },
+          },
+        ],
+      },
+    );
+    if (
+      !occluded.ok ||
+      occluded.value.steps[0]?.outcome !== "failed" ||
+      !occluded.value.steps[0]?.reason?.includes("point-occluded") ||
+      byIdentifier(occluded.value.initial, "rea-canvas")?.value !==
+        beforeOccluded
+    )
+      throw new Error(
+        `Occluded pointer target was not refused: ${JSON.stringify(occluded.ok ? occluded.value.steps : occluded.error.message)}`,
+      );
+    const cursorAfter = await cursor();
+    // Cursor warping snaps fractional positions to whole points.
+    const [bx, by] = cursorBefore.split(" ").map(Number);
+    const [ax, ay] = cursorAfter.split(" ").map(Number);
+    if (Math.abs(ax - bx) > 1 || Math.abs(ay - by) > 1)
+      throw new Error(
+        `Cursor was not restored: ${cursorBefore} -> ${cursorAfter}`,
+      );
+    scenarioStatus =
+      "selectors-attributes-keys-conditions-checkpoints-and-system-wide-pointer-observed";
   }
   const mismatch = await observeNativeUi(
     { ...target.value, sha256: "0".repeat(64) },

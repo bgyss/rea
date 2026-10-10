@@ -50,6 +50,24 @@ const elementTarget = {
     .describe("Attribute selector; exactly one of path or selector"),
 };
 
+const pointSchema = z.strictObject({ x: z.number(), y: z.number() });
+
+/**
+ * Pointer location: an element (path or selector) plus an optional offset
+ * from its top-left corner (default: its centre), or a window-relative point.
+ */
+export const nativeUiPointTargetSchema = z.strictObject({
+  ...elementTarget,
+  offset: pointSchema
+    .exactOptional()
+    .describe(
+      "Points from the element's top-left corner; defaults to its centre",
+    ),
+  window_point: pointSchema
+    .exactOptional()
+    .describe("Points from the window's top-left corner"),
+});
+
 const modifiersSchema = z
   .array(z.enum(["command", "shift", "option", "control"]))
   .max(4)
@@ -104,6 +122,22 @@ const stepSchemas = [
     text: z.string(),
   }),
   z.strictObject({
+    kind: z.literal("pointer"),
+    gesture: z.enum(["click", "double_click", "right_click", "drag"]),
+    at: nativeUiPointTargetSchema,
+    to: nativeUiPointTargetSchema
+      .exactOptional()
+      .describe("Drag destination; required for drag only"),
+    modifiers: modifiersSchema,
+    duration_ms: z
+      .number()
+      .int()
+      .min(0)
+      .max(10_000)
+      .default(200)
+      .describe("Drag duration"),
+  }),
+  z.strictObject({
     kind: z.literal("keys"),
     keys: z
       .array(
@@ -150,19 +184,35 @@ const checkTarget = (
   target: {
     readonly path?: unknown;
     readonly selector?: unknown;
+    readonly window_point?: unknown;
+    readonly offset?: unknown;
   },
   where: {
     readonly accessibility: boolean;
     readonly path: (string | number)[];
+    readonly allowWindowPoint?: boolean;
   },
   context: z.RefinementCtx,
 ): void => {
-  const { accessibility, path } = where;
-  if ((target.path === undefined) === (target.selector === undefined))
+  const { accessibility, path, allowWindowPoint = false } = where;
+  const addresses = [
+    target.path,
+    target.selector,
+    allowWindowPoint ? target.window_point : undefined,
+  ].filter((value) => value !== undefined).length;
+  if (addresses !== 1)
     context.addIssue({
       code: "custom",
       path,
-      message: "Supply exactly one of path or selector",
+      message: allowWindowPoint
+        ? "Supply exactly one of path, selector or window_point"
+        : "Supply exactly one of path or selector",
+    });
+  if (target.window_point !== undefined && target.offset !== undefined)
+    context.addIssue({
+      code: "custom",
+      path,
+      message: "offset applies to element targets, not window_point",
     });
   if (target.selector !== undefined && !accessibility)
     context.addIssue({
@@ -194,6 +244,28 @@ export const nativeUiScenarioInputSchema = z
             context,
           );
           break;
+        case "pointer": {
+          const where = (side: "at" | "to") => ({
+            accessibility: input.accessibility,
+            path: [...at, side],
+            allowWindowPoint: true,
+          });
+          checkTarget(step.at, where("at"), context);
+          if (step.to !== undefined) checkTarget(step.to, where("to"), context);
+          if (step.gesture === "drag" && step.to === undefined)
+            context.addIssue({
+              code: "custom",
+              path: at,
+              message: "drag requires a to target",
+            });
+          else if (step.gesture !== "drag" && step.to !== undefined)
+            context.addIssue({
+              code: "custom",
+              path: [...at, "to"],
+              message: "to applies only to drag",
+            });
+          break;
+        }
         case "wait_for":
         case "expect":
           if (!input.accessibility && !("window_title" in step.condition))

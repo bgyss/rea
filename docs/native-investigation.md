@@ -251,7 +251,7 @@ acting when it matches nothing, matches several elements without `index`, or
 the capture is truncated (uniqueness would be unknown). The helper then
 re-checks the element's role, subrole, identifier and title at the resolved
 path and fails if the UI changed in between. Each step records the addressed
-`path` and `stable_key`. No global event injection is used.
+`path` and `stable_key`. These accessibility actions use no global events.
 
 Scenarios also accept:
 
@@ -274,10 +274,23 @@ than `exists` and `absent` need a single element (a unique match or `index`).
 A truncated capture makes a missing element `unknown`, and an attribute the
 element does not expose is `unknown`; neither is guessed as pass or fail.
 
-Pointer gestures are not offered. Mouse events posted to a process are not
-delivered to AppKit windows, in the background or foreground, and REA does not
-fall back to system-wide event injection, which would move the real cursor and
-could reach other windows. Unsupported AX actions fail explicitly. The result preserves
+- `pointer`: `click`, `double_click`, `right_click` or `drag` (with `to` and
+  `duration_ms`), optional `modifiers`, targeted at an element (`path` or
+  `selector`, plus an optional `offset` from its top-left corner, default its
+  centre) or a `window_point`.
+
+Pointer gestures are system-wide. Mouse events posted to a single process are
+not delivered to AppKit windows, so REA moves the real cursor and posts
+HID-level events. To keep those events on the selected window it first raises
+the window and activates its application, re-reads element frames, and checks
+every event point (start, each drag step, end): the point must lie inside the
+selected window and an accessibility hit test there must return an element of
+that window. A point under the menu bar, the Dock, another application or
+another window of the same application fails the step with `point-occluded`
+before anything is posted. The cursor is restored afterwards to within one
+point. The previously active application is not restored, and user input during
+a gesture can interleave with it, so run pointer scenarios on an idle desktop
+or in a VM. Unsupported AX actions fail explicitly. The result preserves
 ordered before/after captures and gaps; an action may have occurred before a
 post-action capture fails. Application state is left as-is; REA does not attempt
 to restore it.

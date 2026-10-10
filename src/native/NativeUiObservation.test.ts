@@ -696,3 +696,93 @@ describe("native UI keys, conditions and checkpoints", () => {
     expect(helper.calls).toHaveLength(0);
   });
 });
+
+describe("native UI pointer requests", () => {
+  const canvasNode = node([1], {
+    role: "AXGroup",
+    identifier: "canvas",
+    bounds: { x: 30, y: 50, width: 200, height: 100 },
+  });
+  const pointerTree = tree([window, canvasNode]);
+  const run = async (steps: unknown[]) => {
+    const calls: Readonly<Record<string, unknown>>[] = [];
+    const result = await observeNativeUi(
+      target,
+      "capture_native_ui_scenario",
+      { ...scope, accessibility: true, steps },
+      {
+        invoke: async (parameters) => {
+          calls.push(parameters);
+          return { ok: true, result: pointerTree };
+        },
+      },
+    );
+    return { calls, result };
+  };
+
+  it("sends both drag endpoints with pinned identities, offsets and modifiers", async () => {
+    const { calls, result } = await run([
+      {
+        kind: "pointer",
+        gesture: "drag",
+        at: { selector: { identifier: "canvas" }, offset: { x: 5, y: 6 } },
+        to: { window_point: { x: 100, y: 120 } },
+        modifiers: ["shift"],
+      },
+    ]);
+    if (!result.ok) throw result.error;
+    expect(calls[1]).toMatchObject({
+      action: {
+        kind: "pointer",
+        gesture: "drag",
+        at: {
+          path: [1],
+          offset: { x: 5, y: 6 },
+          expect: { role: "AXGroup", identifier: "canvas" },
+        },
+        to: { window_point: { x: 100, y: 120 } },
+        modifiers: ["shift"],
+        duration_ms: 200,
+      },
+    });
+    expect(result.value.steps[0]?.target).toEqual({
+      path: [1],
+      stable_key: result.value.initial.nodes[1]?.stable_key,
+    });
+  });
+
+  it("records no element target for a window point", async () => {
+    const { result } = await run([
+      {
+        kind: "pointer",
+        gesture: "click",
+        at: { window_point: { x: 10, y: 10 } },
+      },
+    ]);
+    if (!result.ok) throw result.error;
+    expect(result.value.steps[0]?.target).toBeNull();
+  });
+
+  it.each([
+    ["a drag without to", { gesture: "drag", at: { path: [1] } }],
+    [
+      "to on a click",
+      { gesture: "click", at: { path: [1] }, to: { path: [1] } },
+    ],
+    [
+      "an offset on a window point",
+      {
+        gesture: "click",
+        at: { window_point: { x: 1, y: 1 }, offset: { x: 1, y: 1 } },
+      },
+    ],
+    [
+      "two point addresses",
+      { gesture: "click", at: { path: [1], window_point: { x: 1, y: 1 } } },
+    ],
+  ])("rejects %s before capturing", async (_name, step) => {
+    const { calls, result } = await run([{ kind: "pointer", ...step }]);
+    expect(result.ok).toBe(false);
+    expect(calls).toHaveLength(0);
+  });
+});

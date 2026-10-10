@@ -90,6 +90,32 @@ const resolveElement = (
   });
 };
 
+type PointTarget = Extract<NativeUiStep, { kind: "pointer" }>["at"];
+
+/** Resolve a pointer location; element targets keep the identity the helper re-checks. */
+const resolvePoint = (
+  point: PointTarget,
+  before: NativeUiSnapshot,
+): Result<
+  {
+    readonly request: Readonly<Record<string, unknown>>;
+    readonly target: { path: number[]; stable_key: string | null } | null;
+  },
+  string
+> => {
+  if (point.window_point !== undefined)
+    return ok({ request: { window_point: point.window_point }, target: null });
+  const element = resolveElement(point, before);
+  if (!element.ok) return element;
+  return ok({
+    request: {
+      ...element.value.request,
+      ...(point.offset === undefined ? {} : { offset: point.offset }),
+    },
+    target: element.value.target,
+  });
+};
+
 const sleep = (milliseconds: number, signal: AbortSignal): Promise<boolean> =>
   new Promise((resolve) => {
     if (signal.aborted) return resolve(false);
@@ -234,6 +260,26 @@ export const runNativeUiStep = async (
       return waitFor(step, before, take, signal);
     case "keys":
       return capture(take, before, {}, { kind: "keys", keys: step.keys });
+    case "pointer": {
+      const at = resolvePoint(step.at, before);
+      if (!at.ok) return refused(before, at.error);
+      const to =
+        step.to === undefined ? undefined : resolvePoint(step.to, before);
+      if (to !== undefined && !to.ok) return refused(before, to.error);
+      return capture(
+        take,
+        before,
+        { target: at.value.target },
+        {
+          kind: "pointer",
+          gesture: step.gesture,
+          at: at.value.request,
+          ...(to === undefined ? {} : { to: to.value.request }),
+          modifiers: step.modifiers ?? [],
+          duration_ms: step.duration_ms,
+        },
+      );
+    }
     default: {
       const element = resolveElement(step, before);
       if (!element.ok) return refused(before, element.error);

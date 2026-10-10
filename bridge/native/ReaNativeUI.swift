@@ -16,10 +16,12 @@ struct Request: Decodable {
   var action: Action?
 }
 struct Expectation: Decodable { var role: String?; var subrole: String?; var identifier: String?; var title: String? }
+struct Point: Decodable { var x: Double; var y: Double }
+struct PointSpec: Decodable { var path: [Int]?; var expect: Expectation?; var offset: Point?; var window_point: Point? }
 struct KeySpec: Decodable { var key: String; var modifiers: [String]?; var hold_ms: Int? }
 struct Action: Decodable {
   var kind: String; var path: [Int]?; var direction: String?; var text: String?; var expect: Expectation?
-  var keys: [KeySpec]?
+  var gesture: String?; var at: PointSpec?; var to: PointSpec?; var modifiers: [String]?; var duration_ms: Int?; var keys: [KeySpec]?
 }
 struct BoundaryFailure: Error { var code: String; var message: String }
 func fail(_ code: String, _ message: String) throws -> Never { throw BoundaryFailure(code: code, message: message) }
@@ -81,6 +83,52 @@ func verify(_ element: AXUIElement, _ expected: Expectation?) throws {
   }
 }
 
+
+/// Screen point for a pointer target, from the element's live frame or a window-relative point.
+func screenPoint(_ spec: PointSpec, root: AXUIElement, pid: Int32, window: CGRect) throws -> CGPoint {
+  let point: CGPoint
+  if let relative = spec.window_point {
+    point = CGPoint(x: window.origin.x + relative.x, y: window.origin.y + relative.y)
+  } else {
+    let target = try element(at: spec.path ?? [], from: root, pid: pid)
+    try verify(target, spec.expect)
+    guard let frame = windowBounds(target) else { try fail("element-frame-unavailable", "The selected element does not expose a frame for pointer targeting") }
+    let offset = spec.offset ?? Point(x: frame.width / 2, y: frame.height / 2)
+    point = CGPoint(x: frame.origin.x + offset.x, y: frame.origin.y + offset.y)
+  }
+  guard window.contains(point) else {
+    try fail("point-outside-window", "Pointer location \(point) lies outside the selected window \(window); events are only posted inside it")
+  }
+  return point
+}
+
+/// The element that would receive input at the point (a system-wide AX hit test)
+/// must belong to the selected window; otherwise a system-wide event would reach
+/// whatever covers it (another app, the menu bar, the Dock, another window).
+func requireTopmost(_ point: CGPoint, pid: Int32, window: CGRect) throws {
+  var hit: AXUIElement?
+  guard AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(point.x), Float(point.y), &hit) == .success,
+    let element = hit else {
+    try fail("point-unverifiable", "No accessibility element answers a hit test at \(point); no system-wide event was posted")
+  }
+  var owner: pid_t = 0
+  guard AXUIElementGetPid(element, &owner) == .success else {
+    try fail("point-unverifiable", "The element at \(point) has no owning process; no system-wide event was posted")
+  }
+  guard owner == pid else {
+    let name = NSRunningApplication(processIdentifier: owner)?.localizedName ?? "process \(owner)"
+    try fail("point-occluded", "Pointer location \(point) is covered by \(name); no system-wide event was posted")
+  }
+  let role = string(element, kAXRoleAttribute)
+  let windowValue = attribute(element, kAXWindowAttribute)
+  let hitWindow: AXUIElement? = role == (kAXWindowRole as String)
+    ? element
+    : windowValue.flatMap { CFGetTypeID($0) == AXUIElementGetTypeID() ? ($0 as! AXUIElement) : nil }
+  guard let hitWindow, windowBounds(hitWindow) == window else {
+    try fail("point-occluded", "Pointer location \(point) is covered by another window of the target application; no system-wide event was posted")
+  }
+}
+
 func modifierFlags(_ names: [String]?) -> CGEventFlags {
   var flags: CGEventFlags = []
   for name in names ?? [] {
@@ -93,6 +141,60 @@ func modifierFlags(_ names: [String]?) -> CGEventFlags {
     }
   }
   return flags
+}
+
+/// System-wide pointer gesture: raise the selected window, verify it is topmost at
+/// every point before posting anything, post HID-level events, then restore the cursor.
+func pointer(_ action: Action, pid: Int32, windowID: UInt32, window: CGRect, root: AXUIElement, app: NSRunningApplication) throws {
+  guard let at = action.at else { try fail("invalid-action", "pointer requires an at target") }
+  AXUIElementPerformAction(root, kAXRaiseAction as CFString)
+  app.activate()
+  usleep(250_000)
+  let start = try screenPoint(at, root: root, pid: pid, window: window)
+  var path: [CGPoint] = [start]
+  if action.gesture == "drag" {
+    guard let to = action.to else { try fail("invalid-action", "drag requires a to target") }
+    let end = try screenPoint(to, root: root, pid: pid, window: window)
+    let steps = 12
+    path = (0...steps).map { step in
+      let fraction = Double(step) / Double(steps)
+      return CGPoint(x: start.x + (end.x - start.x) * fraction, y: start.y + (end.y - start.y) * fraction)
+    }
+  }
+  for point in path { try requireTopmost(point, pid: pid, window: window) }
+  let original = CGEvent(source: nil)?.location
+  defer { if let original { CGWarpMouseCursorPosition(original) } }
+  let flags = modifierFlags(action.modifiers)
+  let source = CGEventSource(stateID: .hidSystemState)
+  func post(_ type: CGEventType, _ point: CGPoint, button: CGMouseButton = .left, clicks: Int64 = 1) throws {
+    guard let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: button) else {
+      try fail("event-unavailable", "Cannot create a \(type.rawValue) mouse event")
+    }
+    event.flags = flags
+    event.setIntegerValueField(.mouseEventClickState, value: clicks)
+    event.post(tap: .cghidEventTap)
+    usleep(30_000)
+  }
+  try post(.mouseMoved, start)
+  switch action.gesture {
+  case "click":
+    try post(.leftMouseDown, start); try post(.leftMouseUp, start)
+  case "double_click":
+    try post(.leftMouseDown, start); try post(.leftMouseUp, start)
+    try post(.leftMouseDown, start, clicks: 2); try post(.leftMouseUp, start, clicks: 2)
+  case "right_click":
+    try post(.rightMouseDown, start, button: .right); try post(.rightMouseUp, start, button: .right)
+  case "drag":
+    let pause = useconds_t(max(0, action.duration_ms ?? 200) * 1000 / max(1, path.count - 1))
+    try post(.leftMouseDown, start)
+    for point in path.dropFirst() {
+      try post(.leftMouseDragged, point)
+      usleep(pause)
+    }
+    try post(.leftMouseUp, path[path.count - 1])
+  default:
+    try fail("unsupported-action", "Unsupported pointer gesture \(action.gesture ?? "nil")")
+  }
 }
 
 /// US ANSI virtual key codes; produced characters depend on the active keyboard layout.
@@ -168,6 +270,7 @@ func observe(_ request: Request) async throws -> [String: Any] {
   }
   if let action = request.action, let root = selected {
     switch action.kind {
+    case "pointer": try pointer(action, pid: request.pid, windowID: request.window_id, window: bounds, root: root, app: app)
     case "keys": try keys(action.keys ?? [], pid: request.pid)
     default:
       let element = try element(at: action.path ?? [], from: root, pid: request.pid)
@@ -177,7 +280,7 @@ func observe(_ request: Request) async throws -> [String: Any] {
       case "click": outcome = AXUIElementPerformAction(element, kAXPressAction as CFString)
       case "scroll": outcome = AXUIElementPerformAction(element, (action.direction == "increment" ? kAXIncrementAction : kAXDecrementAction) as CFString)
       case "key-entry": outcome = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, (action.text ?? "") as CFString)
-      default: try fail("unsupported-action", "Only press, increment/decrement, text-value entry and keys actions are admitted")
+      default: try fail("unsupported-action", "Only press, increment/decrement, text-value entry, pointer and keys actions are admitted")
       }
       guard outcome == .success else { try fail("action-failed", "Accessibility action failed with AXError \(outcome.rawValue)") }
     }
