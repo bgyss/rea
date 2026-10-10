@@ -222,6 +222,7 @@ const sessionInfo = ({
     "search_procedures",
     "search_strings",
     "annotate_native_function",
+    "annotate_native_data",
     "inspect_native_data_type",
     "inspect_native_instruction",
     "resolve_native_call_targets",
@@ -236,7 +237,9 @@ const sessionInfo = ({
     "xrefs",
   ].filter(
     (value) =>
-      transport === "unix-socket" || value !== "annotate_native_function",
+      transport === "unix-socket" ||
+      (value !== "annotate_native_function" &&
+        value !== "annotate_native_data"),
   ),
   target: {
     name: "fixture",

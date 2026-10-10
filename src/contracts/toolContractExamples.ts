@@ -46,6 +46,11 @@ export const TOOL_EXAMPLE_OVERRIDES: Readonly<
     name: "entry",
     comment: "Analyst observation",
   },
+  annotate_native_data: {
+    address: "0x2000",
+    label: "ppu_ctrl",
+    data_type: "uint8_t",
+  },
   analyze_swift_types: { category: "classes", pattern: "Account" },
   inspect_native_api: { procedure: "main" },
   trace_feature: { query: "license" },

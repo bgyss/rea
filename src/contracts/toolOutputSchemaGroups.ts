@@ -1,5 +1,6 @@
 import { annotationLedgerReplaySchema } from "../domain/annotationLedger.js";
 import { z } from "zod";
+import { nativeDataAnnotationsSchema } from "../domain/native/nativeDataAnnotations.js";
 import { nativeFunctionAnnotationsSchema } from "../domain/native/nativeFunctionAnnotations.js";
 import { nativeLoadImageSchema } from "../domain/native/nativeLoadImage.js";
 import { nativeUiResultSchema } from "../domain/native/nativeUiObservation.js";
@@ -100,6 +101,7 @@ const bookmarkFacetSchema = z.discriminatedUnion("state", [
 /** Exact structured-content schemas shared by direct analysis providers. */
 export const officialOutputSchemas: Readonly<Record<string, z.ZodObject>> = {
   annotate_native_function: resultOf(nativeFunctionAnnotationsSchema),
+  annotate_native_data: resultOf(nativeDataAnnotationsSchema),
   inspect_native_load_image: resultOf(nativeLoadImageSchema),
   inspect_native_data_type: resultOf(nativeDataTypeSchema),
   inspect_native_instruction: resultOf(nativeInstructionSchema),

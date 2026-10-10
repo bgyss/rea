@@ -9,17 +9,82 @@ import {
   AnalysisOutputError,
 } from "../domain/analysisErrorCore.js";
 import type { Evidence } from "../domain/evidence.js";
-import type { JsonValue } from "../domain/jsonValue.js";
+import { jsonObjectSchema, type JsonValue } from "../domain/jsonValue.js";
 import type { AnalysisError } from "../domain/analysisErrorBase.js";
 import {
   annotationLedgerEntrySchema,
+  dataAnnotationLedgerEntrySchema,
+  functionAnnotationLedgerEntrySchema,
   type AnnotationLedgerEntry,
   type AnnotationLedgerReplay,
 } from "../domain/annotationLedger.js";
+import type { AnnotationOperation } from "../domain/native/nativeDataAnnotations.js";
 import { err, ok, type Result } from "../domain/result.js";
 
 /** Ledgers are text journals; anything larger is not one. */
 const MAX_LEDGER_BYTES = 64 * 1024 * 1024;
+
+// The request fields each kind of ledger line records and replays; other
+// request and entry keys (location, identity, provenance) are stripped.
+const functionChangesSchema = z.object(
+  functionAnnotationLedgerEntrySchema.pick({
+    name: true,
+    comment: true,
+    inline_comment: true,
+    signature: true,
+    calling_convention: true,
+    variables: true,
+  }).shape,
+);
+const dataChangesSchema = z.object(
+  dataAnnotationLedgerEntrySchema.pick({
+    label: true,
+    data_type: true,
+    comment: true,
+    inline_comment: true,
+  }).shape,
+);
+
+const changes = (
+  schema: typeof functionChangesSchema | typeof dataChangesSchema,
+  value: unknown,
+): Result<Record<string, JsonValue>, string> => {
+  const parsed = schema.safeParse(value);
+  return parsed.success
+    ? ok(jsonObjectSchema.parse(parsed.data))
+    : err(parsed.error.message);
+};
+
+// The request that re-applies one entry, keyed by where it applies. A parsed
+// entry always carries its kind's change fields, so the projection is total.
+const replayRequest = (
+  entry: AnnotationLedgerEntry,
+): {
+  readonly operation: AnnotationOperation;
+  readonly location: { procedure: string } | { address: string };
+  readonly arguments: Readonly<Record<string, JsonValue>>;
+} => {
+  const [operation, location, schema] =
+    "procedure" in entry
+      ? ([
+          "annotate_native_function",
+          { procedure: entry.procedure },
+          functionChangesSchema,
+        ] as const)
+      : ([
+          "annotate_native_data",
+          { address: entry.address },
+          dataChangesSchema,
+        ] as const);
+  return {
+    operation,
+    location,
+    arguments: {
+      ...location,
+      ...jsonObjectSchema.parse(schema.parse(entry)),
+    },
+  };
+};
 
 /** The ledger an open target records into, with the identity it was opened under. */
 export interface AnnotationLedgerTarget {
@@ -162,23 +227,17 @@ export const replayAnnotationLedger = async (
       report.skipped_other_profile += 1;
       continue;
     }
+    const request = replayRequest(entry);
     const applied = await analysis.execute(
-      "annotate_native_function",
-      {
-        procedure: entry.procedure,
-        ...(entry.name === undefined ? {} : { name: entry.name }),
-        ...(entry.comment === undefined ? {} : { comment: entry.comment }),
-        ...(entry.inline_comment === undefined
-          ? {}
-          : { inline_comment: entry.inline_comment }),
-      },
+      request.operation,
+      request.arguments,
       options.signal === undefined ? {} : { signal: options.signal },
     );
     if (applied.ok) report.applied += 1;
     else
       report.failed.push({
         line: index + 1,
-        procedure: entry.procedure,
+        ...request.location,
         reason: applied.error.message,
       });
   }
@@ -186,45 +245,52 @@ export const replayAnnotationLedger = async (
 };
 
 /**
- * Append an applied annotation, taking the entry address from the refreshed
+ * Append an applied annotation, taking its canonical address from the
  * readback. The edit already happened, so a failed append says exactly that.
  */
 export const appendAnnotationFromEvidence = async (
   bound: AnnotationLedgerTarget,
+  operation: AnnotationOperation,
   arguments_: Readonly<Record<string, JsonValue>>,
   evidence: Evidence,
 ): Promise<Result<null, AnalysisError>> => {
+  const notRecorded = (reason: string) =>
+    err(
+      new AnalysisOutputError(
+        operation,
+        `The annotation was applied in this session but ${reason}`,
+      ),
+    );
   const readback = z
     .object({ annotations: z.object({ address: z.string().min(1) }) })
     .safeParse(evidence.normalized_result);
   if (!readback.success)
-    return err(
-      new AnalysisOutputError(
-        "annotate_native_function",
-        "annotation readback lacks the function entry address needed for the ledger",
-      ),
+    return notRecorded(
+      "its readback lacks the canonical address the ledger needs",
     );
-  const text = (key: string) => {
-    const value = arguments_[key];
-    return typeof value === "string" ? { [key]: value } : {};
-  };
-  const appended = await appendAnnotationLedger(bound.path, {
+  const function_ = operation === "annotate_native_function";
+  const recorded = changes(
+    function_ ? functionChangesSchema : dataChangesSchema,
+    arguments_,
+  );
+  if (!recorded.ok)
+    return notRecorded(
+      `its request could not be recorded in the ledger: ${recorded.error}`,
+    );
+  const address = readback.data.annotations.address;
+  const entry = annotationLedgerEntrySchema.safeParse({
     schema_version: "rea.annotation-ledger.v1",
     target_sha256: bound.targetSha256,
     analysis_profile_digest: bound.profileDigest,
-    procedure: readback.data.annotations.address,
-    ...text("name"),
-    ...text("comment"),
-    ...text("inline_comment"),
+    ...(function_ ? { procedure: address } : { address }),
+    ...recorded.value,
     evidence_id: evidence.evidence_id,
     recorded_at: new Date().toISOString(),
   });
+  if (!entry.success)
+    return notRecorded(`its ledger entry is malformed: ${entry.error.message}`);
+  const appended = await appendAnnotationLedger(bound.path, entry.data);
   return appended.ok
     ? ok(null)
-    : err(
-        new AnalysisOutputError(
-          "annotate_native_function",
-          `The annotation was applied in this session but could not be appended to ${bound.path}: ${appended.error}`,
-        ),
-      );
+    : notRecorded(`could not be appended to ${bound.path}: ${appended.error}`);
 };

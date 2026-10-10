@@ -1,4 +1,8 @@
 import {
+  isAnnotationOperation,
+  type AnnotationOperation,
+} from "../domain/native/nativeDataAnnotations.js";
+import {
   AnnotationLedgerBinding,
   appendAnnotationFromEvidence,
 } from "../application/AnnotationLedger.js";
@@ -33,7 +37,7 @@ export interface OfficialToolRegistration {
   readonly logger: Logger;
   readonly activeTarget: (() => BinaryTarget | undefined) | undefined;
   readonly recordEvidence: EvidenceWriter["recordEvidence"] | undefined;
-  /** Ledger bound by open_binary; annotate_native_function appends to it. */
+  /** Ledger bound by open_binary; annotation tools append to it. */
   readonly annotationLedger?: AnnotationLedgerBinding;
 }
 
@@ -103,10 +107,11 @@ const registerOfficialTool = (
       const recorded = registration.recordEvidence?.(evidence);
       if (recorded !== undefined && !recorded.ok)
         return toCallToolResult(recorded, contract);
-      if (contract.name === "annotate_native_function") {
+      if (isAnnotationOperation(contract.name)) {
         const appended = await recordAnnotation(
           registration.annotationLedger,
           registration.activeTarget?.(),
+          contract.name,
           arguments_,
           evidence,
         );
@@ -154,7 +159,7 @@ const projectOfficialArguments = (
   input: unknown,
 ): Readonly<Record<string, JsonValue>> => {
   // Annotation omissions preserve existing values; they are not Python defaults.
-  if (contract.name === "annotate_native_function")
+  if (isAnnotationOperation(contract.name))
     return jsonObjectSchema.parse(contract.inputSchema.parse(input));
   const parsed = jsonObjectSchema.parse(input);
   if (!(contract.inputSchema instanceof z.ZodObject))
@@ -173,11 +178,12 @@ const projectOfficialArguments = (
 const recordAnnotation = (
   ledger: AnnotationLedgerBinding | undefined,
   target: BinaryTarget | undefined,
+  operation: AnnotationOperation,
   arguments_: Readonly<Record<string, JsonValue>>,
   evidence: Evidence,
 ): Promise<Result<null, AnalysisError>> => {
   const bound = ledger?.current();
   return bound === undefined || target?.sha256 !== bound.targetSha256
     ? Promise.resolve(ok(null))
-    : appendAnnotationFromEvidence(bound, arguments_, evidence);
+    : appendAnnotationFromEvidence(bound, operation, arguments_, evidence);
 };

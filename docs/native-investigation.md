@@ -392,6 +392,43 @@ rename input. Edits retain the existing namespace; other namespace-like text
 remains literal leaf-name text. A qualified name with an empty leaf is rejected
 before any comment or name is changed.
 
+The same atomic edit can also change typing:
+
+- `signature` takes a C prototype such as
+  `int draw_sprite(struct sprite *s, uint8_t x)`. Its types resolve against the
+  analysis database and Ghidra's built-ins. Its function name must equal the
+  function's current (or requested) name; rename with `name`. A
+  calling-convention keyword in the prototype is applied.
+- `calling_convention` names a convention from the program's compiler spec, or
+  `unknown` or `default` to reset it. An
+  unknown name is rejected with the defined list. Do not also put one in
+  `signature`.
+- `variables` renames and/or retypes decompiler locals and parameters, named as
+  the pseudocode shows them (`[{"name": "param_1", "new_name": "mode",
+  "data_type": "uint8_t"}]`). Each type must be fixed-length and match the
+  variable's storage size. Edits apply in order after any signature change.
+
+The readback always reports `signature` and `calling_convention`, plus each
+edited variable's decompiler name, type, parameter flag and storage. Any
+rejected field rolls back the whole request and is reported against that input.
+The CLI takes `--signature`, `--calling-convention`, and repeatable
+`--rename-variable OLD=NEW` and `--retype-variable NAME=TYPE`.
+
+`annotate_native_data` (CLI `annotate-native-data <path> <address>`) edits one
+address outside a function entry, in the same atomic way:
+
+- `label` becomes the address's primary user-defined label. A function entry
+  is rejected; rename functions with `annotate_native_function`.
+- `data_type` defines a fixed-length C type, such as `uint16_t` or
+  `struct oam_entry[64]`, at the address. It may replace only undefined bytes;
+  overlapping instructions or other defined data reject the whole request.
+  Re-applying the type that is already there is a no-op, so replay is
+  idempotent.
+- `comment` and `inline_comment` set the regular and inline comments there.
+
+The readback reports the label, defined type, its size in bytes, and both
+comments.
+
 - `npm run verify:ghidra`: host-native debug/stripped targets, native type layout,
   instruction/call facts, value dependencies and process/project cleanup.
 - `npm run verify:ghidra:aarch64-jump-table`: optimized ELF and byte/halfword
@@ -417,8 +454,10 @@ By default, annotations live in the session's ephemeral database, so they
 disappear when the target closes. To keep them, pass `annotation_ledger_path` to `open_binary` (or
 `--annotation-ledger <file>` to a CLI analysis command). The ledger is a JSON
 Lines file of `rea.annotation-ledger.v1` entries. Each entry holds the target
-SHA-256, the analysis-profile digest, the function entry address, the requested
-`name` and comment changes, the Evidence ID and the time.
+SHA-256, the analysis-profile digest, the function entry address (or, for
+`annotate_native_data`, the annotated address), the requested
+`name`, comment, signature, calling-convention and variable changes, the
+Evidence ID and the time.
 
 - After opening, REA replays the entries recorded for exactly this target digest
   and analysis profile, in order. Matching digests guarantee identical bytes and

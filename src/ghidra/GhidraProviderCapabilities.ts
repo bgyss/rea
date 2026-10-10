@@ -1,3 +1,4 @@
+import { isAnnotationOperation } from "../domain/native/nativeDataAnnotations.js";
 import type {
   CapabilityDescriptor,
   ProviderIdentity,
@@ -47,8 +48,15 @@ export const limitationsFor = (operation: string): readonly string[] => {
       return [
         ...common,
         "Names use Ghidra USER_DEFINED source. Name writes accept a leaf name or a fully qualified name within the existing namespace; readback uses the fully qualified name and can be reused without adding namespace prefixes. Edits retain the current namespace; other namespace-like text remains literal leaf-name text. Regular comments map to PRE and inline comments to EOL at the exact function entry. Changes commit together after readback and refreshed analysis; failure rolls them all back.",
+        "Signatures are C prototypes parsed by Ghidra's FunctionSignatureParser against the program's data types and applied as USER_DEFINED; the prototype's name must equal the function's. Calling conventions must be defined by the compiler spec, or unknown or default. Variable edits address decompiler locals and parameters by their pseudocode names and commit them through HighFunctionDBUtil, after any signature change.",
         "Annotation text rejects NUL and unpaired Unicode surrogates before mutation, with the field and UTF-16 index in the error. Supported Unicode and line endings are preserved.",
         "Metadata edits invalidate immutable analysis snapshots and are discarded on close. CLI returns the updated dossier before session cleanup; this is not a saved Ghidra project.",
+      ];
+    case "annotate_native_data":
+      return [
+        ...common,
+        "Labels become the address's primary USER_DEFINED symbol in the global namespace. Data types are fixed-length C types resolved against the program's data types; defining one clears only undefined bytes and is rejected when it overlaps instructions or other defined data. Regular comments map to PRE and inline comments to EOL at the exact address. Changes commit together after readback; failure rolls them all back.",
+        "Annotation text rejects NUL and unpaired Unicode surrogates before mutation. Metadata edits invalidate immutable analysis snapshots and are discarded on close unless the persistent project cache is enabled.",
       ];
     case "inspect_native_load_image":
       return [
@@ -161,7 +169,7 @@ export const CAPABILITIES: readonly CapabilityDescriptor[] = Object.freeze(
       available: true,
       reason: null,
       effects: Object.freeze({
-        mutatesArtifact: operation === "annotate_native_function",
+        mutatesArtifact: isAnnotationOperation(operation),
         launchesProcess: true,
         mayShowUi: false,
         mayAccessNetwork: false,

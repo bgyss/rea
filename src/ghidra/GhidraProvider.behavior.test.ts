@@ -52,6 +52,38 @@ const provider = (
   return new GhidraProvider(config.value, silentLogger, host, clientFactory);
 };
 
+// Bridge rejections of one annotation field and the input each names.
+const REJECTED_ANNOTATION_FIELDS = [
+  {
+    remoteCode: "invalid_function_name",
+    field: "name",
+    input: { name: "bad name" },
+    message:
+      "Invalid function name at 0x10100: Symbol name contains invalid characters",
+  },
+  {
+    remoteCode: "invalid_function_signature",
+    field: "signature",
+    input: { signature: "int entry(struct missing *m)" },
+    message:
+      "Ghidra could not parse signature for 0x10100: Can't resolve datatype: struct missing",
+  },
+  {
+    remoteCode: "invalid_calling_convention",
+    field: "calling_convention",
+    input: { calling_convention: "__pascal" },
+    message:
+      "Unknown calling convention __pascal; this program's compiler spec defines: __stdcall, default",
+  },
+  {
+    remoteCode: "invalid_variable_edit",
+    field: "variables",
+    input: { variables: [{ name: "uVar9", new_name: "count" }] },
+    message:
+      "No uniquely named decompiler variable uVar9 in 0x10100; variables: uVar1",
+  },
+];
+
 describe("Ghidra jump-table profile", () => {
   it("separates typed case/default evidence and jump-load metadata from legacy cache profiles", async () => {
     const resolved = await provider().resolveAnalysisProfile(
@@ -647,45 +679,42 @@ describe("Ghidra result projection", () => {
     },
   );
 
-  it("preserves the rejected name constraint and function address", async () => {
-    const message =
-      "Invalid function name at 0x10100: Symbol name contains invalid characters";
-    const ghidra = provider(installationHost(), () => ({
-      start: () => Promise.resolve(ok(sessionInfo())),
-      callTool: () =>
-        Promise.resolve(
-          err(
-            new GhidraSessionError(
-              "remote",
-              message,
-              {},
-              { remoteCode: "invalid_function_name" },
-            ),
+  it.each(REJECTED_ANNOTATION_FIELDS)(
+    "reports a rejected $field against that input with the bridge's reason",
+    async ({ remoteCode, field, input, message }) => {
+      const ghidra = provider(installationHost(), () => ({
+        start: () => Promise.resolve(ok(sessionInfo())),
+        callTool: () =>
+          Promise.resolve(
+            err(new GhidraSessionError("remote", message, {}, { remoteCode })),
           ),
-        ),
-      close: () => Promise.resolve(),
-    }));
-    const resolved = await ghidra.resolveAnalysisProfile(
-      executableTarget("elf", "x86_64"),
-    );
-    if (!resolved.ok) throw resolved.error;
-    if (resolved.value.profile === null)
-      throw new Error("Expected a bound profile");
-    await expect(
-      ghidra
-        .createClient(executableTarget("elf", "x86_64"), resolved.value.profile)
-        .execute("annotate_native_function", {
-          procedure: "0x10100",
-          name: "bad name",
-        }),
-    ).resolves.toMatchObject({
-      ok: false,
-      error: {
-        _tag: "AnalysisInputError",
-        issues: [{ path: ["name"], reason: "invalid_value", message }],
-      },
-    });
-  });
+        close: () => Promise.resolve(),
+      }));
+      const resolved = await ghidra.resolveAnalysisProfile(
+        executableTarget("elf", "x86_64"),
+      );
+      if (!resolved.ok) throw resolved.error;
+      if (resolved.value.profile === null)
+        throw new Error("Expected a bound profile");
+      await expect(
+        ghidra
+          .createClient(
+            executableTarget("elf", "x86_64"),
+            resolved.value.profile,
+          )
+          .execute("annotate_native_function", {
+            procedure: "0x10100",
+            ...input,
+          }),
+      ).resolves.toMatchObject({
+        ok: false,
+        error: {
+          _tag: "AnalysisInputError",
+          issues: [{ path: [field], reason: "invalid_value", message }],
+        },
+      });
+    },
+  );
 
   it("projects remote decompile cancellation as a provider-neutral interruption", async () => {
     const code = "decompile_cancelled";

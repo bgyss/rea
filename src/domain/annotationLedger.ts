@@ -1,7 +1,7 @@
 import { z } from "zod";
+import { nativeVariableAnnotationSchema } from "./native/nativeFunctionAnnotations.js";
 
-/** JSON Lines record of one applied function annotation. */
-export const annotationLedgerEntrySchema = z.strictObject({
+const ledgerIdentity = {
   schema_version: z.literal("rea.annotation-ledger.v1"),
   target_sha256: z.string().regex(/^[a-f0-9]{64}$/u),
   analysis_profile_digest: z
@@ -9,15 +9,49 @@ export const annotationLedgerEntrySchema = z.strictObject({
     .regex(/^[a-f0-9]{64}$/u)
     .nullable()
     .describe(
-      "Profile that gave the procedure address its meaning; null when the provider commits none",
+      "Profile that gave the recorded address its meaning; null when the provider commits none",
     ),
+};
+
+const ledgerProvenance = {
+  evidence_id: z.string().regex(/^ev_[a-f0-9]{64}$/u),
+  recorded_at: z.iso.datetime(),
+};
+
+/** JSON Lines record of one applied annotate_native_function edit. */
+export const functionAnnotationLedgerEntrySchema = z.strictObject({
+  ...ledgerIdentity,
   procedure: z.string().min(1).describe("Canonical function entry address"),
   name: z.string().exactOptional(),
   comment: z.string().exactOptional(),
   inline_comment: z.string().exactOptional(),
-  evidence_id: z.string().regex(/^ev_[a-f0-9]{64}$/u),
-  recorded_at: z.iso.datetime(),
+  signature: z.string().exactOptional(),
+  calling_convention: z.string().exactOptional(),
+  variables: z.array(nativeVariableAnnotationSchema).exactOptional(),
+  ...ledgerProvenance,
 });
+
+/** One recorded annotate_native_function edit. */
+export type FunctionAnnotationLedgerEntry = z.infer<
+  typeof functionAnnotationLedgerEntrySchema
+>;
+
+/** JSON Lines record of one applied annotate_native_data edit. */
+export const dataAnnotationLedgerEntrySchema = z.strictObject({
+  ...ledgerIdentity,
+  address: z.string().min(1).describe("Canonical annotated address"),
+  label: z.string().exactOptional(),
+  data_type: z.string().exactOptional(),
+  comment: z.string().exactOptional(),
+  inline_comment: z.string().exactOptional(),
+  ...ledgerProvenance,
+});
+
+/** JSON Lines record of one applied annotation: a function or an address. */
+export const annotationLedgerEntrySchema = z.union([
+  functionAnnotationLedgerEntrySchema,
+  dataAnnotationLedgerEntrySchema,
+]);
 export type AnnotationLedgerEntry = z.infer<typeof annotationLedgerEntrySchema>;
 
 /** What replaying a ledger into a fresh session did. */
@@ -28,11 +62,18 @@ export const annotationLedgerReplaySchema = z.strictObject({
   skipped_other_target: z.number().int().nonnegative(),
   skipped_other_profile: z.number().int().nonnegative(),
   failed: z.array(
-    z.strictObject({
-      line: z.number().int().positive(),
-      procedure: z.string(),
-      reason: z.string(),
-    }),
+    z.union([
+      z.strictObject({
+        line: z.number().int().positive(),
+        procedure: z.string(),
+        reason: z.string(),
+      }),
+      z.strictObject({
+        line: z.number().int().positive(),
+        address: z.string(),
+        reason: z.string(),
+      }),
+    ]),
   ),
 });
 export type AnnotationLedgerReplay = z.infer<

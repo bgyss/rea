@@ -247,7 +247,7 @@ const registerOpenLifecycleTool = ({
 export interface SessionToolOptions {
   readonly startedAt?: string;
   readonly availabilityPolicy?: () => SessionAvailability;
-  /** Shared with annotate_native_function so edits append to the bound ledger. */
+  /** Shared with the annotation tools so edits append to the bound ledger. */
   readonly annotationLedger?: AnnotationLedgerBinding;
 }
 

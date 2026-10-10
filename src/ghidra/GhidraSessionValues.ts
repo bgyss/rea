@@ -1,3 +1,4 @@
+import { isAnnotationOperation } from "../domain/native/nativeDataAnnotations.js";
 import { z } from "zod";
 
 import type { JsonValue } from "../domain/jsonValue.js";
@@ -64,7 +65,7 @@ export const parseGhidraSessionInfo = (
   const parsed = sessionInfoSchema.safeParse(value);
   const readOnly = expected.expectedReadOnly ?? false;
   const expectedCapabilities = GHIDRA_SESSION_CAPABILITIES.filter(
-    (capability) => !readOnly || capability !== "annotate_native_function",
+    (capability) => !readOnly || !isAnnotationOperation(capability),
   );
   if (
     !parsed.success ||

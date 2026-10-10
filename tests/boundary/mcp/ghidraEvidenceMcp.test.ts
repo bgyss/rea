@@ -13,6 +13,8 @@ it("rejects contradictory annotation readback across the provider and MCP bounda
     name: dossier.procedure.name,
     comment: null,
     inline_comment: "Finding",
+    signature: "undefined entry(void)",
+    calling_convention: "default",
   };
   const effects = {
     scope: "session-analysis-database",

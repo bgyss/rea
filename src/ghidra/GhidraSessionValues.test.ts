@@ -82,7 +82,7 @@ describe("Ghidra mutation handshake", () => {
       ...value,
       read_only: true,
       capabilities: value.capabilities.filter(
-        (c) => c !== "annotate_native_function",
+        (c) => c !== "annotate_native_function" && c !== "annotate_native_data",
       ),
     };
     expect(

@@ -1,3 +1,4 @@
+import { isAnnotationOperation } from "../domain/native/nativeDataAnnotations.js";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -344,6 +345,16 @@ const unavailableClient = (failure: AnalysisError): AnalysisClient => ({
   close: () => Promise.resolve(),
 });
 
+// Bridge rejections of one annotation field, reported against that input.
+const ANNOTATION_FAILURE_FIELDS: Readonly<Record<string, string>> = {
+  invalid_function_name: "name",
+  invalid_function_signature: "signature",
+  invalid_calling_convention: "calling_convention",
+  invalid_variable_edit: "variables",
+  invalid_label: "label",
+  invalid_data_edit: "data_type",
+};
+
 const projectSessionError = (
   operation: AnalysisOperation,
   failure: GhidraSessionError,
@@ -362,13 +373,17 @@ const projectSessionError = (
       failure.cause.reason,
       { cause: failure },
     );
-  if (
-    operation === "annotate_native_function" &&
-    failure.kind === "remote" &&
-    failure.remoteCode === "invalid_function_name"
-  )
+  const annotationField =
+    isAnnotationOperation(operation) && failure.kind === "remote"
+      ? ANNOTATION_FAILURE_FIELDS[failure.remoteCode ?? ""]
+      : undefined;
+  if (annotationField !== undefined)
     return new AnalysisInputError(operation, { cause: failure }, [
-      { path: ["name"], reason: "invalid_value", message: failure.message },
+      {
+        path: [annotationField],
+        reason: "invalid_value",
+        message: failure.message,
+      },
     ]);
   if (failure.cause instanceof GhidraProjectCacheBusyError)
     return new AnalysisResourceConstraintError(
