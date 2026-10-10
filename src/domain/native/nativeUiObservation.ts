@@ -12,13 +12,9 @@ import {
 
 export {
   nativeUiHelperSnapshotSchema,
-  nativeUiSelectorSchema,
-  nativeUiSnapshotSchema,
   resolveNativeUiSelector,
   withStableKeys,
-  type NativeUiSelector,
   type NativeUiSnapshot,
-  type ResolvedNativeUiTarget,
 } from "./nativeUiCapture.js";
 
 const scope = {
