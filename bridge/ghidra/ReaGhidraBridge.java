@@ -88,6 +88,7 @@ import ghidra.program.model.symbol.Symbol;
 import ghidra.program.model.symbol.SymbolIterator;
 import ghidra.program.model.pcode.FunctionPrototype;
 import ghidra.program.model.pcode.HighFunction;
+import ghidra.program.model.pcode.HighFunctionDBUtil;
 import ghidra.program.model.pcode.HighParam;
 import ghidra.program.model.pcode.HighSymbol;
 import ghidra.program.model.pcode.JumpTable;
@@ -122,6 +123,7 @@ public final class ReaGhidraBridge extends HeadlessScript {
     );
     private static final String[] CAPABILITIES = {
         "annotate_native_function",
+        "annotate_native_data",
         "inspect_native_load_image",
         "read_bytes",
         "address_to_file_offset",
@@ -388,6 +390,11 @@ public final class ReaGhidraBridge extends HeadlessScript {
                     throw new RequestFailure("method_unavailable", "Windows P0 does not admit database mutation");
                 yield annotateNativeFunction(request.params);
             }
+            case "annotate_native_data" -> {
+                if (!descriptor.transport.equals("unix-socket"))
+                    throw new RequestFailure("method_unavailable", "Windows P0 does not admit database mutation");
+                yield annotateNativeData(request.params);
+            }
             default -> throw new RequestFailure(
                 "method_unavailable",
                 "Bridge method is unavailable"
@@ -426,7 +433,7 @@ public final class ReaGhidraBridge extends HeadlessScript {
         result.addProperty("analysis_timed_out", timedOut);
         result.add("capabilities", GSON.toJsonTree(
             java.util.Arrays.stream(CAPABILITIES)
-                .filter(value -> !readOnly || !value.equals("annotate_native_function"))
+                .filter(value -> !readOnly || !value.startsWith("annotate_native_"))
                 .toArray(String[]::new)
         ));
         result.add("target", target);
@@ -1005,23 +1012,198 @@ public final class ReaGhidraBridge extends HeadlessScript {
         value.addProperty("name", procedureName(function));
         value.addProperty("comment", currentProgram.getListing().getComment(CommentType.PRE, entry));
         value.addProperty("inline_comment", currentProgram.getListing().getComment(CommentType.EOL, entry));
+        value.addProperty("signature", function.getPrototypeString(false, true));
+        value.addProperty("calling_convention", function.getCallingConventionName());
         return value;
     }
 
+    private String requireCallingConvention(String requested) {
+        List<String> known = new ArrayList<>(currentProgram.getFunctionManager().getCallingConventionNames());
+        known.sort(null);
+        // Ghidra's reset values: no convention, and the compiler spec default.
+        known.add(Function.UNKNOWN_CALLING_CONVENTION_STRING);
+        known.add(Function.DEFAULT_CALLING_CONVENTION_STRING);
+        if (!known.contains(requested))
+            throw new RequestFailure("invalid_calling_convention",
+                "Unknown calling convention " + requested + "; this program's compiler spec defines: " + String.join(", ", known));
+        return requested;
+    }
+
+    private List<VariableEdit> variableEdits(JsonElement value) {
+        if (value == null || !value.isJsonArray() || value.getAsJsonArray().isEmpty())
+            throw new RequestFailure("invalid_request", "Annotation variables must be a non-empty array");
+        List<VariableEdit> edits = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (JsonElement element : value.getAsJsonArray()) {
+            if (!element.isJsonObject())
+                throw new RequestFailure("invalid_request", "Each annotation variable must be an object");
+            JsonObject item = element.getAsJsonObject();
+            if (!Set.of("name", "new_name", "data_type").containsAll(item.keySet()))
+                throw new RequestFailure("invalid_request", "Unknown annotation variable field");
+            String name = requireText(item, "name");
+            if (!seen.add(name))
+                throw new RequestFailure("invalid_request", "Annotation variable " + name + " is edited more than once");
+            if (!item.has("new_name") && !item.has("data_type"))
+                throw new RequestFailure("invalid_request", "Annotation variable " + name + " needs new_name or data_type");
+            String newName = item.has("new_name") ? requireText(item, "new_name") : null;
+            if (newName != null) validateAnnotationText(newName, "variables.new_name");
+            DataType type = item.has("data_type")
+                ? parseAnnotationDataType(requireText(item, "data_type"), "variables.data_type",
+                    "invalid_variable_edit", "variable " + name)
+                : null;
+            edits.add(new VariableEdit(name, newName, type));
+        }
+        return edits;
+    }
+
+    private DataType parseAnnotationDataType(String text, String field, String code, String subject) {
+        validateAnnotationText(text, field);
+        ghidra.program.model.data.DataTypeManager manager = currentProgram.getDataTypeManager();
+        try {
+            return new ghidra.util.data.DataTypeParser(manager, manager, null,
+                ghidra.util.data.DataTypeParser.AllowedDataTypes.FIXED_LENGTH).parse(text);
+        }
+        catch (ghidra.program.model.data.InvalidDataTypeException | ghidra.util.exception.CancelledException exception) {
+            throw new RequestFailure(code,
+                "Unknown or variable-length data type " + text + " for " + subject + ": " + safeMessage(exception));
+        }
+    }
+
+    private void applyFunctionSignature(
+        Function function, String text, boolean conventionSupplied
+    ) throws Exception {
+        String canonical = canonicalAddress(function.getEntryPoint());
+        ghidra.program.model.data.FunctionDefinitionDataType definition;
+        try {
+            definition = new ghidra.app.util.parser.FunctionSignatureParser(
+                currentProgram.getDataTypeManager(), null).parse(function.getSignature(), text);
+        }
+        catch (ghidra.app.util.cparser.C.ParseException | RuntimeException exception) {
+            throw new RequestFailure("invalid_function_signature",
+                "Ghidra could not parse signature for " + canonical + ": " + safeMessage(exception));
+        }
+        // The prototype's name must agree with the function's (requested) name;
+        // renames go through name so the ledger and readback stay explicit.
+        if (!definition.getName().equals(function.getName()))
+            throw new RequestFailure("invalid_function_signature",
+                "Signature names " + definition.getName() + " but the function at " + canonical +
+                " is " + function.getName() + "; rename it with name instead");
+        boolean explicitConvention = !definition.hasUnknownCallingConventionName() &&
+            !Function.DEFAULT_CALLING_CONVENTION_STRING.equals(definition.getCallingConventionName());
+        if (explicitConvention && conventionSupplied)
+            throw new RequestFailure("invalid_function_signature",
+                "Signature for " + canonical + " names calling convention " + definition.getCallingConventionName() +
+                " and calling_convention is also supplied; supply it once");
+        ghidra.app.cmd.function.ApplyFunctionSignatureCmd command = new ghidra.app.cmd.function.ApplyFunctionSignatureCmd(
+            function.getEntryPoint(), definition, SourceType.USER_DEFINED, !explicitConvention, false,
+            ghidra.program.model.data.DataTypeConflictHandler.DEFAULT_HANDLER,
+            ghidra.app.cmd.function.FunctionRenameOption.NO_CHANGE);
+        if (!command.applyTo(currentProgram, monitor))
+            throw new RequestFailure("invalid_function_signature",
+                "Ghidra did not apply signature at " + canonical + ": " + diagnosticMessage(command.getStatusMsg()));
+        // Check now: later convention and variable edits in the same request
+        // legitimately change what the prototype reads back.
+        if (!signatureMatches(function, definition))
+            throw new RequestFailure("annotation_readback_mismatch",
+                "Annotation readback differs for signature at " + canonical + ": " +
+                function.getPrototypeString(false, true));
+    }
+
+    private static boolean signatureMatches(Function function, ghidra.program.model.listing.FunctionSignature requested) {
+        if (!function.getReturnType().isEquivalent(requested.getReturnType())) return false;
+        if (function.hasVarArgs() != requested.hasVarArgs()) return false;
+        ghidra.program.model.listing.Parameter[] actual = function.getParameters();
+        ghidra.program.model.data.ParameterDefinition[] wanted = requested.getArguments();
+        if (actual.length != wanted.length) return false;
+        for (int index = 0; index < wanted.length; index++) {
+            if (!actual[index].getDataType().isEquivalent(wanted[index].getDataType())) return false;
+            String name = wanted[index].getName();
+            if (name != null && !name.isEmpty() && !name.equals(actual[index].getName())) return false;
+        }
+        return true;
+    }
+
+    private Map<String, HighSymbol> decompilerSymbols(Function function) {
+        decompiler.flushCache();
+        DecompileResults results = decompile(function);
+        HighFunction high = results == null ? null : results.getHighFunction();
+        if (high == null)
+            throw new RequestFailure("invalid_variable_edit",
+                "Ghidra produced no decompiler variables for " + canonicalAddress(function.getEntryPoint()));
+        Map<String, HighSymbol> symbols = new TreeMap<>();
+        Set<String> duplicated = new HashSet<>();
+        Iterator<HighSymbol> iterator = high.getLocalSymbolMap().getSymbols();
+        while (iterator.hasNext()) {
+            HighSymbol symbol = iterator.next();
+            if (symbols.putIfAbsent(symbol.getName(), symbol) != null) duplicated.add(symbol.getName());
+        }
+        duplicated.forEach(symbols::remove);
+        return symbols;
+    }
+
+    private void applyVariableEdit(Function function, VariableEdit edit) throws Exception {
+        String canonical = canonicalAddress(function.getEntryPoint());
+        // Re-decompile per edit: committing one variable can rename or merge others.
+        Map<String, HighSymbol> symbols = decompilerSymbols(function);
+        HighSymbol symbol = symbols.get(edit.name());
+        if (symbol == null)
+            throw new RequestFailure("invalid_variable_edit",
+                "No uniquely named decompiler variable " + edit.name() + " in " + canonical +
+                "; variables: " + String.join(", ", symbols.keySet()));
+        try {
+            HighFunctionDBUtil.updateDBVariable(symbol, edit.newName(), edit.dataType(), SourceType.USER_DEFINED);
+        }
+        catch (ghidra.util.exception.InvalidInputException | ghidra.util.exception.DuplicateNameException exception) {
+            throw new RequestFailure("invalid_variable_edit",
+                "Ghidra rejected the edit of variable " + edit.name() + " in " + canonical + ": " + safeMessage(exception));
+        }
+    }
+
+    private JsonArray variableReadback(Function function, List<VariableEdit> edits) {
+        Map<String, HighSymbol> symbols = decompilerSymbols(function);
+        JsonArray result = new JsonArray();
+        for (VariableEdit edit : edits) {
+            String name = edit.newName() == null ? edit.name() : edit.newName();
+            HighSymbol symbol = symbols.get(name);
+            if (symbol == null || (edit.dataType() != null && !symbol.getDataType().isEquivalent(edit.dataType())))
+                throw new RequestFailure("annotation_readback_mismatch",
+                    "Annotation readback differs for variable " + edit.name() + " at " + canonicalAddress(function.getEntryPoint()));
+            JsonObject item = new JsonObject();
+            item.addProperty("variable", edit.name());
+            item.addProperty("name", symbol.getName());
+            item.addProperty("data_type", symbol.getDataType().getDisplayName());
+            item.addProperty("parameter", symbol.isParameter());
+            item.addProperty("storage", symbol.getStorage().toString());
+            result.add(item);
+        }
+        return result;
+    }
+
+    private static final List<String> ANNOTATION_CHANGES = List.of(
+        "name", "comment", "inline_comment", "signature", "calling_convention", "variables");
+
+    private record VariableEdit(String name, String newName, DataType dataType) {}
+
     private JsonObject annotateNativeFunction(JsonObject params) throws Exception {
-        if (!Set.of("procedure", "name", "comment", "inline_comment").containsAll(params.keySet()))
-            throw new RequestFailure("invalid_request", "Unknown function annotation field");
-        if (!params.has("name") && !params.has("comment") && !params.has("inline_comment"))
+        for (String key : params.keySet()) {
+            if (!key.equals("procedure") && !ANNOTATION_CHANGES.contains(key))
+                throw new RequestFailure("invalid_request", "Unknown function annotation field: " + key);
+        }
+        if (ANNOTATION_CHANGES.stream().noneMatch(params::has))
             throw new RequestFailure("invalid_request", "Supply at least one annotation change");
         Function function = resolveProcedure(requireString(params, "procedure"));
         Address entry = function.getEntryPoint();
         if (function.isExternal() || !currentProgram.getMemory().contains(entry))
             throw new RequestFailure("invalid_request", "Annotations require a local function entry: " + canonicalAddress(entry));
-        for (String field : List.of("name", "comment", "inline_comment")) {
+        for (String field : List.of("name", "comment", "inline_comment", "signature", "calling_convention")) {
             if (params.has(field)) validateAnnotationText(requireText(params, field), field);
         }
         String leafName = params.has("name")
             ? annotationLeafName(function, requireString(params, "name")) : null;
+        String convention = params.has("calling_convention")
+            ? requireCallingConvention(requireText(params, "calling_convention")) : null;
+        List<VariableEdit> variableEdits = params.has("variables")
+            ? variableEdits(params.get("variables")) : List.of();
         int transaction = currentProgram.startTransaction("REA function annotations");
         boolean commit = false;
         JsonObject annotated;
@@ -1037,9 +1219,27 @@ public final class ReaGhidraBridge extends HeadlessScript {
             }
             if (params.has("name"))
                 function.setName(leafName, SourceType.USER_DEFINED);
+            // Signature before convention, so an explicit calling_convention
+            // wins; variables last, because both rebuild the parameters.
+            if (params.has("signature"))
+                applyFunctionSignature(function, requireText(params, "signature"), convention != null);
+            if (convention != null) {
+                try {
+                    function.setCallingConvention(convention);
+                }
+                catch (ghidra.util.exception.InvalidInputException exception) {
+                    throw new RequestFailure("invalid_calling_convention", "Ghidra rejected calling convention " + convention + " at " + canonicalAddress(entry) + ": " + safeMessage(exception));
+                }
+            }
+            for (VariableEdit edit : variableEdits) applyVariableEdit(function, edit);
             monitor.checkCancelled();
             invalidateAnalysisCaches();
             JsonObject readback = annotationReadback(function);
+            if (convention != null && !convention.equals(function.getCallingConventionName()))
+                throw new RequestFailure("annotation_readback_mismatch",
+                    "Annotation readback differs for calling_convention at " + canonicalAddress(entry));
+            if (!variableEdits.isEmpty())
+                readback.add("variables", variableReadback(function, variableEdits));
             for (String field : List.of("name", "comment", "inline_comment")) {
                 if (!params.has(field)) continue;
                 String requested = requireText(params, field);
@@ -1055,19 +1255,14 @@ public final class ReaGhidraBridge extends HeadlessScript {
             JsonObject result = new JsonObject();
             result.add("annotations", readback);
             result.add("dossier", analyzeFunction(query));
-            JsonObject effects = new JsonObject();
-            effects.addProperty(
-                "scope",
-                persistentProject ? "persistent-analysis-database" : "session-analysis-database"
-            );
-            effects.addProperty("source_bytes_modified", false);
-            effects.addProperty("persists_after_close", persistentProject);
-            result.add("effects", effects);
+            result.add("effects", annotationEffects());
             monitor.checkCancelled();
             commit = true;
             annotated = result;
         }
         catch (ghidra.util.exception.InvalidInputException | ghidra.util.exception.DuplicateNameException exception) {
+            // Variable and convention edits wrap their own Ghidra failures,
+            // so what reaches here is the function rename.
             throw new RequestFailure("invalid_function_name", "Invalid function name at " + canonicalAddress(entry) + ": " + safeMessage(exception));
         }
         finally {
@@ -1075,17 +1270,139 @@ public final class ReaGhidraBridge extends HeadlessScript {
             // Rollback also invalidates inventory and decompiler views.
             invalidateAnalysisCaches();
         }
-        if (persistentProject) {
-            try {
-                currentProgram.getDomainFile().save(monitor);
-            }
-            catch (java.io.IOException exception) {
-                throw new RequestFailure("annotation_not_persisted",
-                    "Annotation at " + canonicalAddress(entry) +
-                    " was applied in this session but the project save failed: " + safeMessage(exception));
-            }
-        }
+        persistAnnotation(entry);
         return annotated;
+    }
+
+    private JsonObject annotationEffects() {
+        JsonObject effects = new JsonObject();
+        effects.addProperty(
+            "scope",
+            persistentProject ? "persistent-analysis-database" : "session-analysis-database"
+        );
+        effects.addProperty("source_bytes_modified", false);
+        effects.addProperty("persists_after_close", persistentProject);
+        return effects;
+    }
+
+    private void persistAnnotation(Address address) throws Exception {
+        if (!persistentProject) return;
+        try {
+            currentProgram.getDomainFile().save(monitor);
+        }
+        catch (java.io.IOException exception) {
+            throw new RequestFailure("annotation_not_persisted",
+                "Annotation at " + canonicalAddress(address) +
+                " was applied in this session but the project save failed: " + safeMessage(exception));
+        }
+    }
+
+    private static final List<String> DATA_ANNOTATION_CHANGES = List.of(
+        "label", "data_type", "comment", "inline_comment");
+
+    private JsonObject annotateNativeData(JsonObject params) throws Exception {
+        for (String key : params.keySet()) {
+            if (!key.equals("address") && !DATA_ANNOTATION_CHANGES.contains(key))
+                throw new RequestFailure("invalid_request", "Unknown data annotation field: " + key);
+        }
+        if (DATA_ANNOTATION_CHANGES.stream().noneMatch(params::has))
+            throw new RequestFailure("invalid_request", "Supply at least one annotation change");
+        Address address = requireAddress(params, "address");
+        String canonical = canonicalAddress(address);
+        if (!currentProgram.getMemory().contains(address))
+            throw new RequestFailure("invalid_request", "Data annotations require an address in program memory: " + canonical);
+        for (String field : List.of("label", "comment", "inline_comment")) {
+            if (params.has(field)) validateAnnotationText(requireText(params, field), field);
+        }
+        String label = params.has("label") ? requireText(params, "label") : null;
+        if (label != null && currentProgram.getFunctionManager().getFunctionAt(address) != null)
+            throw new RequestFailure("invalid_label",
+                "The label at " + canonical + " is a function's name; rename it with annotate_native_function");
+        DataType type = params.has("data_type")
+            ? parseAnnotationDataType(requireText(params, "data_type"), "data_type", "invalid_data_edit", "address " + canonical)
+            : null;
+        int transaction = currentProgram.startTransaction("REA data annotations");
+        boolean commit = false;
+        JsonObject annotated;
+        try {
+            if (label != null) applyDataLabel(address, label);
+            if (type != null) applyDataType(address, type);
+            for (String field : List.of("comment", "inline_comment")) {
+                if (params.has(field)) {
+                    String comment = requireText(params, field);
+                    CommentType kind = field.equals("comment") ? CommentType.PRE : CommentType.EOL;
+                    currentProgram.getListing().setComment(address, kind, comment.isEmpty() ? null : comment);
+                }
+            }
+            monitor.checkCancelled();
+            invalidateAnalysisCaches();
+            JsonObject readback = dataAnnotationReadback(address);
+            Data data = currentProgram.getListing().getDefinedDataAt(address);
+            boolean agrees =
+                (label == null || label.equals(readback.get("label").isJsonNull() ? null : readback.get("label").getAsString())) &&
+                (type == null || (data != null && data.getDataType().isEquivalent(type)));
+            for (String field : List.of("comment", "inline_comment")) {
+                if (!params.has(field)) continue;
+                String requested = requireText(params, field);
+                JsonElement measured = readback.get(field);
+                agrees &= java.util.Objects.equals(requested.isEmpty() ? null : requested,
+                    measured.isJsonNull() ? null : measured.getAsString());
+            }
+            if (!agrees)
+                throw new RequestFailure("annotation_readback_mismatch", "Data annotation readback differs at " + canonical);
+            JsonObject result = new JsonObject();
+            result.add("annotations", readback);
+            result.add("effects", annotationEffects());
+            commit = true;
+            annotated = result;
+        }
+        finally {
+            currentProgram.endTransaction(transaction, commit);
+            invalidateAnalysisCaches();
+        }
+        persistAnnotation(address);
+        return annotated;
+    }
+
+    private void applyDataLabel(Address address, String label) {
+        ghidra.program.model.symbol.SymbolTable symbols = currentProgram.getSymbolTable();
+        try {
+            // createLabel returns the existing symbol when this name is already
+            // here, so repeated (and replayed) edits stay idempotent.
+            Symbol symbol = symbols.createLabel(address, label, SourceType.USER_DEFINED);
+            if (!symbol.isPrimary() && !symbol.setPrimary())
+                throw new RequestFailure("invalid_label", "Ghidra could not make " + label + " the primary label at " + canonicalAddress(address));
+        }
+        catch (ghidra.util.exception.InvalidInputException exception) {
+            throw new RequestFailure("invalid_label", "Invalid label at " + canonicalAddress(address) + ": " + safeMessage(exception));
+        }
+    }
+
+    private void applyDataType(Address address, DataType type) {
+        Data existing = currentProgram.getListing().getDefinedDataAt(address);
+        if (existing != null && existing.getDataType().isEquivalent(type)) return;
+        try {
+            ghidra.program.model.data.DataUtilities.createData(currentProgram, address, type, -1,
+                ghidra.program.model.data.DataUtilities.ClearDataMode.CLEAR_ALL_UNDEFINED_CONFLICT_DATA);
+        }
+        catch (ghidra.program.model.util.CodeUnitInsertionException | RuntimeException exception) {
+            throw new RequestFailure("invalid_data_edit",
+                "Ghidra could not define " + type.getDisplayName() + " at " + canonicalAddress(address) +
+                " without replacing instructions or other defined data: " + safeMessage(exception));
+        }
+    }
+
+    private JsonObject dataAnnotationReadback(Address address) {
+        JsonObject value = new JsonObject();
+        value.addProperty("address", canonicalAddress(address));
+        Symbol primary = currentProgram.getSymbolTable().getPrimarySymbol(address);
+        value.add("label", primary == null || primary.isDynamic() ? JsonNull.INSTANCE : GSON.toJsonTree(primary.getName()));
+        Data data = currentProgram.getListing().getDefinedDataAt(address);
+        value.add("data_type", data == null ? JsonNull.INSTANCE : GSON.toJsonTree(data.getDataType().getDisplayName()));
+        value.add("size_bytes", data == null ? JsonNull.INSTANCE : GSON.toJsonTree(data.getLength()));
+        value.addProperty("comment", currentProgram.getListing().getComment(CommentType.PRE, address));
+        value.addProperty("inline_comment", currentProgram.getListing().getComment(CommentType.EOL, address));
+        return value;
     }
 
     private String annotationLeafName(Function function, String requested) {

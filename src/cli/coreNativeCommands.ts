@@ -18,6 +18,7 @@ export const registerCoreNativeCommands = (
   logger: Logger,
 ): void => {
   registerAnnotationCommand(cli, logger);
+  registerDataAnnotationCommand(cli, logger);
   cli.command(CLI_COMMANDS.inspectNativeLoadImage, {
     description:
       "Verify loaded native bytes, source mappings, relocations and entry",
@@ -375,6 +376,27 @@ const registerNativeApiCommand = (cli: CliInstance, logger: Logger): void => {
   });
 };
 
+/**
+ * Merge repeated OLD=NEW renames and NAME=TYPE retypes into one edit per
+ * variable, in first-mention order. Malformed pairs pass through unsplit so
+ * the shared input schema reports them against `variables`.
+ */
+const variableEdits = (
+  renames: readonly string[],
+  retypes: readonly string[],
+): { variables?: Record<string, string>[] } => {
+  const edits = new Map<string, Record<string, string>>();
+  const add = (pair: string, field: "new_name" | "data_type") => {
+    const separator = pair.indexOf("=");
+    const name = separator < 0 ? pair : pair.slice(0, separator);
+    const value = separator < 0 ? "" : pair.slice(separator + 1);
+    edits.set(name, { name, ...edits.get(name), [field]: value });
+  };
+  for (const pair of renames) add(pair, "new_name");
+  for (const pair of retypes) add(pair, "data_type");
+  return edits.size === 0 ? {} : { variables: [...edits.values()] };
+};
+
 const registerAnnotationCommand = (cli: CliInstance, logger: Logger): void => {
   cli.command(CLI_COMMANDS.annotateNativeFunction, {
     description: "Edit function annotations and return refreshed analysis",
@@ -394,6 +416,26 @@ const registerAnnotationCommand = (cli: CliInstance, logger: Logger): void => {
         .string()
         .optional()
         .describe("Inline entry comment; empty text clears it"),
+      signature: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "C prototype, e.g. 'int draw_sprite(struct sprite *s, uint8_t x)'; its name must match the function's",
+        ),
+      "calling-convention": z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Calling convention defined by the program's compiler spec"),
+      "rename-variable": z
+        .array(z.string().min(1))
+        .default([])
+        .describe("OLD=NEW decompiler local or parameter rename; repeatable"),
+      "retype-variable": z
+        .array(z.string().min(1))
+        .default([])
+        .describe("NAME=C_TYPE decompiler local or parameter type; repeatable"),
       ...formatSelectionOptions,
       ...annotationLedgerOptions,
       provider: providerSelectionOption,
@@ -406,6 +448,71 @@ const registerAnnotationCommand = (cli: CliInstance, logger: Logger): void => {
           {
             procedure: args.procedure,
             ...(options.name === undefined ? {} : { name: options.name }),
+            ...(options.comment === undefined
+              ? {}
+              : { comment: options.comment }),
+            ...(options["inline-comment"] === undefined
+              ? {}
+              : { inline_comment: options["inline-comment"] }),
+            ...(options.signature === undefined
+              ? {}
+              : { signature: options.signature }),
+            ...(options["calling-convention"] === undefined
+              ? {}
+              : { calling_convention: options["calling-convention"] }),
+            ...variableEdits(
+              options["rename-variable"],
+              options["retype-variable"],
+            ),
+          },
+          directAnalysisOptions(logger, undefined, options.provider, options),
+        ),
+      ),
+  });
+};
+
+const registerDataAnnotationCommand = (
+  cli: CliInstance,
+  logger: Logger,
+): void => {
+  cli.command(CLI_COMMANDS.annotateNativeData, {
+    description: "Label, type, or comment one address and return the readback",
+    args: z.object({
+      path: z.string().describe("Local executable path"),
+      address: z.string().describe("Exact address, as REA reports addresses"),
+    }),
+    options: z.object({
+      label: z.string().min(1).optional().describe("Primary label"),
+      "data-type": z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Fixed-length C type to define; replaces undefined bytes only",
+        ),
+      comment: z
+        .string()
+        .optional()
+        .describe("Regular comment; empty text clears it"),
+      "inline-comment": z
+        .string()
+        .optional()
+        .describe("Inline comment; empty text clears it"),
+      ...formatSelectionOptions,
+      ...annotationLedgerOptions,
+      provider: providerSelectionOption,
+    }),
+    run: ({ args, options }) =>
+      logCliCommand(logger, CLI_COMMANDS.annotateNativeData, () =>
+        runDirectAnalysis(
+          args.path,
+          "annotate_native_data",
+          {
+            address: args.address,
+            ...(options.label === undefined ? {} : { label: options.label }),
+            ...(options["data-type"] === undefined
+              ? {}
+              : { data_type: options["data-type"] }),
             ...(options.comment === undefined
               ? {}
               : { comment: options.comment }),

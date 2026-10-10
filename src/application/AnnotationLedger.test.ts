@@ -14,14 +14,14 @@ import {
   type AnalysisOperationPort,
 } from "./AnalysisProvider.js";
 import { AnalysisInputError } from "../domain/analysisErrorCore.js";
-import type { AnnotationLedgerEntry } from "../domain/annotationLedger.js";
+import type { FunctionAnnotationLedgerEntry } from "../domain/annotationLedger.js";
 import { err, ok } from "../domain/result.js";
 
 const sha = "a".repeat(64);
 const profile = "b".repeat(64);
 const entry = (
-  fields: Partial<AnnotationLedgerEntry> = {},
-): AnnotationLedgerEntry => ({
+  fields: Partial<FunctionAnnotationLedgerEntry> = {},
+): FunctionAnnotationLedgerEntry => ({
   schema_version: "rea.annotation-ledger.v1",
   target_sha256: sha,
   analysis_profile_digest: profile,
@@ -53,10 +53,9 @@ describe("annotation ledger files", () => {
     ).toEqual(ok(null));
     const read = await readAnnotationLedger(path, "open_binary");
     if (!read.ok) throw read.error;
-    expect(read.value.map((item) => item.procedure)).toEqual([
-      "0x8000",
-      "0x8010",
-    ]);
+    expect(
+      read.value.map((item) => ("procedure" in item ? item.procedure : null)),
+    ).toEqual(["0x8000", "0x8010"]);
     expect((await readFile(path, "utf8")).split("\n")).toHaveLength(3);
   });
 
@@ -126,5 +125,94 @@ describe("annotation ledger replay", () => {
       skipped_other_profile: 1,
       failed: [{ line: 4, procedure: "0x9999" }],
     });
+  });
+
+  it("replays address entries through annotate_native_data and reports their address", async () => {
+    const path = await ledgerPath();
+    const { procedure: _procedure, name: _name, ...identity } = entry();
+    for (const item of [
+      {
+        ...identity,
+        address: "0x2000",
+        label: "ppu_ctrl",
+        data_type: "uint8_t",
+      },
+      { ...identity, address: "0x9999", comment: "missing" },
+    ])
+      expect(await appendAnnotationLedger(path, item)).toEqual(ok(null));
+    const calls: unknown[] = [];
+    const replay = await replayAnnotationLedger(
+      {
+        execute: (operation, parameters) => {
+          calls.push([operation, parameters]);
+          return Promise.resolve(
+            parameters["address"] === "0x9999"
+              ? err(new AnalysisInputError("annotate_native_data"))
+              : ok(
+                  createAnalysisExecution(
+                    {},
+                    { id: "fake", name: "Fake", version: "1" },
+                  ),
+                ),
+          );
+        },
+      },
+      { path, targetSha256: sha, profileDigest: profile },
+    );
+    if (!replay.ok) throw replay.error;
+    expect(calls).toEqual([
+      [
+        "annotate_native_data",
+        { address: "0x2000", label: "ppu_ctrl", data_type: "uint8_t" },
+      ],
+      ["annotate_native_data", { address: "0x9999", comment: "missing" }],
+    ]);
+    expect(replay.value).toMatchObject({
+      applied: 1,
+      failed: [{ line: 2, address: "0x9999" }],
+    });
+  });
+
+  it("replays signature, convention, and variable edits exactly as recorded", async () => {
+    const path = await ledgerPath();
+    const typed = entry({
+      signature: "void reset_handler(uint8_t mode)",
+      calling_convention: "__stdcall",
+      variables: [
+        { name: "uVar1", new_name: "counter", data_type: "uint16_t" },
+        { name: "param_1", new_name: "mode" },
+      ],
+    });
+    expect(await appendAnnotationLedger(path, typed)).toEqual(ok(null));
+    const requests: Readonly<Record<string, unknown>>[] = [];
+    const replay = await replayAnnotationLedger(
+      {
+        execute: (_operation, parameters) => {
+          requests.push(parameters);
+          return Promise.resolve(
+            ok(
+              createAnalysisExecution(
+                {},
+                { id: "fake", name: "Fake", version: "1" },
+              ),
+            ),
+          );
+        },
+      },
+      { path, targetSha256: sha, profileDigest: profile },
+    );
+    if (!replay.ok) throw replay.error;
+    expect(requests).toEqual([
+      {
+        procedure: "0x8000",
+        name: "reset_handler",
+        signature: "void reset_handler(uint8_t mode)",
+        calling_convention: "__stdcall",
+        variables: [
+          { name: "uVar1", new_name: "counter", data_type: "uint16_t" },
+          { name: "param_1", new_name: "mode" },
+        ],
+      },
+    ]);
   });
 });

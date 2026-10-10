@@ -1,3 +1,4 @@
+import { isAnnotationOperation } from "../domain/native/nativeDataAnnotations.js";
 import type { ExecutableFormatHint } from "../domain/dosCom.js";
 import {
   appendAnnotationFromEvidence,
@@ -56,6 +57,7 @@ import { artifactInspectionResultSchema } from "../domain/artifactInspection.js"
 
 type DirectAnalysisTool =
   | "annotate_native_function"
+  | "annotate_native_data"
   | "inspect_native_load_image"
   | "read_bytes"
   | "address_to_file_offset"
@@ -93,7 +95,7 @@ export const runDirectAnalysis = async (
     readonly formatHint?: ExecutableFormatHint;
     /** Inconsistent caller format selection, reported before any I/O. */
     readonly formatHintError?: string;
-    /** Ledger replayed after opening; annotate_native_function appends to it. */
+    /** Ledger replayed after opening; annotation tools append to it. */
     readonly annotationLedgerPath?: string;
   } = {},
 ): Promise<JsonValue> =>
@@ -308,9 +310,10 @@ const runAnalysis = async (
     if (evidence !== undefined) {
       const recorded = session.recordEvidence(evidence);
       if (!recorded.ok) return cliError(recorded.error);
-      if (ledger !== undefined && tool === "annotate_native_function") {
+      if (ledger !== undefined && isAnnotationOperation(tool)) {
         const appended = await appendAnnotationFromEvidence(
           ledger,
+          tool,
           arguments_,
           evidence,
         );

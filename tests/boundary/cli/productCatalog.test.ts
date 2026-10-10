@@ -239,6 +239,7 @@ describe("canonical CLI catalog", () => {
       "trace",
       "function",
       "annotate-native-function",
+      "annotate-native-data",
       "inspect-native-api",
       "search",
     ]) {

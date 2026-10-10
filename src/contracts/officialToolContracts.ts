@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { nativeDataAnnotationsInputSchema } from "../domain/native/nativeDataAnnotations.js";
 import { nativeFunctionAnnotationsInputSchema } from "../domain/native/nativeFunctionAnnotations.js";
 
 import {
@@ -41,8 +42,13 @@ const official = <Name extends string, Schema extends z.ZodObject>(
 export const OFFICIAL_TOOL_CONTRACTS = [
   official(
     "annotate_native_function",
-    "Atomically update one function name and/or entry comments, read them back, and return a refreshed complete function dossier. Ghidra changes its ephemeral session analysis database only; original executable bytes remain unchanged. Empty comment text clears that comment. Edits remain available to subsequent MCP calls until close; CLI returns the updated dossier before discarding its session. When open_binary (or the CLI) names an annotation_ledger_path, the applied edit is also appended to that JSON Lines ledger so later sessions of the same target and profile replay it. Invalid edits roll back the entire operation. Windows P0 and providers without this capability are unsupported.",
+    "Atomically update one function's name, entry comments, C signature, calling convention, and/or decompiler local and parameter names and types, read them back, and return a refreshed complete function dossier. Ghidra changes its ephemeral session analysis database only; original executable bytes remain unchanged. Empty comment text clears that comment. Edits remain available to subsequent MCP calls until close; CLI returns the updated dossier before discarding its session. When open_binary (or the CLI) names an annotation_ledger_path, the applied edit is also appended to that JSON Lines ledger so later sessions of the same target and profile replay it. Invalid edits roll back the entire operation. Windows P0 and providers without this capability are unsupported.",
     nativeFunctionAnnotationsInputSchema,
+  ),
+  official(
+    "annotate_native_data",
+    "Atomically set one address's primary label, define fixed-length typed data there, and/or set its regular and inline comments, then read them back. Typed data may replace only undefined bytes; overlapping instructions or defined data reject the whole edit. Ghidra changes its session analysis database (or the persistent project cache when enabled); original executable bytes remain unchanged. Empty comment text clears that comment. When open_binary (or the CLI) names an annotation_ledger_path, the applied edit is appended to that ledger and replayed in later sessions of the same target and profile. Windows P0 and providers without this capability are unsupported.",
+    nativeDataAnnotationsInputSchema,
   ),
   official(
     "inspect_native_load_image",

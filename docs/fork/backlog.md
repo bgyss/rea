@@ -83,6 +83,16 @@ Add an opt-in project mode, keyed by target SHA-256 and profile digest, under a 
 
 Function signature and calling convention, data type and struct definitions (C header import through Ghidra's CParser), data labels, local and parameter names, bulk apply, and platform MMIO label packs (NES PPU and APU registers, PS1 hardware registers) as versioned JSON.
 
+**Status: function typing and data annotations are implemented on `feat/richer-annotations`.**
+
+- **Contract.** `annotate_native_function` gains `signature` (a C prototype parsed by Ghidra's `FunctionSignatureParser`), `calling_convention` (validated against the compiler spec), and `variables` (rename and/or retype decompiler locals and parameters through `HighFunctionDBUtil.updateDBVariable`). They share the existing transaction, so any rejection rolls back the whole request. Bridge rejections map to `invalid_request` issues on the offending field.
+- **Readback.** It always includes `signature` and `calling_convention`, plus each edited variable's re-decompiled name, type, parameter flag and storage.
+- **Ledger.** `rea.annotation-ledger.v1` entries record and replay the new fields; older lines remain valid.
+- **CLI.** `--signature`, `--calling-convention`, and repeatable `--rename-variable OLD=NEW` and `--retype-variable NAME=TYPE`.
+- **Data annotations.** A new `annotate_native_data` tool (CLI `annotate-native-data`) sets an address's primary label, defines fixed-length typed data over undefined bytes only, and sets comments, atomically with readback. Ledger entries carry either `procedure` (function edits) or `address` (data edits), and replay dispatches on that.
+- **Verified.** `verify:ghidra`'s boundary lane gains `real-ghidra-typed-annotations.mjs`. It covers a signature with rollback and a name mismatch, the calling-convention list, parameter, stack-local and uncommitted-parameter edits, CLI typing, and data labels and types with conflicts and rollback. It ran against real Ghidra 12.1.2 through a temporary driver, because this host lacks the pinned 12.1.4, together with a ledger round trip that replayed one function and one data entry. Unit tests cover error-field mapping and ledger replay of both kinds.
+- **Not yet.** Struct and C header import, bulk apply, MMIO label packs, and typed-data replay across different targets.
+
 ### B3. Banked and overlay address identity
 
 **[D]** · 1 week, after B2

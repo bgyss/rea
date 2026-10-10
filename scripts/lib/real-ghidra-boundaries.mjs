@@ -12,6 +12,10 @@ import { verifyLegacyGhidraReferenceSnapshot } from "./ghidra-reference-snapshot
 import { verifyGhidraSnapshotLifecycle } from "./real-ghidra-snapshot-lifecycle.mjs";
 import { verifyGhidraTargetAdmission } from "./real-ghidra-target-admission.mjs";
 import { verifyGhidraNamespaceAnnotations } from "./real-ghidra-namespace-annotations.mjs";
+import {
+  verifyDataAnnotations,
+  verifyTypedAnnotations,
+} from "./real-ghidra-typed-annotations.mjs";
 
 /** Probe real Ghidra location, annotation and error contracts through public adapters. */
 export async function verifyGhidraBoundaries(
@@ -416,6 +420,8 @@ export async function verifyGhidraBoundaries(
     name: changes.name,
     comment: changes.comment,
     inline_comment: changes.inline_comment,
+    signature: updated.dossier.procedure.signature,
+    calling_convention: updated.annotations.calling_convention,
   });
   const regexPattern = "^(a|aa)*b$";
   const regexFailure = await client.callTool(
@@ -610,6 +616,20 @@ export async function verifyGhidraBoundaries(
   ]);
   assert.deepEqual(cliUpdated.annotations, updated.annotations);
   assert.deepEqual(cliUpdated.effects, updated.effects);
+  const typedAnnotations = await verifyTypedAnnotations(
+    { call, invalid, cli },
+    indirectProcedure,
+    (await call("list_procedures")).find((item) =>
+      item.value.endsWith("rea_ghidra_inventory_switch"),
+    ),
+  );
+  const dataAnnotations = await verifyDataAnnotations(
+    { call, invalid, cli },
+    (await call("list_names")).find((item) =>
+      item.value.endsWith("rea_ghidra_inventory_global"),
+    ),
+    indirectProcedure.address,
+  );
   for (const renamed of ["0xordinary", "probe::qualified", "🧪probe"]) {
     await call("annotate_native_function", {
       procedure: address,
@@ -689,6 +709,8 @@ export async function verifyGhidraBoundaries(
     successful_calls: successfulCalls,
     rejected_calls: rejectedCalls,
     cli_mcp_parity: true,
+    typed_annotations: typedAnnotations,
+    data_annotations: dataAnnotations,
     mutation_rollback: true,
     annotation_native_text_validation: true,
     lossless_unicode_transport: true,

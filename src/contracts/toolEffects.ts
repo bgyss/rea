@@ -122,6 +122,12 @@ export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
     launchesProcess: true,
     writesFilesystem: true,
   }),
+  annotate_native_data: effects({
+    mutatesTarget: true,
+    mutatesSession: true,
+    launchesProcess: true,
+    writesFilesystem: true,
+  }),
   inspect_native_load_image: evidence,
   inspect_native_dispatch_metadata: evidence,
   trace_native_ui_action: evidence,

@@ -3,6 +3,10 @@ import {
   nativeFunctionAnnotationsInputSchema,
   nativeFunctionAnnotationsSchema,
 } from "../domain/native/nativeFunctionAnnotations.js";
+import {
+  nativeDataAnnotationsInputSchema,
+  nativeDataAnnotationsSchema,
+} from "../domain/native/nativeDataAnnotations.js";
 import { nativeDataTypeSchema } from "../domain/native/nativeDataType.js";
 import {
   nativeInstructionSchema,
@@ -40,6 +44,7 @@ import {
 /** Function analysis and annotation operations admitted by the Ghidra adapter. */
 export const GHIDRA_FUNCTION_OPERATIONS = [
   "annotate_native_function",
+  "annotate_native_data",
   "inspect_native_data_type",
   "inspect_native_instruction",
   "resolve_native_call_targets",
@@ -71,6 +76,7 @@ const directProcedure = { document, procedure };
 
 const inputSchemas = {
   annotate_native_function: nativeFunctionAnnotationsInputSchema,
+  annotate_native_data: nativeDataAnnotationsInputSchema,
   inspect_native_data_type: z
     .object({
       document,
@@ -375,6 +381,7 @@ const resultSchemas = {
   annotate_native_function: nativeFunctionAnnotationsSchema.safeExtend({
     dossier: ghidraFunctionDossier,
   }),
+  annotate_native_data: nativeDataAnnotationsSchema,
   analyze_function: ghidraFunctionDossier,
   procedure_assembly: z.string(),
   procedure_callees: z.array(ghidraCanonicalAddressSchema),

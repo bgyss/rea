@@ -175,7 +175,8 @@ describe("GhidraClient", () => {
         capabilities: GHIDRA_SESSION_CAPABILITIES.filter(
           (value) =>
             HOST_TRANSPORT === "unix-socket" ||
-            value !== "annotate_native_function",
+            (value !== "annotate_native_function" &&
+              value !== "annotate_native_data"),
         ),
         target: {
           image_base: "0x1000",
