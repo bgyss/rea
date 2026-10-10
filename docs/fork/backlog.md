@@ -51,7 +51,7 @@ Generalize the DOS COM path into `format: "raw-image"` with a required `profile`
 
 A 63-instruction function returned 179 KB. Add a `facets` selector (`pseudocode`, `cfg`, `instructions`, `xrefs`, `strings`), defaulting to a compact dossier. Keep the full evidence available through `export_evidence_bundle`, so nothing is lost. Check that the token cost changes in representative agent tasks (`src/evaluation/`).
 
-**Status: implemented on `feat/compact-function-results`.** Measured causes: the 179 KB response is one 58.6 KB dossier carried three times (`result`, `evidence.raw_result`, `evidence.normalized_result`). Within it, `outgoing_references` is 29 KB because every edge repeats the full source procedure, and `native_value_flow` is 18 KB.
+**Status: implemented in [PR #2](https://github.com/bgyss/rea/pull/2).** Measured causes: the 179 KB response is one 58.6 KB dossier carried three times (`result`, `evidence.raw_result`, `evidence.normalized_result`). Within it, `outgoing_references` is 29 KB because every edge repeats the full source procedure, and `native_value_flow` is 18 KB.
 
 - **Contract.** `analyze_function` keeps the complete dossier by default, as AGENTS.md requires. An opt-in `facets` array (MCP) or `--facets a,b` (CLI) returns only the selected sections plus `procedure`, `limitations`, and `facets: {selected, omitted, unavailable}`. Omitted sections are absent rather than null, because null would mean "none observed". The output schema is the union of the complete dossier and the projection.
 - **Evidence.** The provider contract is unchanged: it receives only `procedure`, and the complete dossier still validates before projection. Evidence records the canonical facet order, so equal selections share an ID. `raw_result` is omitted with an explicit limitation.
@@ -67,7 +67,7 @@ A 63-instruction function returned 179 KB. Add a `facets` selector (`pseudocode`
 
 Add an opt-in project mode, keyed by target SHA-256 and profile digest, under a caller-selected private root. Reopen with `-process -noanalysis` (measured 3.8 s instead of a full import). Add an annotation ledger: append-only JSON of `{address_space, address, bytes_sha256, kind, value, author, evidence_ref, at}`. The ledger replays onto fresh imports and refuses entries whose bytes changed. `annotate_native_function`'s `persists_after_close: false` becomes `true` only in this mode, and the contract reports which mode was used.
 
-**Status: both halves are implemented on `feat/annotation-ledger`.**
+**Status: both halves implemented in [PR #5](https://github.com/bgyss/rea/pull/5).**
 
 - **Recording.** `open_binary` (`annotation_ledger_path`) and every CLI analysis command (`--annotation-ledger`) bind a JSON Lines `rea.annotation-ledger.v1` file. Each successful `annotate_native_function` appends one synced line: target SHA-256, analysis-profile digest, entry address, requested name and comments, Evidence ID and time.
 - **Replay.** After opening, only entries for exactly this target and profile are replayed, in order. Others are counted as `skipped_other_target` or `skipped_other_profile`, and per-entry failures are listed. The replay report is returned on `open_binary`; the CLI logs failures as warnings. A missing file is an empty ledger; a malformed line fails closed. A failed append reports that the edit was applied but not recorded.
@@ -89,7 +89,7 @@ Function signature and calling convention, data type and struct definitions (C h
 
 Memory-map overlay spaces per bank. Every address-bearing evidence row gains `{space, bank, physical_offset}`. `compare_functions` matches across banks only by bytes and evidence, never by bare CPU address.
 
-**Status: implemented on `feat/raw-image-memory-map` (rea) and in the dcomp working copy, both uncommitted.** It's a shared `dcomp.ghidra-profile.v2` with `blocks` of file slices (`file_offset`, `length`, `load_address`, `overlay`, `permissions`, `entry_addresses`).
+**Status: implemented in rea [PR #4](https://github.com/bgyss/rea/pull/4) and on dcomp `main` (`feat: accept banked v2 Ghidra profiles in rea import`).** It's a shared `dcomp.ghidra-profile.v2` with `blocks` of file slices (`file_offset`, `length`, `load_address`, `overlay`, `permissions`, `entry_addresses`).
 
 - **rea import.** rea imports a one-byte BinaryLoader stub, then rebuilds memory from the whole source file after checking its SHA-256 against the imported digest. Overlay blocks become separate Ghidra address spaces, so evidence addresses read `bank0:0x8000` and `bank1:0x8000`, and selectors accept them. Each block keeps its file offset, so `address_to_file_offset` returns the exact ROM byte. Entries are named `<block>_entry`. The analysis profile commits the full map. v1 flat profiles are unchanged.
 - **Physical offset.** The planned `{space, bank, physical_offset}` columns turned out to be unnecessary as new fields: the space is in the address string, and the physical offset comes from `address_to_file_offset`.
@@ -129,7 +129,7 @@ Run Ghidra FID or BSim against operator-supplied databases (pinned by digest). M
 
 Add `bounds`, `enabled`, `focused`, `selected`, `automation_id` (AXIdentifier), `subrole`, and `stable_key` to nodes. Add selector-based targets alongside `path`.
 
-**Status: implemented on `feat/native-ui-selectors`.**
+**Status: implemented in [PR #3](https://github.com/bgyss/rea/pull/3).**
 
 - **Nodes.** Each node reports `subrole`, `identifier`, `description`, `enabled`, `focused`, `selected`, and `bounds` (window-relative points); unsupported attributes are `null`.
 - **Stable keys.** `stable_key` (`uik_` plus 32 hex characters) is derived from the identifier, or role, subrole, title and description, chained through the parent key. Sibling order only breaks ties, and `value` is excluded, so keys survive sibling insertion and value or title changes on identified elements.
@@ -143,7 +143,7 @@ Add `bounds`, `enabled`, `focused`, `selected`, `automation_id` (AXIdentifier), 
 
 The scenario union grows as specified. Pointer actions use CGEvent on macOS and `SendInput` on Windows. Every `expect` records pass, fail, or unknown with the nodes and crops it examined.
 
-**Status: keys, wait_for, expect and checkpoint committed in `9200a9f8` (`feat/native-ui-gestures`). System-wide pointer gestures are implemented on `feat/native-ui-pointer`.**
+**Status: keys, wait_for, expect, checkpoint and system-wide pointer gestures implemented in [PR #3](https://github.com/bgyss/rea/pull/3).**
 
 - **Steps.** `keys` posts chords to the selected process only (CGEvent `postToPid`, US ANSI key codes) and reaches its focused element. `wait_for` polls accessibility-only captures (no screenshots, not budgeted) until a condition passes or times out, keeps one capture, and fails the step on timeout. `expect` records pass, fail or unknown on the preceding capture without capturing or stopping. `checkpoint` is a labelled capture.
 - **Conditions.** Element `exists`, `absent`, `enabled`, `disabled`, `focused` and `selected`; exact `title`, `value` or `description`; and window title. A truncated capture or an unexposed attribute yields `unknown`.
