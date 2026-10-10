@@ -1,3 +1,4 @@
+import { isAnnotationOperation } from "../domain/native/nativeDataAnnotations.js";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -81,9 +82,7 @@ describe("Ghidra mutation handshake", () => {
     const windows = {
       ...value,
       read_only: true,
-      capabilities: value.capabilities.filter(
-        (c) => c !== "annotate_native_function" && c !== "annotate_native_data",
-      ),
+      capabilities: value.capabilities.filter((c) => !isAnnotationOperation(c)),
     };
     expect(
       parseGhidraSessionInfo(windows, { ...expected, expectedReadOnly: true })

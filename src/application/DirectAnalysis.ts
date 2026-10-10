@@ -58,6 +58,7 @@ import { artifactInspectionResultSchema } from "../domain/artifactInspection.js"
 type DirectAnalysisTool =
   | "annotate_native_function"
   | "annotate_native_data"
+  | "define_native_types"
   | "inspect_native_load_image"
   | "read_bytes"
   | "address_to_file_offset"
@@ -93,20 +94,23 @@ export const runDirectAnalysis = async (
     readonly signal?: AbortSignal;
     readonly providerId?: AnalysisProviderSelector;
     readonly formatHint?: ExecutableFormatHint;
-    /** Inconsistent caller format selection, reported before any I/O. */
-    readonly formatHintError?: string;
+    /** An unusable CLI option or argument, reported before any I/O. */
+    readonly optionError?: {
+      readonly option: string;
+      readonly message: string;
+    };
     /** Ledger replayed after opening; annotation tools append to it. */
     readonly annotationLedgerPath?: string;
   } = {},
 ): Promise<JsonValue> =>
-  options.formatHintError !== undefined
+  options.optionError !== undefined
     ? Promise.resolve(
         cliError(
           new AnalysisInputError(tool, undefined, [
             {
-              path: ["raw-image-profile"],
+              path: [options.optionError.option],
               reason: "invalid_value",
-              message: options.formatHintError,
+              message: options.optionError.message,
             },
           ]),
         ),

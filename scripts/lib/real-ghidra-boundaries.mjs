@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { access, readFile, readdir, stat } from "node:fs/promises";
+import { access, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
@@ -14,6 +14,7 @@ import { verifyGhidraTargetAdmission } from "./real-ghidra-target-admission.mjs"
 import { verifyGhidraNamespaceAnnotations } from "./real-ghidra-namespace-annotations.mjs";
 import {
   verifyDataAnnotations,
+  verifyTypeDefinitions,
   verifyTypedAnnotations,
 } from "./real-ghidra-typed-annotations.mjs";
 
@@ -623,12 +624,25 @@ export async function verifyGhidraBoundaries(
       item.value.endsWith("rea_ghidra_inventory_switch"),
     ),
   );
+  const globalName = (await call("list_names")).find((item) =>
+    item.value.endsWith("rea_ghidra_inventory_global"),
+  );
   const dataAnnotations = await verifyDataAnnotations(
     { call, invalid, cli },
-    (await call("list_names")).find((item) =>
-      item.value.endsWith("rea_ghidra_inventory_global"),
-    ),
+    globalName,
     indirectProcedure.address,
+  );
+  const headerPath = join(env.TMPDIR, "rea-cli-types.h");
+  await writeFile(
+    headerPath,
+    "enum rea_cli_flags { REA_CLI_A = 1, REA_CLI_B = 2 };\n",
+    { mode: 0o600 },
+  );
+  const typeDefinitions = await verifyTypeDefinitions(
+    { call, invalid, cli },
+    indirectProcedure,
+    globalName.address,
+    headerPath,
   );
   for (const renamed of ["0xordinary", "probe::qualified", "🧪probe"]) {
     await call("annotate_native_function", {
@@ -711,6 +725,7 @@ export async function verifyGhidraBoundaries(
     cli_mcp_parity: true,
     typed_annotations: typedAnnotations,
     data_annotations: dataAnnotations,
+    type_definitions: typeDefinitions,
     mutation_rollback: true,
     annotation_native_text_validation: true,
     lossless_unicode_transport: true,

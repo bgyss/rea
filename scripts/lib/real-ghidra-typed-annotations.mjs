@@ -192,3 +192,124 @@ export const verifyDataAnnotations = async (
   assert.equal(cliLabelled.annotations.data_type, "uint");
   return { labelled: original !== "rea_counter", cli_labelled: true };
 };
+
+/**
+ * C type definitions (B6): parse, replace, roll back and reject, then name
+ * a defined type in a function signature. `entry` is the inventory fixture's
+ * indirect function; `dataAddress` is its already-typed global.
+ */
+export const verifyTypeDefinitions = async (
+  { call, invalid, cli },
+  { address: entry, value: name },
+  dataAddress,
+  headerPath,
+) => {
+  const declarations = [
+    "typedef int (*rea_callback)(int);",
+    "enum rea_mode { REA_OFF = 0, REA_ON = 1 };",
+    "struct rea_pair { int left; short right; };",
+    "typedef struct rea_pair rea_pair_t;",
+    "int rea_proto(int value);",
+  ].join("\n");
+  const defined = await call("define_native_types", { declarations });
+  const byId = new Map(defined.types.map((type) => [type.id, type]));
+  assert.deepEqual([...byId.keys()].sort(), [
+    "/rea/rea_callback",
+    "/rea/rea_mode",
+    "/rea/rea_pair",
+    "/rea/rea_pair_t",
+  ]);
+  assert.ok(defined.types.every((type) => type.outcome === "created"));
+  const pair = byId.get("/rea/rea_pair");
+  assert.equal(pair.kind, "struct");
+  assert.equal(pair.size_bytes, 8);
+  assert.deepEqual(
+    pair.fields.map((field) => [field.name, field.offset_bytes, field.type_id]),
+    [
+      ["left", 0, "/int"],
+      ["right", 4, "/short"],
+    ],
+  );
+  assert.deepEqual(byId.get("/rea/rea_mode").members, [
+    { name: "REA_OFF", value: "0" },
+    { name: "REA_ON", value: "1" },
+  ]);
+  assert.equal(byId.get("/rea/rea_pair_t").referenced_type, "/rea/rea_pair");
+  // A function-pointer typedef's signature is stored under a distinct name,
+  // so the typedef's own name stays unambiguous.
+  const callback = byId.get("/rea/rea_callback");
+  assert.equal(callback.kind, "typedef");
+  assert.match(callback.referenced_type, /rea_callback_fn \*/u);
+  assert.ok(defined.types.every((type) => type.other_ids.length === 0));
+  assert.deepEqual(defined.skipped, [{ name: "rea_proto", kind: "function" }]);
+  // Identical declarations are unchanged, as ledger replay requires.
+  const repeated = await call("define_native_types", { declarations });
+  assert.ok(repeated.types.every((type) => type.outcome === "unchanged"));
+  // A changed definition replaces the type at its path.
+  const replaced = await call("define_native_types", {
+    declarations: "struct rea_pair { int left; int right; int extra; };",
+  });
+  assert.deepEqual(
+    replaced.types.map(({ id, outcome, size_bytes }) => [
+      id,
+      outcome,
+      size_bytes,
+    ]),
+    [["/rea/rea_pair", "replaced", 12]],
+  );
+  const inspected = await call("inspect_native_data_type", {
+    type: "/rea/rea_pair",
+  });
+  assert.equal(inspected.size_bytes, 12);
+  // A defined typedef resolves by bare name in a signature.
+  const signed = await call("annotate_native_function", {
+    procedure: entry,
+    signature: `int ${name}(rea_callback callback, int value)`,
+  });
+  assert.match(signed.annotations.signature, /rea_callback callback/u);
+  // A parse failure rolls back the types parsed before it.
+  await invalid(
+    "define_native_types",
+    { declarations: "struct rea_rolled_back { int a; };\nstruct rea_broken {" },
+    /C parser rejected the declarations/u,
+  );
+  const rolledBack = await call("inspect_native_data_type", {
+    type: "/rea/rea_rolled_back",
+  });
+  assert.equal(rolledBack.status, "unavailable");
+  await invalid(
+    "define_native_types",
+    { declarations: "#define REA_PPU_CTRL 0x2000\n" },
+    /C parser rejected the declarations/u,
+  );
+  await invalid(
+    "define_native_types",
+    { declarations: "int rea_only_prototype(int value);" },
+    /define no struct, union, enum or typedef/u,
+  );
+  // A different same-named type elsewhere makes the bare name ambiguous.
+  const shadow = await call("define_native_types", {
+    declarations: '#line 1 "rea_other"\nstruct rea_pair { char c; };',
+  });
+  assert.deepEqual(
+    shadow.types.map(({ id, other_ids }) => [id, other_ids]),
+    [["/rea_other/rea_pair", ["/rea/rea_pair"]]],
+  );
+  await invalid(
+    "annotate_native_data",
+    { address: dataAddress, data_type: "rea_pair" },
+    /Unknown or variable-length data type rea_pair/u,
+  );
+  const cliDefined = await cli("define-native-types", headerPath);
+  assert.deepEqual(
+    cliDefined.types.map(({ id, kind, outcome }) => [id, kind, outcome]),
+    [["/rea/rea_cli_flags", "enum", "created"]],
+  );
+  return {
+    defined: defined.types.length,
+    replaced: true,
+    rolled_back: true,
+    ambiguous_name_rejected: true,
+    cli_defined: true,
+  };
+};

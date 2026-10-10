@@ -51,6 +51,10 @@ export const TOOL_EXAMPLE_OVERRIDES: Readonly<
     label: "ppu_ctrl",
     data_type: "uint8_t",
   },
+  define_native_types: {
+    declarations:
+      "typedef struct oam_entry { unsigned char y, tile, attributes, x; } oam_entry;",
+  },
   analyze_swift_types: { category: "classes", pattern: "Account" },
   inspect_native_api: { procedure: "main" },
   trace_feature: { query: "license" },

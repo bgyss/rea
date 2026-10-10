@@ -429,6 +429,34 @@ address outside a function entry, in the same atomic way:
 The readback reports the label, defined type, its size in bytes, and both
 comments.
 
+`define_native_types` (CLI `define-native-types <path> <header>`) defines C
+types for those edits to name. It parses struct, union, enum and typedef
+declarations with Ghidra's C parser, sized for the target's data organization,
+and commits them all or none:
+
+- Declarations are not preprocessed. `#pragma pack` and `#line` markers work;
+  macros, `#include` and conditionals do not, so run a header through
+  `cc -E -P` first. Function prototypes are reported as `skipped`; variable
+  declarations are ignored.
+- Types go to the `/rea` category, or to the category a `#line` marker names.
+  Redefining a type at the same path replaces it, including in data and
+  signatures that already use it (`outcome: "replaced"`); an identical
+  definition is `unchanged`, so replay is idempotent.
+- Ghidra's parser files a function typedef's signature under the typedef's own
+  name. REA stores that signature as `<name>_fn` instead, so
+  `typedef int (*handler)(int);` leaves `handler` unambiguous.
+- The readback lists each type's `id` (its category path, accepted by
+  `inspect_native_data_type`), kind, size, alignment, fields with offsets and
+  bitfields, enum members, and `other_ids`: same-named types elsewhere. A bare
+  name shared by non-equivalent types is ambiguous, and other annotation edits
+  reject it.
+
+```json
+{
+  "declarations": "typedef struct oam_entry { unsigned char y, tile, attributes, x; } oam_entry;"
+}
+```
+
 - `npm run verify:ghidra`: host-native debug/stripped targets, native type layout,
   instruction/call facts, value dependencies and process/project cleanup.
 - `npm run verify:ghidra:aarch64-jump-table`: optimized ELF and byte/halfword
@@ -457,7 +485,9 @@ Lines file of `rea.annotation-ledger.v1` entries. Each entry holds the target
 SHA-256, the analysis-profile digest, the function entry address (or, for
 `annotate_native_data`, the annotated address), the requested
 `name`, comment, signature, calling-convention and variable changes, the
-Evidence ID and the time.
+Evidence ID and the time. A `define_native_types` entry instead holds the
+declarations and the ids of the types they defined; entries replay in order,
+so types are defined before later edits that name them.
 
 - After opening, REA replays the entries recorded for exactly this target digest
   and analysis profile, in order. Matching digests guarantee identical bytes and
@@ -466,7 +496,8 @@ Evidence ID and the time.
   different code. `open_binary` returns the replay report as
   `annotation_ledger`; an entry that fails to apply is listed with its line and
   reason. The CLI logs such failures as warnings.
-- Each successful `annotate_native_function` appends one synced line. If the
+- Each successful `annotate_native_function`, `annotate_native_data` or
+  `define_native_types` appends one synced line. If the
   append fails, the tool reports that the edit was applied in the session but
   not recorded.
 - A missing file starts an empty ledger. A malformed line fails the open rather

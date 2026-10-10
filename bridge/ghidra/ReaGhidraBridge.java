@@ -64,6 +64,9 @@ import ghidra.program.model.block.CodeBlockReference;
 import ghidra.program.model.block.CodeBlockReferenceIterator;
 import ghidra.program.model.data.StringDataInstance;
 import ghidra.program.model.data.DataType;
+import ghidra.program.model.data.DataTypeConflictHandler;
+import ghidra.program.model.data.DataTypeManager;
+import ghidra.app.util.cparser.C.CParser;
 import ghidra.program.model.lang.Register;
 import ghidra.program.model.scalar.Scalar;
 import ghidra.program.model.listing.CommentType;
@@ -121,9 +124,15 @@ public final class ReaGhidraBridge extends HeadlessScript {
         "method",
         "params"
     );
+    private static final Set<String> MUTATING_METHODS = Set.of(
+        "annotate_native_function",
+        "annotate_native_data",
+        "define_native_types"
+    );
     private static final String[] CAPABILITIES = {
         "annotate_native_function",
         "annotate_native_data",
+        "define_native_types",
         "inspect_native_load_image",
         "read_bytes",
         "address_to_file_offset",
@@ -395,6 +404,11 @@ public final class ReaGhidraBridge extends HeadlessScript {
                     throw new RequestFailure("method_unavailable", "Windows P0 does not admit database mutation");
                 yield annotateNativeData(request.params);
             }
+            case "define_native_types" -> {
+                if (!descriptor.transport.equals("unix-socket"))
+                    throw new RequestFailure("method_unavailable", "Windows P0 does not admit database mutation");
+                yield defineNativeTypes(request.params);
+            }
             default -> throw new RequestFailure(
                 "method_unavailable",
                 "Bridge method is unavailable"
@@ -433,7 +447,7 @@ public final class ReaGhidraBridge extends HeadlessScript {
         result.addProperty("analysis_timed_out", timedOut);
         result.add("capabilities", GSON.toJsonTree(
             java.util.Arrays.stream(CAPABILITIES)
-                .filter(value -> !readOnly || !value.startsWith("annotate_native_"))
+                .filter(value -> !readOnly || !MUTATING_METHODS.contains(value))
                 .toArray(String[]::new)
         ));
         result.add("target", target);
@@ -797,30 +811,14 @@ public final class ReaGhidraBridge extends HeadlessScript {
             if (type.getSourceArchive() != null) result.addProperty("source_archive", type.getSourceArchive().getName());
             if (type.getLength() >= 0) result.addProperty("size_bytes", type.getLength());
             if (type.getAlignment() > 0) result.addProperty("alignment_bytes", type.getAlignment());
-            String kind = type instanceof ghidra.program.model.data.Structure ? "struct" : type instanceof ghidra.program.model.data.Union ? "union" : type instanceof ghidra.program.model.data.Enum ? "enum" : type instanceof ghidra.program.model.data.Pointer ? "pointer" : type instanceof ghidra.program.model.data.Array ? "array" : type instanceof ghidra.program.model.data.TypeDef ? "typedef" : type instanceof ghidra.program.model.data.BuiltInDataType ? "scalar" : "unsupported";
-            result.addProperty("kind", kind);
+            result.addProperty("kind", dataTypeKind(type));
             if (type instanceof ghidra.program.model.data.Composite composite) {
                 result.addProperty("packing_enabled", composite.isPackingEnabled());
                 ghidra.program.model.data.DataTypeComponent[] components = composite.getComponents();
                 totalFields = components.length;
                 for (int index = 0; index < Math.min(components.length, 20_000); index++) {
                     monitor.checkCancelled();
-                    ghidra.program.model.data.DataTypeComponent component = components[index];
-                    JsonObject field = new JsonObject();
-                    field.addProperty("ordinal", component.getOrdinal());
-                    field.add("name", component.getFieldName() == null ? JsonNull.INSTANCE : GSON.toJsonTree(component.getFieldName()));
-                    field.addProperty("offset_bytes", component.getOffset());
-                    field.add("size_bytes", component.getLength() < 0 ? JsonNull.INSTANCE : GSON.toJsonTree(component.getLength()));
-                    field.addProperty("type_id", component.getDataType().getPathName());
-                    field.add("bit_size", JsonNull.INSTANCE);
-                    field.add("bit_offset", JsonNull.INSTANCE);
-                    if (component.getDataType() instanceof ghidra.program.model.data.BitFieldDataType bitfield) {
-                        field.addProperty("bit_size", bitfield.getBitSize());
-                        field.addProperty("bit_offset", bitfield.getBitOffset());
-                    }
-                    field.addProperty("status", "observed");
-                    field.addProperty("flexible_tail", "unknown");
-                    fields.add(field);
+                    fields.add(componentFact(components[index]));
                 }
             } else if (type instanceof ghidra.program.model.data.Enum enumeration) {
                 String[] names = enumeration.getNames();
@@ -828,10 +826,7 @@ public final class ReaGhidraBridge extends HeadlessScript {
                 java.util.Arrays.sort(names);
                 for (int index = 0; index < Math.min(names.length, 20_000); index++) {
                     monitor.checkCancelled();
-                    JsonObject member = new JsonObject();
-                    member.addProperty("name", names[index]);
-                    member.addProperty("value", Long.toString(enumeration.getValue(names[index])));
-                    members.add(member);
+                    members.add(enumMemberFact(enumeration, names[index]));
                 }
             } else if (type instanceof ghidra.program.model.data.Pointer pointer) {
                 if (pointer.getDataType() != null) result.addProperty("referenced_type", pointer.getDataType().getPathName());
@@ -853,6 +848,35 @@ public final class ReaGhidraBridge extends HeadlessScript {
             if (metadata != null) result.add("metadata_recovery", metadata);
         }
         return result;
+    }
+
+    private static String dataTypeKind(DataType type) {
+        return type instanceof ghidra.program.model.data.Structure ? "struct" : type instanceof ghidra.program.model.data.Union ? "union" : type instanceof ghidra.program.model.data.Enum ? "enum" : type instanceof ghidra.program.model.data.Pointer ? "pointer" : type instanceof ghidra.program.model.data.Array ? "array" : type instanceof ghidra.program.model.data.TypeDef ? "typedef" : type instanceof ghidra.program.model.data.BuiltInDataType ? "scalar" : "unsupported";
+    }
+
+    private static JsonObject componentFact(ghidra.program.model.data.DataTypeComponent component) {
+        JsonObject field = new JsonObject();
+        field.addProperty("ordinal", component.getOrdinal());
+        field.add("name", component.getFieldName() == null ? JsonNull.INSTANCE : GSON.toJsonTree(component.getFieldName()));
+        field.addProperty("offset_bytes", component.getOffset());
+        field.add("size_bytes", component.getLength() < 0 ? JsonNull.INSTANCE : GSON.toJsonTree(component.getLength()));
+        field.addProperty("type_id", component.getDataType().getPathName());
+        field.add("bit_size", JsonNull.INSTANCE);
+        field.add("bit_offset", JsonNull.INSTANCE);
+        if (component.getDataType() instanceof ghidra.program.model.data.BitFieldDataType bitfield) {
+            field.addProperty("bit_size", bitfield.getBitSize());
+            field.addProperty("bit_offset", bitfield.getBitOffset());
+        }
+        field.addProperty("status", "observed");
+        field.addProperty("flexible_tail", "unknown");
+        return field;
+    }
+
+    private static JsonObject enumMemberFact(ghidra.program.model.data.Enum enumeration, String name) {
+        JsonObject member = new JsonObject();
+        member.addProperty("name", name);
+        member.addProperty("value", Long.toString(enumeration.getValue(name)));
+        return member;
     }
 
     private JsonObject instructionReference(Reference reference) {
@@ -1402,6 +1426,150 @@ public final class ReaGhidraBridge extends HeadlessScript {
         value.add("size_bytes", data == null ? JsonNull.INSTANCE : GSON.toJsonTree(data.getLength()));
         value.addProperty("comment", currentProgram.getListing().getComment(CommentType.PRE, address));
         value.addProperty("inline_comment", currentProgram.getListing().getComment(CommentType.EOL, address));
+        return value;
+    }
+
+    // Places parsed types in /rea and numbers parser diagnostics from the
+    // caller's first line. A later #line marker selects its own category.
+    private static final String TYPE_CATEGORY_MARKER = "#line 1 \"rea\"\n";
+
+    private JsonObject defineNativeTypes(JsonObject params) throws Exception {
+        for (String key : params.keySet()) {
+            if (!key.equals("declarations"))
+                throw new RequestFailure("invalid_request", "Unknown type definition field: " + key);
+        }
+        String declarations = requireText(params, "declarations");
+        validateAnnotationText(declarations, "declarations");
+        if (declarations.isBlank())
+            throw new RequestFailure("invalid_declarations", "Supply at least one C declaration");
+        DataTypeManager types = currentProgram.getDataTypeManager();
+        int transaction = currentProgram.startTransaction("REA type definitions");
+        boolean commit = false;
+        JsonObject defined;
+        try {
+            // Parse without storing, so only the collected definitions are
+            // resolved below, each through the same conflict handler.
+            CParser parser = new CParser(types, false, null);
+            parser.setMonitor(monitor);
+            try {
+                parser.parse(TYPE_CATEGORY_MARKER + declarations);
+            }
+            catch (ghidra.app.util.cparser.C.ParseException | ghidra.app.util.cparser.C.TokenMgrError exception) {
+                throw new RequestFailure("invalid_declarations",
+                    "Ghidra's C parser rejected the declarations: " + safeMessage(exception));
+            }
+            // The parser files a function typedef's signature under the
+            // typedef's own name, which would make that name ambiguous.
+            for (DataType type : parser.getTypes().values()) {
+                if (!(type instanceof ghidra.program.model.data.TypeDef alias)) continue;
+                DataType base = alias.getDataType();
+                while (base instanceof ghidra.program.model.data.Pointer pointer) base = pointer.getDataType();
+                if (base instanceof ghidra.program.model.data.FunctionDefinition signature &&
+                    signature.getName().equals(alias.getName())) {
+                    try {
+                        signature.setName(alias.getName() + "_fn");
+                    }
+                    catch (ghidra.util.InvalidNameException | ghidra.util.exception.DuplicateNameException exception) {
+                        throw new RequestFailure("invalid_declarations",
+                            "Cannot name the signature of typedef " + alias.getName() + ": " + safeMessage(exception));
+                    }
+                }
+            }
+            Map<String, DataType> parsed = new TreeMap<>();
+            for (Map<String, DataType> table : List.of(parser.getComposites(), parser.getEnums(), parser.getTypes())) {
+                for (DataType type : table.values()) {
+                    if (!(type instanceof ghidra.program.model.data.BuiltInDataType))
+                        parsed.putIfAbsent(type.getPathName(), type);
+                }
+            }
+            if (parsed.isEmpty())
+                throw new RequestFailure("invalid_declarations",
+                    "The declarations define no struct, union, enum or typedef");
+            // Classify against the database before any resolve replaces a type.
+            Map<String, String> outcomes = new TreeMap<>();
+            for (Map.Entry<String, DataType> entry : parsed.entrySet()) {
+                DataType existing = types.getDataType(entry.getKey());
+                outcomes.put(entry.getKey(), existing == null ? "created"
+                    : existing.isEquivalent(entry.getValue()) ? "unchanged" : "replaced");
+            }
+            for (Map.Entry<String, DataType> entry : parsed.entrySet()) {
+                monitor.checkCancelled();
+                DataType stored = types.resolve(entry.getValue(), DataTypeConflictHandler.REPLACE_HANDLER);
+                if (!stored.getPathName().equals(entry.getKey()))
+                    throw new RequestFailure("annotation_readback_mismatch",
+                        "Ghidra stored " + entry.getKey() + " as " + stored.getPathName());
+            }
+            JsonArray readback = new JsonArray();
+            for (Map.Entry<String, DataType> entry : parsed.entrySet()) {
+                DataType stored = types.getDataType(entry.getKey());
+                if (stored == null || !stored.isEquivalent(entry.getValue()))
+                    throw new RequestFailure("annotation_readback_mismatch",
+                        "Type definition readback differs for " + entry.getKey());
+                readback.add(typeDefinitionReadback(types, stored, outcomes.get(entry.getKey())));
+            }
+            JsonArray skipped = new JsonArray();
+            for (String name : new java.util.TreeSet<>(parser.getFunctions().keySet())) {
+                // A function typedef also files its signature under its name.
+                if (parser.getTypes().containsKey(name)) continue;
+                JsonObject item = new JsonObject();
+                item.addProperty("name", name);
+                item.addProperty("kind", "function");
+                skipped.add(item);
+            }
+            JsonArray messages = new JsonArray();
+            for (String line : parser.getParseMessages().split("\n")) {
+                if (!line.isBlank()) messages.add(line.strip());
+            }
+            monitor.checkCancelled();
+            invalidateAnalysisCaches();
+            JsonObject result = new JsonObject();
+            result.add("types", readback);
+            result.add("skipped", skipped);
+            result.add("parser_messages", messages);
+            result.add("effects", annotationEffects());
+            commit = true;
+            defined = result;
+        }
+        finally {
+            currentProgram.endTransaction(transaction, commit);
+            invalidateAnalysisCaches();
+        }
+        persistAnnotation(currentProgram.getImageBase());
+        return defined;
+    }
+
+    private static JsonObject typeDefinitionReadback(DataTypeManager types, DataType type, String outcome) {
+        JsonObject value = new JsonObject();
+        value.addProperty("id", type.getPathName());
+        value.addProperty("name", type.getName());
+        value.addProperty("kind", dataTypeKind(type));
+        value.addProperty("outcome", outcome);
+        value.add("size_bytes", type.getLength() < 0 ? JsonNull.INSTANCE : GSON.toJsonTree(type.getLength()));
+        value.add("alignment_bytes", type.getAlignment() > 0 ? GSON.toJsonTree(type.getAlignment()) : JsonNull.INSTANCE);
+        DataType referenced =
+            type instanceof ghidra.program.model.data.Pointer pointer ? pointer.getDataType() :
+            type instanceof ghidra.program.model.data.Array array ? array.getDataType() :
+            type instanceof ghidra.program.model.data.TypeDef alias ? alias.getDataType() : null;
+        value.add("referenced_type", referenced == null ? JsonNull.INSTANCE : GSON.toJsonTree(referenced.getPathName()));
+        JsonArray fields = new JsonArray();
+        if (type instanceof ghidra.program.model.data.Composite composite) {
+            for (ghidra.program.model.data.DataTypeComponent component : composite.getComponents())
+                fields.add(componentFact(component));
+        }
+        value.add("fields", fields);
+        JsonArray members = new JsonArray();
+        if (type instanceof ghidra.program.model.data.Enum enumeration) {
+            String[] names = enumeration.getNames();
+            java.util.Arrays.sort(names);
+            for (String name : names) members.add(enumMemberFact(enumeration, name));
+        }
+        value.add("members", members);
+        List<DataType> sameName = new ArrayList<>();
+        types.findDataTypes(type.getName(), sameName);
+        JsonArray others = new JsonArray();
+        sameName.stream().map(DataType::getPathName).filter(path -> !path.equals(type.getPathName()))
+            .sorted().forEach(others::add);
+        value.add("other_ids", others);
         return value;
     }
 
@@ -3669,7 +3837,7 @@ public final class ReaGhidraBridge extends HeadlessScript {
         writer.flush();
     }
 
-    private static String safeMessage(Exception exception) {
+    private static String safeMessage(Throwable exception) {
         String message = exception.getMessage();
         return message == null || message.isBlank() ? "operation failed" : message;
     }

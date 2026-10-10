@@ -110,7 +110,12 @@ export const directAnalysisOptions = (
     logger,
     snapshotPath,
     ...(!formatHint.ok
-      ? { formatHintError: formatHint.error }
+      ? {
+          optionError: {
+            option: "raw-image-profile",
+            message: formatHint.error,
+          },
+        }
       : formatHint.value === undefined
         ? {}
         : { formatHint: formatHint.value }),

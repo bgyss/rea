@@ -240,6 +240,7 @@ describe("canonical CLI catalog", () => {
       "function",
       "annotate-native-function",
       "annotate-native-data",
+      "define-native-types",
       "inspect-native-api",
       "search",
     ]) {

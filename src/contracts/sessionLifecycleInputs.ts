@@ -52,7 +52,7 @@ export const openBinaryInputSchema = z.strictObject({
     })
     .optional()
     .describe(
-      "JSON Lines annotation ledger: entries recorded for this exact target and analysis profile are replayed after opening, and later annotate_native_function and annotate_native_data edits are appended. A missing file starts an empty ledger.",
+      "JSON Lines annotation ledger: entries recorded for this exact target and analysis profile are replayed after opening, and later annotate_native_function, annotate_native_data and define_native_types edits are appended. A missing file starts an empty ledger.",
     ),
 });
 
