@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { nativeDataAnnotationsInputSchema } from "../domain/native/nativeDataAnnotations.js";
 import { nativeFunctionAnnotationsInputSchema } from "../domain/native/nativeFunctionAnnotations.js";
+import { nativeTypeDefinitionsInputSchema } from "../domain/native/nativeTypeDefinitions.js";
 
 import {
   officialOutputSchemas,
@@ -49,6 +50,11 @@ export const OFFICIAL_TOOL_CONTRACTS = [
     "annotate_native_data",
     "Atomically set one address's primary label, define fixed-length typed data there, and/or set its regular and inline comments, then read them back. Typed data may replace only undefined bytes; overlapping instructions or defined data reject the whole edit. Ghidra changes its session analysis database (or the persistent project cache when enabled); original executable bytes remain unchanged. Empty comment text clears that comment. When open_binary (or the CLI) names an annotation_ledger_path, the applied edit is appended to that ledger and replayed in later sessions of the same target and profile. Windows P0 and providers without this capability are unsupported.",
     nativeDataAnnotationsInputSchema,
+  ),
+  official(
+    "define_native_types",
+    "Atomically define C struct, union, enum and typedef declarations in the analysis database through Ghidra's C parser, then read back each type's id, layout, fields and enum members. Types are placed in the /rea category (or the category a #line marker names) and sized for the target's data organization; redefining a type at the same path replaces it everywhere it is used, and an identical definition is unchanged. Declarations are not preprocessed. Defined types can then be named as data_type in annotate_native_data and in annotate_native_function signatures and variables, and inspected with inspect_native_data_type. Ghidra changes its session analysis database (or the persistent project cache when enabled); original executable bytes remain unchanged. When open_binary (or the CLI) names an annotation_ledger_path, the declarations are appended to that ledger and replayed, in order, in later sessions of the same target and profile. Windows P0 and providers without this capability are unsupported.",
+    nativeTypeDefinitionsInputSchema,
   ),
   official(
     "inspect_native_load_image",

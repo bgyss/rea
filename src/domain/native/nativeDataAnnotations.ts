@@ -5,6 +5,7 @@ import { nativeAnnotationEffectsSchema } from "./nativeFunctionAnnotations.js";
 export const ANNOTATION_OPERATIONS = [
   "annotate_native_function",
   "annotate_native_data",
+  "define_native_types",
 ] as const;
 
 /** One annotation operation. */

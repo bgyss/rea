@@ -58,6 +58,13 @@ export const limitationsFor = (operation: string): readonly string[] => {
         "Labels become the address's primary USER_DEFINED symbol in the global namespace. Data types are fixed-length C types resolved against the program's data types; defining one clears only undefined bytes and is rejected when it overlaps instructions or other defined data. Regular comments map to PRE and inline comments to EOL at the exact address. Changes commit together after readback; failure rolls them all back.",
         "Annotation text rejects NUL and unpaired Unicode surrogates before mutation. Metadata edits invalidate immutable analysis snapshots and are discarded on close unless the persistent project cache is enabled.",
       ];
+    case "define_native_types":
+      return [
+        ...common,
+        "Declarations are parsed by Ghidra's CParser against the program's data types and data organization, without a preprocessor: macros, #include and conditionals fail to parse. #pragma pack and #line markers are honoured; types go to the /rea category unless a #line marker names another. Function prototypes are skipped and reported; variable declarations are ignored. A function typedef's signature is stored as <name>_fn so the typedef's name stays unambiguous.",
+        "Each parsed type is resolved with Ghidra's replace conflict handler: a different definition at the same path replaces the earlier one, including in data and signatures that use it; an equivalent one is unchanged. Bare-name lookups in other annotation edits reject names shared by non-equivalent types in different categories. All types commit together after readback; any failure rolls them all back.",
+        "Metadata edits invalidate immutable analysis snapshots and are discarded on close unless the persistent project cache is enabled.",
+      ];
     case "inspect_native_load_image":
       return [
         ...common,

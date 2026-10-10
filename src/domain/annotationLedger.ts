@@ -47,10 +47,22 @@ export const dataAnnotationLedgerEntrySchema = z.strictObject({
   ...ledgerProvenance,
 });
 
-/** JSON Lines record of one applied annotation: a function or an address. */
+/** JSON Lines record of one applied define_native_types edit. */
+export const typeDefinitionLedgerEntrySchema = z.strictObject({
+  ...ledgerIdentity,
+  declarations: z.string().min(1),
+  types: z
+    .array(z.string().min(1))
+    .min(1)
+    .describe("Ids of the types the declarations defined when recorded"),
+  ...ledgerProvenance,
+});
+
+/** JSON Lines record of one applied annotation: a function, an address, or type definitions. */
 export const annotationLedgerEntrySchema = z.union([
   functionAnnotationLedgerEntrySchema,
   dataAnnotationLedgerEntrySchema,
+  typeDefinitionLedgerEntrySchema,
 ]);
 export type AnnotationLedgerEntry = z.infer<typeof annotationLedgerEntrySchema>;
 
@@ -71,6 +83,11 @@ export const annotationLedgerReplaySchema = z.strictObject({
       z.strictObject({
         line: z.number().int().positive(),
         address: z.string(),
+        reason: z.string(),
+      }),
+      z.strictObject({
+        line: z.number().int().positive(),
+        types: z.array(z.string()),
         reason: z.string(),
       }),
     ]),

@@ -82,6 +82,14 @@ const REJECTED_ANNOTATION_FIELDS = [
     message:
       "No uniquely named decompiler variable uVar9 in 0x10100; variables: uVar1",
   },
+  {
+    operation: "define_native_types" as const,
+    remoteCode: "invalid_declarations",
+    field: "declarations",
+    input: { declarations: "#define PPU_CTRL 0x2000\n" },
+    message:
+      "Ghidra's C parser rejected the declarations: C Parser:  Encountered errors during parse.",
+  },
 ];
 
 describe("Ghidra jump-table profile", () => {
@@ -681,7 +689,7 @@ describe("Ghidra result projection", () => {
 
   it.each(REJECTED_ANNOTATION_FIELDS)(
     "reports a rejected $field against that input with the bridge's reason",
-    async ({ remoteCode, field, input, message }) => {
+    async ({ operation, remoteCode, field, input, message }) => {
       const ghidra = provider(installationHost(), () => ({
         start: () => Promise.resolve(ok(sessionInfo())),
         callTool: () =>
@@ -702,10 +710,12 @@ describe("Ghidra result projection", () => {
             executableTarget("elf", "x86_64"),
             resolved.value.profile,
           )
-          .execute("annotate_native_function", {
-            procedure: "0x10100",
-            ...input,
-          }),
+          .execute(
+            operation ?? "annotate_native_function",
+            operation === undefined
+              ? { procedure: "0x10100", ...input }
+              : input,
+          ),
       ).resolves.toMatchObject({
         ok: false,
         error: {

@@ -223,6 +223,7 @@ const sessionInfo = ({
     "search_strings",
     "annotate_native_function",
     "annotate_native_data",
+    "define_native_types",
     "inspect_native_data_type",
     "inspect_native_instruction",
     "resolve_native_call_targets",
@@ -239,7 +240,8 @@ const sessionInfo = ({
     (value) =>
       transport === "unix-socket" ||
       (value !== "annotate_native_function" &&
-        value !== "annotate_native_data"),
+        value !== "annotate_native_data" &&
+        value !== "define_native_types"),
   ),
   target: {
     name: "fixture",

@@ -15,6 +15,7 @@ import {
   annotationLedgerEntrySchema,
   dataAnnotationLedgerEntrySchema,
   functionAnnotationLedgerEntrySchema,
+  typeDefinitionLedgerEntrySchema,
   type AnnotationLedgerEntry,
   type AnnotationLedgerReplay,
 } from "../domain/annotationLedger.js";
@@ -44,9 +45,15 @@ const dataChangesSchema = z.object(
     inline_comment: true,
   }).shape,
 );
+const typeChangesSchema = z.object(
+  typeDefinitionLedgerEntrySchema.pick({ declarations: true }).shape,
+);
 
 const changes = (
-  schema: typeof functionChangesSchema | typeof dataChangesSchema,
+  schema:
+    | typeof functionChangesSchema
+    | typeof dataChangesSchema
+    | typeof typeChangesSchema,
   value: unknown,
 ): Result<Record<string, JsonValue>, string> => {
   const parsed = schema.safeParse(value);
@@ -55,15 +62,25 @@ const changes = (
     : err(parsed.error.message);
 };
 
-// The request that re-applies one entry, keyed by where it applies. A parsed
-// entry always carries its kind's change fields, so the projection is total.
+// The request that re-applies one entry and what identifies it in a replay
+// report. A parsed entry always carries its kind's change fields, so the
+// projection is total.
 const replayRequest = (
   entry: AnnotationLedgerEntry,
 ): {
   readonly operation: AnnotationOperation;
-  readonly location: { procedure: string } | { address: string };
+  readonly location:
+    | { procedure: string }
+    | { address: string }
+    | { types: string[] };
   readonly arguments: Readonly<Record<string, JsonValue>>;
 } => {
+  if ("declarations" in entry)
+    return {
+      operation: "define_native_types",
+      location: { types: entry.types },
+      arguments: jsonObjectSchema.parse(typeChangesSchema.parse(entry)),
+    };
   const [operation, location, schema] =
     "procedure" in entry
       ? ([
@@ -85,6 +102,42 @@ const replayRequest = (
     },
   };
 };
+
+// Where an applied edit's ledger entry says it applied, from its readback:
+// the canonical address, or the ids of the types it defined.
+const recordedLocation = (
+  operation: AnnotationOperation,
+  readback: unknown,
+): Result<
+  { procedure: string } | { address: string } | { types: string[] },
+  string
+> => {
+  if (operation === "define_native_types") {
+    const parsed = z
+      .object({ types: z.array(z.object({ id: z.string().min(1) })).min(1) })
+      .safeParse(readback);
+    return parsed.success
+      ? ok({ types: parsed.data.types.map((type) => type.id) })
+      : err("its readback lacks the defined type ids the ledger needs");
+  }
+  const parsed = z
+    .object({ annotations: z.object({ address: z.string().min(1) }) })
+    .safeParse(readback);
+  if (!parsed.success)
+    return err("its readback lacks the canonical address the ledger needs");
+  const address = parsed.data.annotations.address;
+  return ok(
+    operation === "annotate_native_function"
+      ? { procedure: address }
+      : { address },
+  );
+};
+
+const CHANGE_SCHEMAS = {
+  annotate_native_function: functionChangesSchema,
+  annotate_native_data: dataChangesSchema,
+  define_native_types: typeChangesSchema,
+} as const satisfies Record<AnnotationOperation, unknown>;
 
 /** The ledger an open target records into, with the identity it was opened under. */
 export interface AnnotationLedgerTarget {
@@ -245,8 +298,9 @@ export const replayAnnotationLedger = async (
 };
 
 /**
- * Append an applied annotation, taking its canonical address from the
- * readback. The edit already happened, so a failed append says exactly that.
+ * Append an applied annotation, taking its canonical address (or defined type
+ * ids) from the readback. The edit already happened, so a failed append says
+ * exactly that.
  */
 export const appendAnnotationFromEvidence = async (
   bound: AnnotationLedgerTarget,
@@ -261,28 +315,18 @@ export const appendAnnotationFromEvidence = async (
         `The annotation was applied in this session but ${reason}`,
       ),
     );
-  const readback = z
-    .object({ annotations: z.object({ address: z.string().min(1) }) })
-    .safeParse(evidence.normalized_result);
-  if (!readback.success)
-    return notRecorded(
-      "its readback lacks the canonical address the ledger needs",
-    );
-  const function_ = operation === "annotate_native_function";
-  const recorded = changes(
-    function_ ? functionChangesSchema : dataChangesSchema,
-    arguments_,
-  );
+  const location = recordedLocation(operation, evidence.normalized_result);
+  if (!location.ok) return notRecorded(location.error);
+  const recorded = changes(CHANGE_SCHEMAS[operation], arguments_);
   if (!recorded.ok)
     return notRecorded(
       `its request could not be recorded in the ledger: ${recorded.error}`,
     );
-  const address = readback.data.annotations.address;
   const entry = annotationLedgerEntrySchema.safeParse({
     schema_version: "rea.annotation-ledger.v1",
     target_sha256: bound.targetSha256,
     analysis_profile_digest: bound.profileDigest,
-    ...(function_ ? { procedure: address } : { address }),
+    ...location.value,
     ...recorded.value,
     evidence_id: evidence.evidence_id,
     recorded_at: new Date().toISOString(),

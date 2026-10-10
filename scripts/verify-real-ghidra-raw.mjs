@@ -64,9 +64,11 @@ const profile = (id, platform, language, base, entry = base) => ({
 const fixtures = [
   {
     name: "6502",
-    // LDA #$01; STA $0200; LDA #$00; BEQ +2; LDA #$FF; RTS
+    // LDA #$01; STA $0200; LDA #$00; BEQ +2; LDA #$FF; RTS; then two
+    // undefined bytes at 0x800c for typed-data ledger entries.
     bytes: Buffer.from([
       0xa9, 0x01, 0x8d, 0x00, 0x02, 0xa9, 0x00, 0xf0, 0x02, 0xa9, 0xff, 0x60,
+      0x00, 0x00,
     ]),
     profile: profile("authored-6502-v1", "nes", "6502:LE:16:default", 0x8000),
     firstInstruction: /^0x8000: LDA #0x1$/iu,
@@ -301,8 +303,27 @@ try {
     name: "reset_handler",
     comment: "Writes 1 to $0200",
   });
+  // Types replay before the data edit that names them.
+  const defined = await call("define_native_types", {
+    declarations:
+      "typedef struct ppu_latch { unsigned char ctrl; unsigned char mask; } ppu_latch;",
+  });
+  assert.deepEqual(
+    defined.types.map((type) => [type.id, type.size_bytes]),
+    [["/rea/ppu_latch", 2]],
+  );
+  await call("annotate_native_data", {
+    address: "0x800c",
+    label: "ppu_shadow",
+    data_type: "ppu_latch",
+  });
   await call("close_binary");
   opened = false;
+  const ledgerLines = (await readFile(ledger, "utf8")).trim().split("\n");
+  assert.deepEqual(
+    ledgerLines.map((line) => Object.keys(JSON.parse(line))[3]),
+    ["procedure", "declarations", "address"],
+  );
   const replayed = await ledgerOpen();
   opened = true;
   assert.deepEqual(
@@ -311,18 +332,30 @@ try {
       applied: replayed.annotation_ledger.applied,
       failed: replayed.annotation_ledger.failed,
     },
-    { entries: 1, applied: 1, failed: [] },
+    { entries: 3, applied: 3, failed: [] },
   );
   const renamed = await call("list_procedures");
   assert.ok(
     renamed.some((row) => row.value === "reset_handler"),
     "replayed annotation is missing",
   );
+  const replayedData = await call("inspect_native_data_type", {
+    address: "0x800c",
+  });
+  assert.equal(replayedData.id, "/rea/ppu_latch");
+  assert.deepEqual(
+    replayedData.fields.map((field) => [field.name, field.offset_bytes]),
+    [
+      ["ctrl", 0],
+      ["mask", 1],
+    ],
+  );
+  assert.equal(await call("address_name", { address: "0x800c" }), "ppu_shadow");
   await call("close_binary");
   opened = false;
   const otherProfile = await ledgerOpen({ profile_id: "other-profile" });
   opened = true;
-  assert.equal(otherProfile.annotation_ledger.skipped_other_profile, 1);
+  assert.equal(otherProfile.annotation_ledger.skipped_other_profile, 3);
   assert.equal(otherProfile.annotation_ledger.applied, 0);
   await call("close_binary");
   opened = false;
@@ -332,7 +365,8 @@ try {
   ]);
   assert.equal(cliReplay.normalized_result.procedure.name, "reset_handler");
   report.annotation_ledger = {
-    recorded: 1,
+    recorded: ledgerLines.length,
+    kinds: ["function", "types", "data"],
     mcp_replayed: true,
     other_profile_skipped: true,
     cli_replayed: true,

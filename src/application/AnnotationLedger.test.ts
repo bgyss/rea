@@ -216,3 +216,34 @@ describe("annotation ledger replay", () => {
     ]);
   });
 });
+
+describe("annotation ledger type definitions", () => {
+  it("replays type definitions through define_native_types and reports their type ids", async () => {
+    const path = await ledgerPath();
+    const { procedure: _procedure, name: _name, ...identity } = entry();
+    const declarations = "struct ppu_latch { unsigned char ctrl, mask; };";
+    expect(
+      await appendAnnotationLedger(path, {
+        ...identity,
+        declarations,
+        types: ["/rea/ppu_latch"],
+      }),
+    ).toEqual(ok(null));
+    const calls: unknown[] = [];
+    const replay = await replayAnnotationLedger(
+      {
+        execute: (operation, parameters) => {
+          calls.push([operation, parameters]);
+          return Promise.resolve(err(new AnalysisInputError(operation)));
+        },
+      },
+      { path, targetSha256: sha, profileDigest: profile },
+    );
+    if (!replay.ok) throw replay.error;
+    expect(calls).toEqual([["define_native_types", { declarations }]]);
+    expect(replay.value).toMatchObject({
+      applied: 0,
+      failed: [{ line: 1, types: ["/rea/ppu_latch"] }],
+    });
+  });
+});

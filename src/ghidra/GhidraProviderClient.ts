@@ -353,6 +353,7 @@ const ANNOTATION_FAILURE_FIELDS: Readonly<Record<string, string>> = {
   invalid_variable_edit: "variables",
   invalid_label: "label",
   invalid_data_edit: "data_type",
+  invalid_declarations: "declarations",
 };
 
 const projectSessionError = (

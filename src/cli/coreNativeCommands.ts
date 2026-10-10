@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { z } from "incur";
 
 import { runDirectAnalysis } from "../composition/directAnalysis.js";
@@ -19,6 +21,7 @@ export const registerCoreNativeCommands = (
 ): void => {
   registerAnnotationCommand(cli, logger);
   registerDataAnnotationCommand(cli, logger);
+  registerTypeDefinitionCommand(cli, logger);
   cli.command(CLI_COMMANDS.inspectNativeLoadImage, {
     description:
       "Verify loaded native bytes, source mappings, relocations and entry",
@@ -523,5 +526,62 @@ const registerDataAnnotationCommand = (
           directAnalysisOptions(logger, undefined, options.provider, options),
         ),
       ),
+  });
+};
+
+// The header's text, or why it cannot be read.
+const readHeader = (
+  path: string,
+): { readonly text: string } | { readonly error: string } => {
+  try {
+    return { text: readFileSync(path, "utf8") };
+  } catch (cause: unknown) {
+    return {
+      error: `Cannot read C header ${path}: ${cause instanceof Error ? cause.message : String(cause)}`,
+    };
+  }
+};
+
+const registerTypeDefinitionCommand = (
+  cli: CliInstance,
+  logger: Logger,
+): void => {
+  cli.command(CLI_COMMANDS.defineNativeTypes, {
+    description:
+      "Define the struct, union, enum and typedef declarations in a preprocessed C header and return their layouts",
+    args: z.object({
+      path: z.string().describe("Local executable path"),
+      header: z
+        .string()
+        .describe(
+          "Preprocessed C header; expand macros and includes first (cc -E -P)",
+        ),
+    }),
+    options: z.object({
+      ...formatSelectionOptions,
+      ...annotationLedgerOptions,
+      provider: providerSelectionOption,
+    }),
+    run: ({ args, options }) =>
+      logCliCommand(logger, CLI_COMMANDS.defineNativeTypes, () => {
+        const header = readHeader(args.header);
+        const analysis = directAnalysisOptions(
+          logger,
+          undefined,
+          options.provider,
+          options,
+        );
+        return runDirectAnalysis(
+          args.path,
+          "define_native_types",
+          "text" in header ? { declarations: header.text } : {},
+          "text" in header
+            ? analysis
+            : {
+                ...analysis,
+                optionError: { option: "header", message: header.error },
+              },
+        );
+      }),
   });
 };
