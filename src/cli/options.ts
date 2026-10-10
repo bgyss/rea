@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { z } from "zod";
 import {
   executableFormatHintSchema,
@@ -51,7 +52,7 @@ const rawImageProfileOption = z
   })
   .optional()
   .describe(
-    "Path to a dcomp.ghidra-profile.v1 JSON file declaring processor_language_id, compiler_spec_id, load_address and entry_address; required with --target-format raw-image",
+    "Path to a dcomp.ghidra-profile.v1 (flat: load_address, entry_address) or v2 (blocks) JSON file with processor_language_id and compiler_spec_id; required with --target-format raw-image",
   );
 
 /** Explicit interpretation for headerless executable bytes, shared by analysis commands. */
@@ -64,10 +65,22 @@ export const formatSelectionOptions = {
   "raw-image-profile": rawImageProfileOption,
 };
 
-/** Parsed values of {@link formatSelectionOptions}. */
+/** Annotation ledger replayed after opening; annotate-native-function also appends. */
+export const annotationLedgerOptions = {
+  "annotation-ledger": z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "JSON Lines annotation ledger: replay entries recorded for this exact target and profile after opening; annotate-native-function also appends its edit",
+    ),
+};
+
+/** Parsed values of {@link formatSelectionOptions} and {@link annotationLedgerOptions}. */
 export interface FormatSelection {
   readonly "target-format"?: ExecutableFormatSelector | undefined;
   readonly "raw-image-profile"?: RawImageProfile | undefined;
+  readonly "annotation-ledger"?: string | undefined;
 }
 
 /**
@@ -93,5 +106,8 @@ export const directAnalysisOptions = (
         ? {}
         : { formatHint: formatHint.value }),
     ...(providerId === undefined ? {} : { providerId }),
+    ...(selection["annotation-ledger"] === undefined
+      ? {}
+      : { annotationLedgerPath: resolve(selection["annotation-ledger"]) }),
   };
 };

@@ -89,10 +89,13 @@ export const parseGhidraSessionInfo = (
   return ok(parsed.data);
 };
 
-/** Require acknowledgement that the private bridge loop has ended. */
-export const isGhidraShutdownAcknowledgement = (value: JsonValue): boolean =>
+/** Require acknowledgement that the bridge loop ended with the expected project lifetime. */
+export const isGhidraShutdownAcknowledgement = (
+  value: JsonValue,
+  persistentProject = false,
+): boolean =>
   typeof value === "object" &&
   value !== null &&
   !Array.isArray(value) &&
   value.shutdown === true &&
-  value.project_ephemeral === true;
+  value.project_ephemeral === !persistentProject;

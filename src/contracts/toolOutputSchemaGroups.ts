@@ -1,3 +1,4 @@
+import { annotationLedgerReplaySchema } from "../domain/annotationLedger.js";
 import { z } from "zod";
 import { nativeFunctionAnnotationsSchema } from "../domain/native/nativeFunctionAnnotations.js";
 import { nativeLoadImageSchema } from "../domain/native/nativeLoadImage.js";
@@ -382,6 +383,7 @@ export const sessionOutputSchemas: Readonly<Record<string, z.ZodObject>> = {
       loaderArgs: z.array(z.string()),
       sha256: z.string().regex(/^[a-f0-9]{64}$/u),
       architecture: z.enum(["x86", "x86_64", "arm", "arm64"]).nullable(),
+      annotation_ledger: annotationLedgerReplaySchema.nullable(),
     }),
   ),
   close_binary: lifecycleResultOf(

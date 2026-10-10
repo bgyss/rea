@@ -1,4 +1,8 @@
 import type { ExecutableFormatHint } from "../domain/dosCom.js";
+import {
+  appendAnnotationFromEvidence,
+  replayAnnotationLedger,
+} from "./AnnotationLedger.js";
 import { parseConfig } from "../config.js";
 import type { JsonValue } from "../domain/jsonValue.js";
 import { EnhancedTools } from "./EnhancedTools.js";
@@ -89,6 +93,8 @@ export const runDirectAnalysis = async (
     readonly formatHint?: ExecutableFormatHint;
     /** Inconsistent caller format selection, reported before any I/O. */
     readonly formatHintError?: string;
+    /** Ledger replayed after opening; annotate_native_function appends to it. */
+    readonly annotationLedgerPath?: string;
   } = {},
 ): Promise<JsonValue> =>
   options.formatHintError !== undefined
@@ -114,6 +120,9 @@ export const runDirectAnalysis = async (
           ...(options.providerId === undefined
             ? {}
             : { providerId: options.providerId }),
+          ...(options.annotationLedgerPath === undefined
+            ? {}
+            : { annotationLedgerPath: options.annotationLedgerPath }),
         }),
       );
 
@@ -195,6 +204,7 @@ const runAnalysis = async (
     readonly signal: AbortSignal;
     readonly providerId?: AnalysisProviderSelector;
     readonly formatHint?: ExecutableFormatHint;
+    readonly annotationLedgerPath?: string;
     /**
      * Environment the configuration is read from. Defaults to the process
      * environment so existing callers are unchanged, but a caller may supply
@@ -269,6 +279,23 @@ const runAnalysis = async (
         ? await session.open(path, openOptions)
         : await session.openResolvedTarget(resolvedTarget, openOptions);
     if (!opened.ok) return cliError(opened.error);
+    const ledger =
+      options.annotationLedgerPath === undefined
+        ? undefined
+        : {
+            path: options.annotationLedgerPath,
+            targetSha256: opened.value.sha256,
+            profileDigest: session.analysisProfile()?.digest ?? null,
+          };
+    if (ledger !== undefined) {
+      const replay = await replayAnnotationLedger(session, ledger, { signal });
+      if (!replay.ok) return cliError(replay.error);
+      if (replay.value.failed.length > 0)
+        logger.warn(
+          { annotation_ledger: replay.value },
+          "Some annotation ledger entries could not be replayed",
+        );
+    }
     const evidenceProfile = analysisProfileForEvidence(session, tool);
     const { output, evidence } = await executeAnalysisTool({
       session,
@@ -281,6 +308,14 @@ const runAnalysis = async (
     if (evidence !== undefined) {
       const recorded = session.recordEvidence(evidence);
       if (!recorded.ok) return cliError(recorded.error);
+      if (ledger !== undefined && tool === "annotate_native_function") {
+        const appended = await appendAnnotationFromEvidence(
+          ledger,
+          arguments_,
+          evidence,
+        );
+        if (!appended.ok) return cliError(appended.error);
+      }
       if (isWorkflowEvidenceTool(tool)) {
         const unknowns = recordWorkflowUnknowns({
           name: tool,

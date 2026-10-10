@@ -103,6 +103,8 @@ public final class ReaGhidraBridge extends HeadlessScript {
     private static final int MAX_HIGH_PCODE_INPUTS_PER_OP = 64;
     private static final int MAX_HIGH_PCODE_DEF_USE_EDGES = 12000;
     private static final Gson GSON = new GsonBuilder().serializeNulls().create();
+    /** Annotations are saved to the reopened project instead of discarded. */
+    private boolean persistentProject;
     private static final Set<String> DESCRIPTOR_KEYS = Set.of(
         "transport",
         "endpoint_path",
@@ -197,6 +199,10 @@ public final class ReaGhidraBridge extends HeadlessScript {
             throw new IllegalStateException(
                 "Ghidra imported-byte digest does not match the admitted target"
             );
+        }
+        persistentProject = descriptor.persistentProject;
+        if (persistentProject && !currentProgram.getDomainFile().canSave()) {
+            throw new IllegalStateException("REA persistent project is not writable");
         }
         // GhidraScript wraps run() in a transaction. End it before serving so
         // each edit owns a real outer transaction and can roll back immediately.
@@ -319,7 +325,7 @@ public final class ReaGhidraBridge extends HeadlessScript {
                     requireKeys(request.params, Set.of());
                     JsonObject result = new JsonObject();
                     result.addProperty("shutdown", true);
-                    result.addProperty("project_ephemeral", true);
+                    result.addProperty("project_ephemeral", !persistentProject);
                     writeSuccess(writer, request.id, result);
                     return;
                 }
@@ -1018,6 +1024,7 @@ public final class ReaGhidraBridge extends HeadlessScript {
             ? annotationLeafName(function, requireString(params, "name")) : null;
         int transaction = currentProgram.startTransaction("REA function annotations");
         boolean commit = false;
+        JsonObject annotated;
         try {
             // Validate edits through Ghidra's own setters, including name rules.
             // A later invalid name must roll back earlier comment writes.
@@ -1049,13 +1056,16 @@ public final class ReaGhidraBridge extends HeadlessScript {
             result.add("annotations", readback);
             result.add("dossier", analyzeFunction(query));
             JsonObject effects = new JsonObject();
-            effects.addProperty("scope", "session-analysis-database");
+            effects.addProperty(
+                "scope",
+                persistentProject ? "persistent-analysis-database" : "session-analysis-database"
+            );
             effects.addProperty("source_bytes_modified", false);
-            effects.addProperty("persists_after_close", false);
+            effects.addProperty("persists_after_close", persistentProject);
             result.add("effects", effects);
             monitor.checkCancelled();
             commit = true;
-            return result;
+            annotated = result;
         }
         catch (ghidra.util.exception.InvalidInputException | ghidra.util.exception.DuplicateNameException exception) {
             throw new RequestFailure("invalid_function_name", "Invalid function name at " + canonicalAddress(entry) + ": " + safeMessage(exception));
@@ -1065,6 +1075,17 @@ public final class ReaGhidraBridge extends HeadlessScript {
             // Rollback also invalidates inventory and decompiler views.
             invalidateAnalysisCaches();
         }
+        if (persistentProject) {
+            try {
+                currentProgram.getDomainFile().save(monitor);
+            }
+            catch (java.io.IOException exception) {
+                throw new RequestFailure("annotation_not_persisted",
+                    "Annotation at " + canonicalAddress(entry) +
+                    " was applied in this session but the project save failed: " + safeMessage(exception));
+            }
+        }
+        return annotated;
     }
 
     private String annotationLeafName(Function function, String requested) {
@@ -3153,7 +3174,12 @@ public final class ReaGhidraBridge extends HeadlessScript {
         Set<String> keys = new HashSet<>(DESCRIPTOR_KEYS);
         if (parsed.isJsonObject() && parsed.getAsJsonObject().has("analysis_extensions"))
             keys.add("analysis_extensions");
+        if (parsed.isJsonObject() && parsed.getAsJsonObject().has("project_persistence"))
+            keys.add("project_persistence");
         JsonObject object = requireObject(parsed, keys);
+        boolean persistentProject = object.has("project_persistence");
+        if (persistentProject && !requireString(object, "project_persistence").equals("persistent"))
+            throw new IllegalArgumentException("REA session descriptor project persistence is invalid");
         return new SessionDescriptor(
             requireString(object, "transport"),
             requireString(object, "endpoint_path"),
@@ -3162,7 +3188,8 @@ public final class ReaGhidraBridge extends HeadlessScript {
             requireSha256(object, "target_sha256"),
             requireString(object, "provider_version"),
             requireString(object, "profile_digest"),
-            object.has("analysis_extensions") ? object.getAsJsonArray("analysis_extensions") : new JsonArray()
+            object.has("analysis_extensions") ? object.getAsJsonArray("analysis_extensions") : new JsonArray(),
+            persistentProject
         );
     }
 
@@ -3356,7 +3383,8 @@ public final class ReaGhidraBridge extends HeadlessScript {
         String targetSha256,
         String providerVersion,
         String profileDigest,
-        JsonArray analysisExtensions
+        JsonArray analysisExtensions,
+        boolean persistentProject
     ) {}
     private record Request(int id, String method, JsonObject params) {}
 

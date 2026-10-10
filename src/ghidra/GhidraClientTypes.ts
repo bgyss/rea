@@ -44,6 +44,8 @@ export interface GhidraClientOptions {
   readonly expectedLanguageId?: string;
   readonly expectedCompilerSpecId?: string;
   readonly startupTimeoutMs?: number;
+  /** The launcher reopens a persistent project that Ghidra must save and unlock on exit. */
+  readonly persistentProject?: true;
   readonly onDiagnostic?: (event: GhidraDiagnostic) => void;
   readonly logger?: Logger;
 }

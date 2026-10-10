@@ -110,6 +110,8 @@ Admission rejects:
 
 Hopper and IDA decline raw images, because they can't apply the declared profile.
 
+For iterative work on one ROM, set `REA_GHIDRA_PROJECT_CACHE_DIR` so the analysed project is kept and reopened without re-analysis, and annotations persist between runs. Pass `--annotation-ledger` (or `annotation_ledger_path`) to also keep a reviewable record of names. See [Persistent project cache](native-investigation.md#persistent-project-cache) and [Annotation ledger](native-investigation.md#annotation-ledger).
+
 ## Evidence semantics
 
 - `subject.format` is `raw-image`, and `subject.architecture` is `null`. REA doesn't map a Ghidra language to a CPU family; the exact language ID is in the analysis profile.

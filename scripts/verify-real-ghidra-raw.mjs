@@ -2,7 +2,14 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -276,6 +283,94 @@ try {
     cli_mcp_parity: true,
   };
 
+  // Annotation ledger: record over MCP, replay on reopen and through the CLI.
+  const ledger = join(workspace, "annotations.jsonl");
+  const ledgerOpen = async (profileOverride = {}) =>
+    call("open_binary", {
+      path: first.path,
+      format: "raw-image",
+      raw_image_profile: { ...first.profile, ...profileOverride },
+      provider_id: "ghidra",
+      annotation_ledger_path: ledger,
+    });
+  const initial = await ledgerOpen();
+  opened = true;
+  assert.equal(initial.annotation_ledger.entries, 0);
+  await call("annotate_native_function", {
+    procedure: "entry",
+    name: "reset_handler",
+    comment: "Writes 1 to $0200",
+  });
+  await call("close_binary");
+  opened = false;
+  const replayed = await ledgerOpen();
+  opened = true;
+  assert.deepEqual(
+    {
+      entries: replayed.annotation_ledger.entries,
+      applied: replayed.annotation_ledger.applied,
+      failed: replayed.annotation_ledger.failed,
+    },
+    { entries: 1, applied: 1, failed: [] },
+  );
+  const renamed = await call("list_procedures");
+  assert.ok(
+    renamed.some((row) => row.value === "reset_handler"),
+    "replayed annotation is missing",
+  );
+  await call("close_binary");
+  opened = false;
+  const otherProfile = await ledgerOpen({ profile_id: "other-profile" });
+  opened = true;
+  assert.equal(otherProfile.annotation_ledger.skipped_other_profile, 1);
+  assert.equal(otherProfile.annotation_ledger.applied, 0);
+  await call("close_binary");
+  opened = false;
+  const cliReplay = await cli(first, "function", "0x8000", [
+    "--annotation-ledger",
+    ledger,
+  ]);
+  assert.equal(cliReplay.normalized_result.procedure.name, "reset_handler");
+  report.annotation_ledger = {
+    recorded: 1,
+    mcp_replayed: true,
+    other_profile_skipped: true,
+    cli_replayed: true,
+  };
+
+  // Persistent project cache: analyse once, keep CLI annotations across runs.
+  const projects = join(workspace, "projects");
+  const cacheEnv = { ...env, REA_GHIDRA_PROJECT_CACHE_DIR: projects };
+  const cachedAnnotate = await cli(
+    first,
+    "annotate-native-function",
+    "0x8000",
+    ["--name", "cached_reset"],
+    cacheEnv,
+  );
+  assert.deepEqual(cachedAnnotate.normalized_result.effects, {
+    scope: "persistent-analysis-database",
+    source_bytes_modified: false,
+    persists_after_close: true,
+  });
+  const entries = await readdir(join(projects, first.sha256));
+  assert.equal(entries.length, 1, "expected one promoted cache entry");
+  const cachedStart = Date.now();
+  const cachedFunction = await cli(first, "function", "0x8000", [], cacheEnv);
+  const warmMs = Date.now() - cachedStart;
+  assert.equal(cachedFunction.normalized_result.procedure.name, "cached_reset");
+  const ephemeralFunction = await cli(first, "function", "0x8000");
+  assert.notEqual(
+    ephemeralFunction.normalized_result.procedure.name,
+    "cached_reset",
+  );
+  report.project_cache = {
+    entries: entries.length,
+    annotation_persisted: true,
+    warm_function_ms: warmMs,
+    ephemeral_unaffected: true,
+  };
+
   report.rejections = {
     missing_profile: true,
     stray_profile: true,
@@ -321,7 +416,7 @@ async function call(name, args = {}) {
   assert.deepEqual(evidence.normalized_result, value.structuredContent.result);
   return value.structuredContent.result;
 }
-async function cli(fixture, command, procedure) {
+async function cli(fixture, command, procedure, extra = [], cliEnv = env) {
   const { stdout } = await promisify(execFile)(
     process.execPath,
     [
@@ -336,8 +431,9 @@ async function cli(fixture, command, procedure) {
       "--provider",
       "ghidra",
       "--json",
+      ...extra,
     ],
-    { env, timeout: 240000, maxBuffer: 16 * 1024 * 1024 },
+    { env: cliEnv, timeout: 240000, maxBuffer: 16 * 1024 * 1024 },
   );
   const evidence = parseEvidence(JSON.parse(stdout));
   assert.equal(evidence.subject.digest.sha256, fixture.sha256);

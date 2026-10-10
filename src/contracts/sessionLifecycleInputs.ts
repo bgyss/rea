@@ -43,6 +43,17 @@ export const openBinaryInputSchema = z.strictObject({
     ),
   provider_id: analysisProviderSelectorSchema.optional(),
   snapshot_path: snapshotPathSchema.optional(),
+  annotation_ledger_path: z
+    .string()
+    .min(1)
+    .refine(isAbsoluteLocalPath, {
+      message:
+        "annotation_ledger_path must be an absolute local filesystem path (for example /tmp/rea/annotations.jsonl)",
+    })
+    .optional()
+    .describe(
+      "JSON Lines annotation ledger: entries recorded for this exact target and analysis profile are replayed after opening, and later annotate_native_function edits are appended. A missing file starts an empty ledger.",
+    ),
 });
 
 /** Input contract for closing a target after an optional atomic snapshot. */

@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { basename, dirname, join, win32 } from "node:path";
 
 import writeFileAtomic from "write-file-atomic";
@@ -15,11 +15,23 @@ import {
 } from "../process/ProcessOwnership.js";
 import {
   type ProviderProcessLaunch,
+  ProviderProcessSupervisor,
   type SpawnedOwnedProviderProcess,
   spawnOwnedProviderProcess,
 } from "../process/ProviderProcess.js";
 import { ghidraJavaEnvironment } from "./GhidraInstallation.js";
 import { ghidraJavaLaunch } from "./GhidraJavaLaunch.js";
+import {
+  createGhidraProjectCacheStaging,
+  discardGhidraProjectCacheStaging,
+  ghidraImportPassSaved,
+  ghidraProjectCacheEntryRoot,
+  promoteGhidraProjectCacheStaging,
+  readGhidraProjectCacheEntry,
+  type GhidraProjectCacheEntry,
+  type GhidraProjectCacheKey,
+  type GhidraProjectCacheOptions,
+} from "./GhidraProjectCache.js";
 import type { GhidraTransportKind } from "./GhidraTransport.js";
 import {
   snapshotGhidraExtensions,
@@ -44,6 +56,8 @@ export type GhidraLaunch = ProviderProcessLaunch & {
   readonly projectRoot: string;
   readonly ghidraLogPath: string;
   readonly scriptLogPath: string;
+  /** Present when the session reopened a persistent analysed project. */
+  readonly projectCache?: GhidraProjectCacheEntry;
 };
 
 /** Provider-owned capability that starts one isolated headless analysis. */
@@ -75,6 +89,8 @@ export interface GhidraHeadlessLauncherOptions {
   /** Import headerless bytes with a caller-declared language, base and entry. */
   readonly rawImage?: GhidraRawImageImport;
   readonly analysisExtensions?: readonly GhidraExtension[];
+  /** Analyse once into a persistent project, then reopen it per session. */
+  readonly projectCache?: GhidraProjectCacheOptions;
 }
 
 /** Explicit BinaryLoader import for a raw image; addresses are 0x-prefixed hex. */
@@ -126,6 +142,9 @@ export class GhidraHeadlessLauncher implements GhidraLauncher {
           ...(extensions.length === 0
             ? {}
             : { analysis_extensions: extensions }),
+          ...(this.options.projectCache === undefined
+            ? {}
+            : { project_persistence: "persistent" }),
         })}\n`,
         platform,
       );
@@ -137,58 +156,20 @@ export class GhidraHeadlessLauncher implements GhidraLauncher {
         );
       if (isAborted(options.signal))
         return err(new AnalysisCancelledError("open_binary"));
-      const headlessArguments = ghidraHeadlessArguments({
-        projectRoot: paths.projectRoot,
-        targetPath: session.targetPath,
-        bridgeScriptPath: this.options.bridgeScriptPath,
-        descriptorPath: paths.descriptorPath,
-        ghidraLogPath: paths.ghidraLogPath,
-        scriptLogPath: paths.scriptLogPath,
-        ...(this.options.dosCom === undefined
-          ? {}
-          : { dosCom: this.options.dosCom }),
-        ...(this.options.dosMz === undefined
-          ? {}
-          : { dosMz: this.options.dosMz }),
-        ...(this.options.rawImage === undefined
-          ? {}
-          : {
-              rawImage: this.options.rawImage,
-              rawImageMapPath: paths.rawImageMapPath,
-            }),
-      });
-      const scriptCommand = ghidraHeadlessCommand({
-        platform,
-        analyzeHeadlessPath: this.options.analyzeHeadlessPath,
-        arguments: headlessArguments,
-        ...(this.options.comSpec === undefined
-          ? {}
-          : { comSpec: this.options.comSpec }),
-      });
-      const environment = ghidraLaunchEnvironment(
+      const prepared = await this.#sessionArguments({
+        session,
         paths,
-        this.options.javaHome,
         platform,
-        scriptCommand.command,
+        signal: options.signal,
+      });
+      if (!prepared.ok) return prepared;
+      const { arguments: headlessArguments, projectCache } = prepared.value;
+      const command = await this.#command(
+        paths,
+        headlessArguments,
+        platform,
+        options.signal,
       );
-      if (platform === "darwin" && this.options.javaHome === undefined)
-        throw new GhidraLaunchError(
-          "macOS Ghidra requires its inspected JDK home",
-        );
-      const command =
-        platform === "darwin" && this.options.javaHome !== undefined
-          ? await ghidraJavaLaunch({
-              analyzeHeadlessPath: this.options.analyzeHeadlessPath,
-              javaHome: this.options.javaHome,
-              homeRoot: paths.homeRoot,
-              tempRoot: paths.tempRoot,
-              arguments: headlessArguments,
-              environment,
-              ...(options.signal === undefined
-                ? {}
-                : { signal: options.signal }),
-            })
-          : { ...scriptCommand, environment };
       started = await spawnOwnedProviderProcess({
         command: command.command,
         arguments: command.arguments,
@@ -225,9 +206,10 @@ export class GhidraHeadlessLauncher implements GhidraLauncher {
       const spawned = started;
       return ok({
         ...ownedGhidraProcess(spawned, platform),
-        projectRoot: paths.projectRoot,
+        projectRoot: projectCache?.projectRoot ?? paths.projectRoot,
         ghidraLogPath: paths.ghidraLogPath,
         scriptLogPath: paths.scriptLogPath,
+        ...(projectCache === undefined ? {} : { projectCache }),
       });
     } catch (cause: unknown) {
       if (started !== undefined)
@@ -244,6 +226,211 @@ export class GhidraHeadlessLauncher implements GhidraLauncher {
           );
     }
   }
+
+  /** Ephemeral import arguments, or a reopen of the cached analysed project. */
+  async #sessionArguments(context: LaunchContext): Promise<
+    Result<
+      {
+        readonly arguments: readonly string[];
+        readonly projectCache?: GhidraProjectCacheEntry;
+      },
+      GhidraLaunchError | AnalysisCancelledError
+    >
+  > {
+    const { paths } = context;
+    const importOptions = this.#importOptions(context.session, paths);
+    if (this.options.projectCache === undefined)
+      return ok({ arguments: ghidraHeadlessArguments(importOptions) });
+    const cached = await this.#projectCacheEntry(
+      this.options.projectCache,
+      context,
+      importOptions,
+    );
+    if (!cached.ok) return cached;
+    return ok({
+      projectCache: cached.value,
+      arguments: ghidraHeadlessProcessArguments({
+        projectRoot: cached.value.projectRoot,
+        programName: cached.value.programName,
+        bridgeScriptPath: this.options.bridgeScriptPath,
+        descriptorPath: paths.descriptorPath,
+        ghidraLogPath: paths.ghidraLogPath,
+        scriptLogPath: paths.scriptLogPath,
+      }),
+    });
+  }
+
+  #importOptions(
+    session: GhidraLaunchSession,
+    paths: ReturnType<typeof ghidraRuntimePaths>,
+  ): GhidraHeadlessArgumentOptions {
+    return {
+      projectRoot: paths.projectRoot,
+      targetPath: session.targetPath,
+      bridgeScriptPath: this.options.bridgeScriptPath,
+      descriptorPath: paths.descriptorPath,
+      ghidraLogPath: paths.ghidraLogPath,
+      scriptLogPath: paths.scriptLogPath,
+      ...(this.options.dosCom === undefined
+        ? {}
+        : { dosCom: this.options.dosCom }),
+      ...(this.options.dosMz === undefined
+        ? {}
+        : { dosMz: this.options.dosMz }),
+      ...(this.options.rawImage === undefined
+        ? {}
+        : {
+            rawImage: this.options.rawImage,
+            rawImageMapPath: paths.rawImageMapPath,
+          }),
+    };
+  }
+
+  async #command(
+    paths: ReturnType<typeof ghidraRuntimePaths>,
+    headlessArguments: readonly string[],
+    platform: NodeJS.Platform,
+    signal: AbortSignal | undefined,
+  ): Promise<
+    GhidraHeadlessCommand & { readonly environment: NodeJS.ProcessEnv }
+  > {
+    const scriptCommand = ghidraHeadlessCommand({
+      platform,
+      analyzeHeadlessPath: this.options.analyzeHeadlessPath,
+      arguments: headlessArguments,
+      ...(this.options.comSpec === undefined
+        ? {}
+        : { comSpec: this.options.comSpec }),
+    });
+    const environment = ghidraLaunchEnvironment(
+      paths,
+      this.options.javaHome,
+      platform,
+      scriptCommand.command,
+    );
+    if (platform === "darwin" && this.options.javaHome === undefined)
+      throw new GhidraLaunchError(
+        "macOS Ghidra requires its inspected JDK home",
+      );
+    return platform === "darwin" && this.options.javaHome !== undefined
+      ? ghidraJavaLaunch({
+          analyzeHeadlessPath: this.options.analyzeHeadlessPath,
+          javaHome: this.options.javaHome,
+          homeRoot: paths.homeRoot,
+          tempRoot: paths.tempRoot,
+          arguments: headlessArguments,
+          environment,
+          ...(signal === undefined ? {} : { signal }),
+        })
+      : { ...scriptCommand, environment };
+  }
+
+  /** Reuse the promoted project, or import and analyse once into staging. */
+  async #projectCacheEntry(
+    cache: GhidraProjectCacheOptions,
+    context: LaunchContext,
+    importOptions: GhidraHeadlessArgumentOptions,
+  ): Promise<
+    Result<GhidraProjectCacheEntry, GhidraLaunchError | AnalysisCancelledError>
+  > {
+    const { session } = context;
+    const key: GhidraProjectCacheKey = {
+      targetSha256: session.targetSha256,
+      profileDigest: session.profileDigest,
+      providerVersion: session.providerVersion,
+    };
+    const existing = await readGhidraProjectCacheEntry(
+      ghidraProjectCacheEntryRoot(cache.root, key),
+      key,
+    );
+    if (existing !== undefined) return ok(existing);
+    const staging = await createGhidraProjectCacheStaging(
+      cache.root,
+      key,
+      session.runId,
+    );
+    let promoted = false;
+    try {
+      const saved = await this.#importPass(
+        { ...importOptions, projectRoot: staging.projectRoot },
+        context,
+      );
+      if (!saved.ok) return saved;
+      const entry = await promoteGhidraProjectCacheStaging(
+        staging.stagingRoot,
+        cache.root,
+        key,
+        basename(session.targetPath),
+      );
+      promoted = true;
+      return ok(entry);
+    } finally {
+      if (!promoted)
+        await discardGhidraProjectCacheStaging(staging.stagingRoot);
+    }
+  }
+
+  /** Run one import and analysis to completion; Ghidra saves it on exit. */
+  async #importPass(
+    importOptions: GhidraHeadlessArgumentOptions,
+    context: LaunchContext,
+  ): Promise<Result<null, GhidraLaunchError | AnalysisCancelledError>> {
+    const { paths, platform, signal } = context;
+    const logs = {
+      ghidraLogPath: paths.importGhidraLogPath,
+      scriptLogPath: paths.importScriptLogPath,
+    };
+    const command = await this.#command(
+      paths,
+      ghidraHeadlessImportArguments({ ...importOptions, ...logs }),
+      platform,
+      signal,
+    );
+    const started = await spawnOwnedProviderProcess({
+      command: command.command,
+      arguments: command.arguments,
+      runId: context.session.runId,
+      expectedCommand: platform === "darwin" ? command.command : null,
+      platform,
+      env: command.environment,
+      ...(signal === undefined ? {} : { signal }),
+    });
+    const supervisor = new ProviderProcessSupervisor(
+      ownedGhidraProcess(started, platform),
+      { maxDiagnosticBytes: 64 * 1024 },
+    );
+    while (!(await supervisor.waitForExit(250)))
+      if (isAborted(signal)) {
+        await supervisor.stop();
+        return err(new AnalysisCancelledError("open_binary"));
+      }
+    const exit = supervisor.snapshot();
+    await supervisor.stop();
+    const log = await readFile(paths.importGhidraLogPath, "utf8").catch(
+      () => "",
+    );
+    if (exit.exitCode !== 0 || !ghidraImportPassSaved(log)) {
+      // The runtime root, and the log with it, is removed when startup fails.
+      const reported = `${log}\n${exit.stdout.text}\n${exit.stderr.text}`
+        .split("\n")
+        .filter((line) => /ERROR|Exception/u.test(line))
+        .slice(-5)
+        .map((line) => line.trim());
+      return err(
+        new GhidraLaunchError(
+          `Ghidra project cache import did not save an analysed program (exit ${String(exit.exitCode)})${reported.length === 0 ? "" : `: ${reported.join(" | ")}`}`,
+        ),
+      );
+    }
+    return ok(null);
+  }
+}
+
+interface LaunchContext {
+  readonly session: GhidraLaunchSession;
+  readonly paths: ReturnType<typeof ghidraRuntimePaths>;
+  readonly platform: NodeJS.Platform;
+  readonly signal: AbortSignal | undefined;
 }
 
 const ownedGhidraProcess = (
@@ -343,6 +530,42 @@ export interface GhidraHeadlessArgumentOptions {
   readonly rawImageMapPath?: string;
 }
 
+/** Import and analyse into a persistent project without serving a session. */
+export const ghidraHeadlessImportArguments = (
+  options: GhidraHeadlessArgumentOptions,
+): readonly string[] => {
+  const ephemeral = ghidraHeadlessArguments(options);
+  const postScript = ephemeral.indexOf("-postScript");
+  return ephemeral
+    .slice(0, postScript)
+    .filter((value) => value !== "-readOnly" && value !== "-deleteProject");
+};
+
+/** Reopen one analysed program from a persistent project without re-analysis. */
+export const ghidraHeadlessProcessArguments = (options: {
+  readonly projectRoot: string;
+  readonly programName: string;
+  readonly bridgeScriptPath: string;
+  readonly descriptorPath: string;
+  readonly ghidraLogPath: string;
+  readonly scriptLogPath: string;
+}): readonly string[] => [
+  options.projectRoot,
+  "rea-project",
+  "-process",
+  options.programName,
+  "-noanalysis",
+  "-log",
+  options.ghidraLogPath,
+  "-scriptlog",
+  options.scriptLogPath,
+  "-scriptPath",
+  dirname(options.bridgeScriptPath),
+  "-postScript",
+  options.bridgeScriptPath,
+  options.descriptorPath,
+];
+
 /** BinaryLoader import options for a raw image; mapped images import one stub byte. */
 const rawImageImportArguments = (
   rawImage: GhidraRawImageImport,
@@ -430,6 +653,8 @@ const ghidraRuntimePaths = (runtimeRoot: string) => ({
   ownershipPath: join(runtimeRoot, "ownership.json"),
   ghidraLogPath: join(runtimeRoot, "ghidra.log"),
   scriptLogPath: join(runtimeRoot, "script.log"),
+  importGhidraLogPath: join(runtimeRoot, "import-ghidra.log"),
+  importScriptLogPath: join(runtimeRoot, "import-script.log"),
 });
 
 const createGhidraRuntimeDirectories = async (

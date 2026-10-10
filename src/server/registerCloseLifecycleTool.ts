@@ -15,12 +15,14 @@ export const registerCloseLifecycleTool = ({
   session,
   logger,
   closeContract,
+  annotationLedger,
 }: LifecycleToolRegistration): void => {
   server.registerTool(
     closeContract.name,
     toolRegistrationOptions(closeContract),
     async (input, context) => {
       const progress = mcpProgressReporter(context);
+      annotationLedger.clear();
       const snapshotPath = input.snapshot_path;
       if (snapshotPath === undefined) {
         await reportLifecycleStart(progress, closeContract.name);

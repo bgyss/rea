@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   GHIDRA_SESSION_CAPABILITIES,
+  isGhidraShutdownAcknowledgement,
   parseGhidraSessionInfo,
 } from "./GhidraSessionValues.js";
 
@@ -91,5 +92,16 @@ describe("Ghidra mutation handshake", () => {
     expect(
       parseGhidraSessionInfo(value, { ...expected, expectedReadOnly: true }).ok,
     ).toBe(false);
+  });
+});
+
+describe("Ghidra shutdown acknowledgement", () => {
+  it("requires the project lifetime the session was launched with", () => {
+    const ephemeral = { shutdown: true, project_ephemeral: true };
+    const persistent = { shutdown: true, project_ephemeral: false };
+    expect(isGhidraShutdownAcknowledgement(ephemeral)).toBe(true);
+    expect(isGhidraShutdownAcknowledgement(persistent)).toBe(false);
+    expect(isGhidraShutdownAcknowledgement(persistent, true)).toBe(true);
+    expect(isGhidraShutdownAcknowledgement(ephemeral, true)).toBe(false);
   });
 });
