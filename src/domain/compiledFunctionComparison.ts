@@ -1,5 +1,6 @@
 import type { z } from "zod";
 import { AnalysisInputError } from "./analysisErrorCore.js";
+import { compareUnicodeCodePoints } from "./unicodeCodePointOrder.js";
 import {
   compiledFunctionComparisonResultSchema,
   compiledFunctionMaskingSchema,
@@ -491,6 +492,6 @@ export const compareCompiledFunctions = (
         ...left.listing.limitations.map((item) => `Left: ${item}`),
         ...right.listing.limitations.map((item) => `Right: ${item}`),
       ]),
-    ].sort((a, b) => a.localeCompare(b)),
+    ].sort(compareUnicodeCodePoints),
   });
 };
