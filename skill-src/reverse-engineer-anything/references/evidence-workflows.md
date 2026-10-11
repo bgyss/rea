@@ -21,6 +21,11 @@ or absence:
   metadata, and graph relations.
 - `compare_functions` compares explicit function Evidence, not fuzzy
   whole-binary matches.
+- `compare_compiled_function` aligns an original function with a rebuilt
+  candidate instruction by instruction, with relocations and outside targets
+  masked. Pass `inspect_native_function_instructions` Evidence for both; open the
+  candidate's object file as its own session. A call to the wrong function is
+  masked, so check `right_relocations` against the original's callees.
 - `compare_bundles` compares canonical bundle membership and unknown history.
 - `find_changed_behavior` combines existing comparisons; static differences
   remain candidates, not causal proof.

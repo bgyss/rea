@@ -122,6 +122,14 @@ Like `REA_GHIDRA_NATIVEAOT_JAR`, but for loaders: a configured path plus SHA-256
 
 Add `compare_compiled_function` (left: original target function evidence; right: caller-built object file and symbol). It returns an aligned instruction diff with relocation and immediate masking policy, plus a match score and the first divergence. This gives the matching-decomp loop (decomp.me, objdiff) evidence semantics.
 
+**Status: implemented on `feat/compare-compiled-function`.** The right side is not a path and symbol. The caller opens the object file as its own session and lists the function with a new `inspect_native_function_instructions` tool (per-instruction bytes, operand tokens and relocations), and `compare_compiled_function` compares the two listings. That keeps each tool a single primitive and lets the original come from any session.
+
+- **Alignment.** Myers shortest edit script over mnemonic and register operands, with constants left out so a relocated operand pairs with its linked form. Beyond 4000 edits it pairs by position and says so.
+- **Masking.** Relocated operands, targets outside the function and (optionally) all immediates are masked; branch targets inside the function compare as entry-relative offsets. Bytes of a masked pair are not compared; an unmasked byte difference is an `encoding` difference.
+- **Result.** Every aligned row, `first_divergence`, counts, a Dice score, the verdict (`identical`, `equivalent_masked`, `different`) and the candidate's relocation symbols.
+- **Verified.** `verify:ghidra:compare` (real Ghidra 12.1.4, Apple clang, arm64): an object matches its linked executable as `equivalent_masked` with `_helper` and `_counter` relocations, a changed constant is reported as `#0x7` versus `#0x8`, immediate masking ignores it by policy, and a dropped term shows as unmatched original instructions.
+- **Not yet.** ELF and COFF objects and non-arm64 targets are not exercised in a lane. A call to the wrong function is masked, so the caller compares relocation symbols with the original's callees. There is no symbol-level pairing of callees yet.
+
 ### B7. Function ID and signature databases
 
 **[D]** · 3–5 days

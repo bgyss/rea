@@ -1,6 +1,7 @@
 import type { JsonValue } from "../domain/jsonValue.js";
 import { UNKNOWN_CONTRACT_EXAMPLES } from "./unknownContractExamples.js";
 import { ARTIFACT_COMPARISON_EXAMPLE } from "./artifactComparisonExample.js";
+import { COMPILED_FUNCTION_COMPARISON_EXAMPLE } from "./compiledFunctionComparisonExample.js";
 import { FUNCTION_COMPARISON_EXAMPLE } from "./functionComparisonExample.js";
 import {
   INVESTIGATION_EXAMPLES,
@@ -23,6 +24,7 @@ export const TOOL_EXAMPLE_OVERRIDES: Readonly<
   trace_native_values: { procedure: "0x1000" },
   inspect_native_data_type: { type: "/MyStruct" },
   inspect_native_instruction: { address: "0x1000" },
+  inspect_native_function_instructions: { procedure: "main" },
   resolve_native_call_targets: { address: "0x1000" },
   read_function_instructions: { procedure: "main" },
   read_bytes: { address: "0x1000", length: 16 },
@@ -80,6 +82,10 @@ export const TOOL_EXAMPLE_OVERRIDES: Readonly<
   compare_functions: {
     left: FUNCTION_COMPARISON_EXAMPLE.left,
     right: FUNCTION_COMPARISON_EXAMPLE.right,
+  },
+  compare_compiled_function: {
+    left: COMPILED_FUNCTION_COMPARISON_EXAMPLE.left,
+    right: COMPILED_FUNCTION_COMPARISON_EXAMPLE.right,
   },
   compare_bundles: {
     left_bundle_path: "/tmp/left-evidence.json",

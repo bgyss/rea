@@ -67,6 +67,7 @@ type DirectAnalysisTool =
   | "procedure_pseudo_code"
   | "read_function_instructions"
   | "inspect_native_instruction"
+  | "inspect_native_function_instructions"
   | "inspect_native_data_type"
   | "resolve_native_call_targets"
   | "analyze_function"

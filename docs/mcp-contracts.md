@@ -176,7 +176,8 @@ text and structured content. `evidence` is the complete canonical Evidence
 record, including `normalized_result`, which equals `result`. The same record
 is retained in the session bundle. Read `result` directly, or pass `evidence`
 to a compatible comparison tool: `analyze_function` Evidence can be passed
-directly to `compare_functions`, and `inspect_artifact` Evidence to
+directly to `compare_functions`, `inspect_native_function_instructions`
+Evidence to `compare_compiled_function`, and `inspect_artifact` Evidence to
 `compare_artifacts`. Use `get_evidence_bundle` when the task needs broader
 retained session history or an explicit bundle for transfer.
 

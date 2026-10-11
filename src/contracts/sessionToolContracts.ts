@@ -13,6 +13,7 @@ import {
   callPathInputSchema,
   changedBehaviorInputSchema,
   closeBinaryInputSchema,
+  compiledFunctionComparisonInputSchema,
   functionComparisonInputSchema,
   importEvidenceBundleInputSchema,
   listUnknownsInputSchema,
@@ -107,6 +108,11 @@ export const SESSION_TOOL_CONTRACTS = [
     "compare_functions",
     "Compare two explicit sets of analyze_function Evidence across identity, exact provider text, calls, references, strings, and address-normalized CFG topology. Missing or provider-incompatible facets remain truncated or unknown; every conclusion cites both Evidence sets.",
     functionComparisonInputSchema,
+  ),
+  session(
+    "compare_compiled_function",
+    "Compare an original function with a rebuilt candidate instruction by instruction. Pass inspect_native_function_instructions Evidence for the original as left and for the candidate (an object file or build opened as its own session) as right. Instructions are aligned by mnemonic and operand shape, then each pair is compared with relocations, targets outside the function and, with masking.immediates mask, constants masked. Returns every aligned row, the first divergence, a match score, the verdict (identical, equivalent_masked, different) and the candidate's relocation symbols inline. Bytes of a masked pair are not compared; a call to the wrong function is masked, so check the candidate's relocation symbols against the original's callees.",
+    compiledFunctionComparisonInputSchema,
   ),
   session(
     "compare_bundles",

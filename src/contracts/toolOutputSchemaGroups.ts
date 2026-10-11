@@ -9,6 +9,7 @@ import { nativeUiResultSchema } from "../domain/native/nativeUiObservation.js";
 import { nativeValueTraceSchema } from "../domain/native/nativeValueTrace.js";
 import { nativeDataTypeSchema } from "../domain/native/nativeDataType.js";
 import { nativeCallObservationResultSchema } from "../domain/native/nativeCallObservation.js";
+import { nativeFunctionInstructionsSchema } from "../domain/native/nativeFunctionInstructions.js";
 import {
   nativeInstructionSchema,
   nativeCallTargetsSchema,
@@ -52,6 +53,7 @@ import { managedNativeVerificationResultSchema } from "../domain/managed/managed
 import { managedReconstructionImportResultSchema } from "../domain/managed/managedReconstruction.js";
 import { managedApplicationGraphResultSchema } from "../domain/managed/managedApplicationGraph.js";
 import { artifactComparisonResultSchema } from "../domain/artifactComparison.js";
+import { compiledFunctionComparisonResultSchema } from "../domain/compiledFunctionComparison.js";
 import { functionComparisonResultSchema } from "../domain/functionComparison.js";
 import { bundleComparisonResultSchema } from "../domain/bundleComparison.js";
 import { changedBehaviorResultSchema } from "../domain/changedBehavior.js";
@@ -109,6 +111,9 @@ export const officialOutputSchemas: Readonly<Record<string, z.ZodObject>> = {
   inspect_native_load_image: resultOf(nativeLoadImageSchema),
   inspect_native_data_type: resultOf(nativeDataTypeSchema),
   inspect_native_instruction: resultOf(nativeInstructionSchema),
+  inspect_native_function_instructions: resultOf(
+    nativeFunctionInstructionsSchema,
+  ),
   resolve_native_call_targets: resultOf(nativeCallTargetsSchema),
   address_name: resultOf(nullableText),
   comment: resultOf(nullableText),
@@ -457,6 +462,7 @@ export const sessionOutputSchemas: Readonly<Record<string, z.ZodObject>> = {
   compare_process_captures: resultOf(processCaptureComparisonSchema),
   compare_artifacts: resultOf(artifactComparisonResultSchema),
   compare_functions: resultOf(functionComparisonResultSchema),
+  compare_compiled_function: resultOf(compiledFunctionComparisonResultSchema),
   compare_bundles: resultOf(bundleComparisonResultSchema),
   find_changed_behavior: resultOf(changedBehaviorResultSchema),
   build_call_path: resultOf(callPathResultSchema),

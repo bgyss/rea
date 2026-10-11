@@ -73,6 +73,7 @@ const PUBLISHED_TOOL_NAME_FLOOR = [
   "compare_application_versions",
   "compare_artifacts",
   "compare_bundles",
+  "compare_compiled_function",
   "compare_functions",
   "compare_javascript_export_shapes",
   "compare_managed_members",

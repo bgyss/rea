@@ -235,6 +235,33 @@ export const registerCoreNativeCommands = (
         ),
     });
   }
+  cli.command(CLI_COMMANDS.inspectNativeFunctionInstructions, {
+    description:
+      "List one native function's instructions with operands and relocations",
+    args: z.object({
+      path: z.string().describe("Local native executable or object file"),
+      procedure: z
+        .string()
+        .describe("Explicit native procedure symbol or address"),
+    }),
+    options: z.object({
+      ...formatSelectionOptions,
+      ...annotationLedgerOptions,
+      provider: providerSelectionOption,
+    }),
+    run: ({ args, options }) =>
+      logCliCommand(
+        logger,
+        CLI_COMMANDS.inspectNativeFunctionInstructions,
+        () =>
+          runDirectAnalysis(
+            args.path,
+            "inspect_native_function_instructions",
+            { procedure: args.procedure },
+            directAnalysisOptions(logger, undefined, options.provider, options),
+          ),
+      ),
+  });
   registerNativeApiCommand(cli, logger);
   registerNativeUiActionCommand(cli, logger);
   registerNativeDispatchMetadataCommand(cli, logger);

@@ -535,6 +535,16 @@ in analysis-profile Evidence, CLI/MCP parity, unchanged source bytes and owned
 cleanup. It has the same Ghidra/JDK prerequisites as the DOS lanes. See
 [raw memory images](ghidra-raw-image.md).
 
+`npm run verify:ghidra:compare` builds one C function with the host `cc` into a
+linked executable and into relocatable objects (matching, wrong constant,
+missing term), lists the function from each through MCP, and checks
+`compare_compiled_function`: the object's relocation symbols, an
+`equivalent_masked` verdict for the matching build, the differing constant as
+`first_divergence`, immediate masking by policy, CLI/MCP listing parity and
+owned cleanup. It needs the Ghidra/JDK prerequisites above and a host C compiler
+(`CC`, default `cc`); the other object-file formats it can read are not
+exercised.
+
 ## Apple Interface Builder archives
 
 `npm run verify:interface-builder` compiles the source-owned AppKit XIB into a
