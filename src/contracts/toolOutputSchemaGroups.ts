@@ -10,6 +10,8 @@ import { nativeValueTraceSchema } from "../domain/native/nativeValueTrace.js";
 import { nativeDataTypeSchema } from "../domain/native/nativeDataType.js";
 import { nativeCallObservationResultSchema } from "../domain/native/nativeCallObservation.js";
 import { nativeSignatureMatchesSchema } from "../domain/native/nativeSignatureMatches.js";
+import { nativeEncodedTextSearchSchema } from "../domain/native/nativeEncodedText.js";
+import { nativePointerTableScanSchema } from "../domain/native/nativePointerTables.js";
 import { nativeFunctionInstructionsSchema } from "../domain/native/nativeFunctionInstructions.js";
 import {
   nativeInstructionSchema,
@@ -116,6 +118,8 @@ export const officialOutputSchemas: Readonly<Record<string, z.ZodObject>> = {
     nativeFunctionInstructionsSchema,
   ),
   match_native_function_signatures: resultOf(nativeSignatureMatchesSchema),
+  search_native_encoded_text: resultOf(nativeEncodedTextSearchSchema),
+  scan_native_pointer_tables: resultOf(nativePointerTableScanSchema),
   resolve_native_call_targets: resultOf(nativeCallTargetsSchema),
   address_name: resultOf(nullableText),
   comment: resultOf(nullableText),

@@ -148,6 +148,17 @@ export const limitationsFor = (operation: string): readonly string[] => {
         "Matches come from the Ghidra Function ID databases the caller supplied, verified by SHA-256 in the bridge; installed Ghidra databases are not consulted. A match is an inference from code hashes, not an observation of this binary.",
         "Functions shorter than the Function ID minimum are not hashed. Hashes mask operand values, so a match does not establish identical constants or call targets.",
       ];
+    case "search_native_encoded_text":
+      return [
+        ...common,
+        "Exact byte matches in initialized Ghidra memory for the pattern encoded by the named charset or pinned character table; Ghidra's defined-string inventory is not consulted.",
+        "Matches are not checked against character boundaries, and only one byte sequence per character is searched.",
+      ];
+    case "scan_native_pointer_tables":
+      return [
+        ...common,
+        "Candidates are runs of values that resolve into initialized Ghidra memory. They are structural hypotheses, not evidence that the bytes are a table.",
+      ];
     case "procedure_assembly":
       return [
         ...common,

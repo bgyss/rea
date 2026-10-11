@@ -13,4 +13,5 @@ run = [
   "npm run verify:ghidra:raw",
   "npm run verify:ghidra:compare",
   "npm run verify:ghidra:signatures",
+  "npm run verify:ghidra:text",
 ]

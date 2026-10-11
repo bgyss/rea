@@ -171,6 +171,8 @@ public final class ReaGhidraBridge extends HeadlessScript {
         "inspect_native_instruction",
         "inspect_native_function_instructions",
         "match_native_function_signatures",
+        "search_native_encoded_text",
+        "scan_native_pointer_tables",
         "inspect_native_data_type",
         "resolve_native_call_targets",
         "procedure_references",
@@ -408,6 +410,8 @@ public final class ReaGhidraBridge extends HeadlessScript {
             case "inspect_native_instruction" -> inspectNativeInstruction(request.params);
             case "inspect_native_function_instructions" -> inspectNativeFunctionInstructions(request.params);
             case "match_native_function_signatures" -> matchNativeFunctionSignatures(request.params);
+            case "search_native_encoded_text" -> searchNativeEncodedText(request.params);
+            case "scan_native_pointer_tables" -> scanNativePointerTables(request.params);
             case "resolve_native_call_targets" -> resolveNativeCallTargets(request.params);
             case "xrefs" -> xrefs(request.params);
             case "analyze_function" -> analyzeFunction(request.params);
@@ -650,6 +654,361 @@ public final class ReaGhidraBridge extends HeadlessScript {
         result.addProperty("returned_bytes", bytes.size());
         result.addProperty("bytes_hex", bytesHex(bytes.toByteArray()));
         result.addProperty("complete", bytes.size() == length);
+        return result;
+    }
+
+    private static final int ENCODED_CONTEXT_BYTES = 16;
+
+    /** One pinned Thingy-format character table: code bytes (hex) to text, and back. */
+    private static final class TextTable {
+        final Map<String, String> textByCode = new HashMap<>();
+        final Map<String, String> codeByText = new HashMap<>();
+        int longestText = 0;
+        int longestCode = 0;
+    }
+
+    private static TextTable loadTextTable(String source, String pinned) throws Exception {
+        byte[] bytes;
+        try {
+            bytes = Files.readAllBytes(Path.of(source));
+        } catch (IOException failure) {
+            throw new RequestFailure("text_table_unreadable",
+                "Cannot read character table " + source + ": " + safeMessage(failure));
+        }
+        String actual = bytesHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+        if (!actual.equals(pinned))
+            throw new RequestFailure("text_table_digest_mismatch",
+                "Character table " + source + " has SHA-256 " + actual + ", not the pinned " + pinned);
+        String content = new String(bytes, StandardCharsets.UTF_8);
+        if (content.startsWith("﻿")) content = content.substring(1);
+        TextTable table = new TextTable();
+        int lineNumber = 0;
+        for (String raw : content.split("\n", -1)) {
+            lineNumber++;
+            String line = raw.endsWith("\r") ? raw.substring(0, raw.length() - 1) : raw;
+            if (line.isEmpty() || line.startsWith("/") || line.startsWith("*") || line.startsWith("\\")) continue;
+            int split = line.indexOf('=');
+            String code = split < 0 ? "" : line.substring(0, split).toUpperCase(Locale.ROOT);
+            if (split < 0 || code.isEmpty() || code.length() % 2 != 0 || !code.matches("[0-9A-F]+"))
+                throw new RequestFailure("text_table_invalid",
+                    "Character table " + source + " line " + lineNumber + " is not HEX=text");
+            String text = line.substring(split + 1);
+            if (text.isEmpty()) continue;
+            table.textByCode.putIfAbsent(code, text);
+            table.codeByText.putIfAbsent(text, code);
+            table.longestText = Math.max(table.longestText, text.length());
+            table.longestCode = Math.max(table.longestCode, code.length() / 2);
+        }
+        if (table.textByCode.isEmpty())
+            throw new RequestFailure("text_table_invalid", "Character table " + source + " defines no entries");
+        return table;
+    }
+
+    private static byte[] encodeWithTable(TextTable table, String pattern) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        int index = 0;
+        while (index < pattern.length()) {
+            String code = null;
+            int width = 0;
+            for (int length = Math.min(table.longestText, pattern.length() - index); length >= 1 && code == null; length--) {
+                code = table.codeByText.get(pattern.substring(index, index + length));
+                width = length;
+            }
+            if (code == null)
+                throw new RequestFailure("text_unencodable",
+                    "The character table has no entry for the text at index " + index + " of the pattern");
+            for (int at = 0; at < code.length(); at += 2) out.write(Integer.parseInt(code.substring(at, at + 2), 16));
+            index += width;
+        }
+        return out.toByteArray();
+    }
+
+    private static String decodeWithTable(TextTable table, byte[] bytes) {
+        StringBuilder out = new StringBuilder();
+        int index = 0;
+        while (index < bytes.length) {
+            String text = null;
+            int width = 0;
+            for (int length = Math.min(table.longestCode, bytes.length - index); length >= 1 && text == null; length--) {
+                text = table.textByCode.get(bytesHex(java.util.Arrays.copyOfRange(bytes, index, index + length)).toUpperCase(Locale.ROOT));
+                width = length;
+            }
+            if (text == null) {
+                out.append(String.format("<%02X>", bytes[index] & 0xff));
+                index++;
+            } else {
+                out.append(text);
+                index += width;
+            }
+        }
+        return out.toString();
+    }
+
+    /** The file offset behind an address when exactly one source mapping covers it; otherwise null. */
+    private Long fileOffsetOrNull(MemoryBlock block, Address address) {
+        Long fileOffset = null;
+        int mappings = 0;
+        for (MemoryBlockSourceInfo source : block.getSourceInfos()) {
+            if (!source.contains(address) || source.getFileBytes().isEmpty()) continue;
+            long offset = source.getFileBytesOffset(address);
+            if (offset < 0) continue;
+            fileOffset = offset;
+            mappings++;
+        }
+        return mappings == 1 ? fileOffset : null;
+    }
+
+    private record ScanRegion(MemoryBlock block, Address start, Address end) {}
+
+    /** Initialized blocks, clipped to the optional inclusive window, in address order. */
+    private List<ScanRegion> scanRegions(String startText, String endText) {
+        Address windowStart = startText == null ? null : parseReaAddress(startText);
+        Address windowEnd = endText == null ? null : parseReaAddress(endText);
+        if (windowStart != null && windowEnd != null && !windowStart.getAddressSpace().equals(windowEnd.getAddressSpace()))
+            throw new RequestFailure("invalid_request", "start and end must be in the same address space");
+        if (windowStart != null && windowEnd != null && windowStart.compareTo(windowEnd) > 0)
+            throw new RequestFailure("invalid_request", "start must not be after end");
+        List<MemoryBlock> blocks = new ArrayList<>(List.of(currentProgram.getMemory().getBlocks()));
+        blocks.sort(Comparator.comparing(MemoryBlock::getStart));
+        List<ScanRegion> regions = new ArrayList<>();
+        for (MemoryBlock block : blocks) {
+            if (!block.isInitialized()) continue;
+            Address first = block.getStart();
+            Address last = block.getEnd();
+            Address window = windowStart != null ? windowStart : windowEnd;
+            if (window != null && !window.getAddressSpace().equals(first.getAddressSpace())) continue;
+            if (windowStart != null && windowStart.compareTo(first) > 0) first = windowStart;
+            if (windowEnd != null && windowEnd.compareTo(last) < 0) last = windowEnd;
+            if (first.compareTo(last) > 0) continue;
+            regions.add(new ScanRegion(block, first, last));
+        }
+        return regions;
+    }
+
+    private byte[] regionBytes(ScanRegion region) throws Exception {
+        long size = region.end().subtract(region.start()) + 1;
+        if (size > Integer.MAX_VALUE - 16)
+            throw new RequestFailure("invalid_request",
+                "Memory block " + region.block().getName() + " is too large to scan in one piece; narrow it with start and end");
+        byte[] buffer = new byte[(int) size];
+        int read = currentProgram.getMemory().getBytes(region.start(), buffer);
+        return read == buffer.length ? buffer : java.util.Arrays.copyOf(buffer, read);
+    }
+
+    private JsonObject searchNativeEncodedText(JsonObject params) throws Exception {
+        requireKeys(params, Set.of("document", "pattern", "encoding", "table", "start", "end", "limit"));
+        requireDocument(params);
+        String pattern = requireString(params, "pattern");
+        String encoding = requireString(params, "encoding");
+        int limit = requireInteger(params, "limit");
+        if (limit < 1) throw new RequestFailure("invalid_request", "limit must be positive");
+        JsonElement tableElement = params.get("table");
+        boolean hasTable = tableElement != null && !tableElement.isJsonNull();
+        if (encoding.equals("table") != hasTable)
+            throw new RequestFailure("invalid_request", "table is required with encoding \"table\" and invalid otherwise");
+        TextTable table = null;
+        java.nio.charset.Charset charset = null;
+        byte[] needle;
+        JsonObject tableIdentity = null;
+        if (hasTable) {
+            JsonObject tableParams = tableElement.getAsJsonObject();
+            requireKeys(tableParams, Set.of("path", "sha256"));
+            table = loadTextTable(requireString(tableParams, "path"), requireString(tableParams, "sha256"));
+            needle = encodeWithTable(table, pattern);
+            tableIdentity = new JsonObject();
+            tableIdentity.addProperty("path", requireString(tableParams, "path"));
+            tableIdentity.addProperty("sha256", requireString(tableParams, "sha256"));
+        } else {
+            charset = java.nio.charset.Charset.forName(switch (encoding) {
+                case "shift_jis" -> "Shift_JIS";
+                case "cp932" -> "windows-31j";
+                case "euc_jp" -> "EUC-JP";
+                case "utf16le" -> "UTF-16LE";
+                case "utf16be" -> "UTF-16BE";
+                default -> throw new RequestFailure("invalid_request", "Unknown encoding: " + encoding);
+            });
+            try {
+                java.nio.ByteBuffer encoded = charset.newEncoder()
+                    .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+                    .encode(java.nio.CharBuffer.wrap(pattern));
+                needle = new byte[encoded.remaining()];
+                encoded.get(needle);
+            } catch (java.nio.charset.CharacterCodingException failure) {
+                throw new RequestFailure("text_unencodable",
+                    "The pattern has a character that " + encoding + " cannot encode: " + safeMessage(failure));
+            }
+        }
+        JsonArray regions = new JsonArray();
+        JsonArray matches = new JsonArray();
+        long total = 0;
+        for (ScanRegion region : scanRegions(optionalString(params, "start"), optionalString(params, "end"))) {
+            monitor.checkCancelled();
+            byte[] data = regionBytes(region);
+            JsonObject scanned = new JsonObject();
+            scanned.addProperty("block", region.block().getName());
+            scanned.addProperty("start", canonicalAddress(region.start()));
+            scanned.addProperty("end", canonicalAddress(region.end()));
+            scanned.addProperty("bytes_scanned", data.length);
+            regions.add(scanned);
+            for (int at = 0; at + needle.length <= data.length; at++) {
+                if (data[at] != needle[0]) continue;
+                int offset = 1;
+                while (offset < needle.length && data[at + offset] == needle[offset]) offset++;
+                if (offset != needle.length) continue;
+                total++;
+                if (matches.size() >= limit) continue;
+                Address address = region.start().add(at);
+                int afterStart = at + needle.length;
+                byte[] after = java.util.Arrays.copyOfRange(data, afterStart, Math.min(data.length, afterStart + ENCODED_CONTEXT_BYTES));
+                byte[] fromMatch = java.util.Arrays.copyOfRange(data, at, afterStart + after.length);
+                JsonObject item = new JsonObject();
+                item.addProperty("address", canonicalAddress(address));
+                item.addProperty("block", region.block().getName());
+                Long fileOffset = fileOffsetOrNull(region.block(), address);
+                if (fileOffset == null) item.add("file_offset", JsonNull.INSTANCE);
+                else item.addProperty("file_offset", fileOffset);
+                item.addProperty("bytes_hex", bytesHex(needle));
+                item.addProperty("bytes_before_hex", bytesHex(java.util.Arrays.copyOfRange(data, Math.max(0, at - ENCODED_CONTEXT_BYTES), at)));
+                item.addProperty("bytes_after_hex", bytesHex(after));
+                item.addProperty("text_from_match", table != null ? decodeWithTable(table, fromMatch) : new String(fromMatch, charset));
+                matches.add(item);
+            }
+        }
+        JsonObject result = new JsonObject();
+        result.addProperty("pattern", pattern);
+        result.addProperty("encoding", encoding);
+        result.add("table", tableIdentity == null ? JsonNull.INSTANCE : tableIdentity);
+        result.addProperty("needle_hex", bytesHex(needle));
+        result.add("regions", regions);
+        result.addProperty("total_matches", total);
+        result.addProperty("truncated", total > matches.size());
+        result.add("matches", matches);
+        JsonArray limitations = new JsonArray();
+        limitations.add("Exact byte search of initialized memory; it does not use Ghidra's defined-string inventory, so matches can lie in code, data or undefined bytes.");
+        limitations.add("A match is not checked against character boundaries: a multi-byte encoding can match starting on a trail byte, so read bytes_before_hex and text_from_match before trusting it.");
+        if (table != null) limitations.add("The pattern is encoded greedily with the longest table entry at each position; the first entry in file order wins for repeated text, and text the table could encode another way is not searched.");
+        else limitations.add("The pattern is encoded with the Java " + charset.name() + " charset, which chooses one byte sequence per character; other byte sequences for the same character are not searched.");
+        result.add("limitations", limitations);
+        return result;
+    }
+
+    private static long readUnsigned(byte[] data, int at, int size, boolean littleEndian) {
+        long value = 0;
+        for (int index = 0; index < size; index++) {
+            int b = data[at + (littleEndian ? size - 1 - index : index)] & 0xff;
+            value = (value << 8) | b;
+        }
+        return value;
+    }
+
+    private static long parseHexOffset(String text) {
+        try {
+            String digits = text.toLowerCase(Locale.ROOT).startsWith("0x") ? text.substring(2) : text;
+            return new BigInteger(digits, 16).longValue();
+        } catch (NumberFormatException failure) {
+            throw new RequestFailure("invalid_request", "target_base must be a hexadecimal number: " + text);
+        }
+    }
+
+    private JsonObject scanNativePointerTables(JsonObject params) throws Exception {
+        requireKeys(params, Set.of("document", "entry_size", "endianness", "min_entries", "target_base", "target_start", "target_end", "require_ascending", "start", "end", "limit"));
+        requireDocument(params);
+        int size = requireInteger(params, "entry_size");
+        if (size != 2 && size != 4 && size != 8) throw new RequestFailure("invalid_request", "entry_size must be 2, 4 or 8");
+        String endianness = requireString(params, "endianness");
+        if (!endianness.equals("little") && !endianness.equals("big")) throw new RequestFailure("invalid_request", "endianness must be little or big");
+        boolean little = endianness.equals("little");
+        int minEntries = requireInteger(params, "min_entries");
+        if (minEntries < 2) throw new RequestFailure("invalid_request", "min_entries must be at least 2");
+        int limit = requireInteger(params, "limit");
+        if (limit < 1) throw new RequestFailure("invalid_request", "limit must be positive");
+        boolean ascending = requireBoolean(params, "require_ascending");
+        String baseText = optionalString(params, "target_base");
+        long base = baseText == null ? 0 : parseHexOffset(baseText);
+        String targetStartText = optionalString(params, "target_start");
+        String targetEndText = optionalString(params, "target_end");
+        Address targetStart = targetStartText == null ? null : parseReaAddress(targetStartText);
+        Address targetEnd = targetEndText == null ? null : parseReaAddress(targetEndText);
+        if (targetEnd != null && targetStart == null) throw new RequestFailure("invalid_request", "target_end requires target_start");
+        if (targetStart != null && targetEnd != null && !targetStart.getAddressSpace().equals(targetEnd.getAddressSpace()))
+            throw new RequestFailure("invalid_request", "target_start and target_end must be in the same address space");
+        List<MemoryBlock> targetBlocks = new ArrayList<>();
+        for (MemoryBlock block : currentProgram.getMemory().getBlocks()) if (block.isInitialized()) targetBlocks.add(block);
+        JsonArray found = new JsonArray();
+        long total = 0;
+        for (ScanRegion region : scanRegions(optionalString(params, "start"), optionalString(params, "end"))) {
+            monitor.checkCancelled();
+            AddressSpace targetSpace = targetStart != null ? targetStart.getAddressSpace() : region.start().getAddressSpace();
+            List<long[]> ranges = new ArrayList<>();
+            for (MemoryBlock block : targetBlocks) {
+                if (!block.getStart().getAddressSpace().equals(targetSpace)) continue;
+                long lo = block.getStart().getOffset();
+                long hi = block.getEnd().getOffset();
+                if (targetStart != null && Long.compareUnsigned(targetStart.getOffset(), lo) > 0) lo = targetStart.getOffset();
+                if (targetEnd != null && Long.compareUnsigned(targetEnd.getOffset(), hi) < 0) hi = targetEnd.getOffset();
+                if (Long.compareUnsigned(lo, hi) <= 0) ranges.add(new long[] {lo, hi});
+            }
+            byte[] data = regionBytes(region);
+            int at = 0;
+            while (at + size <= data.length) {
+                if ((at & 0xffff) == 0) monitor.checkCancelled();
+                List<Long> targets = new ArrayList<>();
+                int cursor = at;
+                long previous = 0;
+                boolean strict = true;
+                while (cursor + size <= data.length) {
+                    long target = readUnsigned(data, cursor, size, little) + base;
+                    boolean mapped = false;
+                    for (long[] range : ranges) {
+                        if (Long.compareUnsigned(target, range[0]) >= 0 && Long.compareUnsigned(target, range[1]) <= 0) { mapped = true; break; }
+                    }
+                    if (!mapped) break;
+                    if (!targets.isEmpty() && Long.compareUnsigned(target, previous) <= 0) {
+                        strict = false;
+                        if (ascending) break;
+                    }
+                    targets.add(target);
+                    previous = target;
+                    cursor += size;
+                }
+                Set<Long> distinct = new HashSet<>(targets);
+                if (targets.size() < minEntries || distinct.size() < 2) {
+                    at++;
+                    continue;
+                }
+                total++;
+                if (found.size() < limit) {
+                    Address address = region.start().add(at);
+                    JsonObject item = new JsonObject();
+                    item.addProperty("address", canonicalAddress(address));
+                    item.addProperty("block", region.block().getName());
+                    Long fileOffset = fileOffsetOrNull(region.block(), address);
+                    if (fileOffset == null) item.add("file_offset", JsonNull.INSTANCE);
+                    else item.addProperty("file_offset", fileOffset);
+                    item.addProperty("entry_count", targets.size());
+                    item.addProperty("byte_length", targets.size() * size);
+                    item.addProperty("strictly_ascending", strict);
+                    item.addProperty("distinct_targets", distinct.size());
+                    JsonArray targetList = new JsonArray();
+                    for (long target : targets) targetList.add(canonicalAddress(targetSpace.getAddress(target)));
+                    item.add("targets", targetList);
+                    found.add(item);
+                }
+                at = cursor;
+            }
+        }
+        JsonObject result = new JsonObject();
+        result.addProperty("entry_size", size);
+        result.addProperty("endianness", endianness);
+        result.addProperty("target_base", "0x" + Long.toHexString(base));
+        result.addProperty("total_candidates", total);
+        result.addProperty("truncated", total > found.size());
+        result.add("candidates", found);
+        JsonArray limitations = new JsonArray();
+        limitations.add("A candidate is a run of consecutive values that each resolve into initialized memory (and the target window, when given); it is not evidence that the run is a table. Aligned data, code addresses and unrelated numbers can satisfy it, so check targets with search_native_encoded_text or read_bytes.");
+        limitations.add("Runs are found at every byte offset and reported once, extended as far as they remain valid; overlapping runs at other alignments inside a reported run are not reported.");
+        result.add("limitations", limitations);
         return result;
     }
 

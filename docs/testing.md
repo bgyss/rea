@@ -556,6 +556,17 @@ digest, leaves unrelated application code unnamed, and reports the same result
 through the CLI. Only the host architecture is exercised; the bundled x86
 Windows databases are not.
 
+`npm run verify:ghidra:text` opens an authored 6502 raw image holding Shift-JIS
+strings, an EUC-JP and a UTF-16 string, text in a `.tbl` table with a
+double-character entry, and a table of ten 16-bit pointers to the Shift-JIS
+strings. Through MCP it checks that `search_native_encoded_text` returns exact
+addresses, file offsets and bytes for each encoding, refuses a table with a wrong
+digest or text the table cannot encode, honours a window and a limit while
+keeping the exact total, and that `scan_native_pointer_tables` finds exactly the
+authored table with every target (and respects `min_entries`, byte order,
+`target_base` and a target window). The CLI results equal the MCP results and the
+image is unchanged. It needs no compiler. Only a 6502 image is exercised.
+
 ## Apple Interface Builder archives
 
 `npm run verify:interface-builder` compiles the source-owned AppKit XIB into a

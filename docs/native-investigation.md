@@ -168,6 +168,38 @@ kept them). It does not run the decompiler. Open a relocatable object file as
 its own session to list the function a build produced; select it by address
 (`0x0` for the first function of a section) because object symbols are local.
 
+## Finding text in other encodings
+
+`search_strings` matches Ghidra's defined-string inventory, which is built from
+ASCII and Unicode the analyzer recognised. `search_native_encoded_text` (CLI
+`search-native-encoded-text <path> --pattern TEXT --encoding ENC`) instead
+encodes your pattern and searches the initialized bytes, so it finds Shift-JIS,
+EUC-JP and UTF-16 text that was never defined as a string. `encoding` is
+`shift_jis`, `cp932`, `euc_jp`, `utf16le`, `utf16be`, or `table` with a
+Thingy-format `.tbl` character table passed as `{path, sha256}` (CLI
+`--table SHA256=PATH`); the bridge refuses a table whose digest differs.
+
+Each match returns its address, memory block, file offset (when exactly one
+source mapping covers it), the exact bytes, 16 bytes of context either side and
+the following bytes decoded as text. `needle_hex` records the bytes searched
+for. `start` and `end` window the scan. `limit` bounds the matches returned while
+`total_matches` stays exact.
+
+A match is a byte match, not a verified string: it is not checked against
+character boundaries, so a multi-byte encoding can match starting on a trail
+byte. The charsets encode each character one way, and a table is applied
+longest-entry-first with the first entry in file order winning for repeated
+text, so other byte sequences for the same text are not searched.
+
+`scan_native_pointer_tables` (CLI `scan-native-pointer-tables <path>
+--entry-size N --endianness little|big`) finds candidate pointer tables:
+runs of at least `min_entries` (default 8) consecutive values that each resolve
+into initialized memory, strictly ascending by default. `target_base` adds an
+offset to each value, `target_start`/`target_end` restrict valid targets, and
+`start`/`end` restrict where tables may lie. Each candidate lists its address,
+file offset and every target. A candidate is a structural hypothesis; confirm
+targets with `search_native_encoded_text` or `read_bytes`.
+
 ## Naming statically linked library functions
 
 `match_native_function_signatures` (CLI `match-native-function-signatures <path>
