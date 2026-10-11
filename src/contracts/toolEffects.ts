@@ -167,6 +167,7 @@ export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
   read_function_instructions: evidence,
   inspect_native_instruction: evidence,
   inspect_native_function_instructions: evidence,
+  match_native_function_signatures: evidence,
   inspect_native_data_type: evidence,
   resolve_native_call_targets: evidence,
   read_bytes: evidence,

@@ -51,6 +51,15 @@ import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.decompiler.DecompiledFunction;
 import ghidra.app.decompiler.ClangCaseToken;
 import ghidra.app.decompiler.ClangNode;
+import ghidra.feature.fid.db.FidDB;
+import ghidra.feature.fid.db.FidFile;
+import ghidra.feature.fid.db.FidFileManager;
+import ghidra.feature.fid.db.FidQueryService;
+import ghidra.feature.fid.db.FunctionRecord;
+import ghidra.feature.fid.db.LibraryRecord;
+import ghidra.feature.fid.service.FidMatch;
+import ghidra.feature.fid.service.FidSearchResult;
+import ghidra.feature.fid.service.FidService;
 import ghidra.framework.Application;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressIterator;
@@ -68,6 +77,7 @@ import ghidra.program.model.data.DataType;
 import ghidra.program.model.data.DataTypeConflictHandler;
 import ghidra.program.model.data.DataTypeManager;
 import ghidra.app.util.cparser.C.CParser;
+import ghidra.program.model.lang.Language;
 import ghidra.program.model.lang.Register;
 import ghidra.program.model.scalar.Scalar;
 import ghidra.program.model.listing.CommentType;
@@ -160,6 +170,7 @@ public final class ReaGhidraBridge extends HeadlessScript {
         "read_function_instructions",
         "inspect_native_instruction",
         "inspect_native_function_instructions",
+        "match_native_function_signatures",
         "inspect_native_data_type",
         "resolve_native_call_targets",
         "procedure_references",
@@ -396,6 +407,7 @@ public final class ReaGhidraBridge extends HeadlessScript {
             case "inspect_native_data_type" -> inspectNativeDataType(request.params);
             case "inspect_native_instruction" -> inspectNativeInstruction(request.params);
             case "inspect_native_function_instructions" -> inspectNativeFunctionInstructions(request.params);
+            case "match_native_function_signatures" -> matchNativeFunctionSignatures(request.params);
             case "resolve_native_call_targets" -> resolveNativeCallTargets(request.params);
             case "xrefs" -> xrefs(request.params);
             case "analyze_function" -> analyzeFunction(request.params);
@@ -1000,6 +1012,167 @@ public final class ReaGhidraBridge extends HeadlessScript {
         result.addProperty("architecture", currentProgram.getLanguageID().getIdAsString());
         result.addProperty("mode", currentProgram.getLanguage().getLanguageDescription().getVariant());
         result.add("instructions", items);
+        result.add("limitations", limitations);
+        return result;
+    }
+
+    private static JsonObject fidLibrary(LibraryRecord library) {
+        JsonObject item = new JsonObject();
+        item.addProperty("family", library.getLibraryFamilyName());
+        item.addProperty("version", library.getLibraryVersion());
+        item.addProperty("variant", library.getLibraryVariant());
+        item.addProperty("language_id", library.getGhidraLanguageID().getIdAsString());
+        item.addProperty("compiler_spec_id", library.getGhidraCompilerSpecID().getIdAsString());
+        item.addProperty("ghidra_version", library.getGhidraVersion());
+        return item;
+    }
+
+    private JsonObject matchNativeFunctionSignatures(JsonObject params) throws Exception {
+        requireKeys(params, Set.of("document", "databases", "procedure"));
+        requireDocument(params);
+        JsonArray requested = params.getAsJsonArray("databases");
+        if (requested == null || requested.size() == 0)
+            throw new RequestFailure("invalid_request", "Supply at least one Function ID database");
+        String selected = optionalString(params, "procedure");
+        Function only = selected == null ? null : resolveProcedure(selected);
+        Language language = currentProgram.getLanguage();
+        FidFileManager manager = FidFileManager.getInstance();
+        // Each database is read once, checked against its pinned digest, and opened from that exact copy.
+        Path scratch = Files.createTempDirectory("rea-fid-");
+        List<FidFile> files = new ArrayList<>();
+        List<String> sourcePaths = new ArrayList<>();
+        List<String> copies = new ArrayList<>();
+        List<String> digests = new ArrayList<>();
+        JsonArray databases = new JsonArray();
+        JsonArray found = new JsonArray();
+        int examined = 0;
+        int tooShort = 0;
+        try {
+            for (int index = 0; index < requested.size(); index++) {
+                monitor.checkCancelled();
+                JsonObject item = requested.get(index).getAsJsonObject();
+                String source = requireString(item, "path");
+                String pinned = requireString(item, "sha256");
+                byte[] bytes;
+                try {
+                    bytes = Files.readAllBytes(Path.of(source));
+                } catch (IOException failure) {
+                    throw new RequestFailure("function_id_database_unreadable",
+                        "Cannot read Function ID database " + source + ": " + safeMessage(failure));
+                }
+                String actual = bytesHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+                if (!actual.equals(pinned))
+                    throw new RequestFailure("function_id_database_digest_mismatch",
+                        "Function ID database " + source + " has SHA-256 " + actual + ", not the pinned " + pinned);
+                Path copy = scratch.resolve(index + "-" + Path.of(source).getFileName());
+                Files.write(copy, bytes);
+                FidFile file = manager.addUserFidFile(copy.toFile());
+                if (file == null)
+                    throw new RequestFailure("function_id_database_invalid",
+                        "Not a Ghidra Function ID database for this Ghidra version: " + source);
+                files.add(file);
+                copies.add(copy.toFile().getPath());
+                sourcePaths.add(source);
+                digests.add(actual);
+            }
+            // The session home is private, so the bundled databases are deactivated for this query only.
+            Set<FidFile> chosen = new HashSet<>(files);
+            for (FidFile file : manager.getFidFiles()) file.setActive(chosen.contains(file));
+            boolean applicable = false;
+            for (int index = 0; index < files.size(); index++) {
+                FidFile file = files.get(index);
+                JsonObject entry = new JsonObject();
+                entry.addProperty("path", sourcePaths.get(index));
+                entry.addProperty("sha256", digests.get(index));
+                JsonArray libraries = new JsonArray();
+                FidDB database = file.getFidDB(false);
+                try {
+                    for (LibraryRecord library : database.getAllLibraries()) libraries.add(fidLibrary(library));
+                } finally {
+                    database.close();
+                }
+                boolean applies = file.canProcessLanguage(language);
+                applicable |= applies;
+                entry.add("libraries", libraries);
+                entry.addProperty("applies_to_target", applies);
+                databases.add(entry);
+            }
+            if (applicable) {
+                FidService service = new FidService();
+                try (FidQueryService query = service.openFidQueryService(language, false)) {
+                    var seeker = service.getProgramSeeker(currentProgram, query, service.getDefaultScoreThreshold());
+                    List<Function> targets = new ArrayList<>();
+                    if (only != null) targets.add(only);
+                    else for (Function function : currentProgram.getFunctionManager().getFunctions(true))
+                        if (!function.isExternal()) targets.add(function);
+                    for (Function function : targets) {
+                        monitor.checkCancelled();
+                        examined++;
+                        FidSearchResult result = seeker.searchFunction(function, monitor);
+                        if (result == null) {
+                            tooShort++;
+                            continue;
+                        }
+                        if (result.matches == null || result.matches.isEmpty()) continue;
+                        JsonObject row = new JsonObject();
+                        JsonObject identity = new JsonObject();
+                        identity.addProperty("address", canonicalAddress(function.getEntryPoint()));
+                        identity.addProperty("name", procedureName(function));
+                        row.add("function", identity);
+                        row.addProperty("code_unit_count", result.hashQuad.getCodeUnitSize());
+                        row.addProperty("full_hash", Long.toHexString(result.hashQuad.getFullHash()));
+                        row.addProperty("specific_hash", Long.toHexString(result.hashQuad.getSpecificHash()));
+                        JsonArray candidates = new JsonArray();
+                        for (FidMatch match : result.matches) {
+                            FunctionRecord record = match.getFunctionRecord();
+                            LibraryRecord library = match.getLibraryRecord();
+                            int owner = -1;
+                            for (int index = 0; index < files.size(); index++)
+                                if (record.getFidDb().getPath().equals(copies.get(index))) owner = index;
+                            JsonObject candidate = new JsonObject();
+                            candidate.addProperty("evidence_kind", "inferred");
+                            candidate.addProperty("name", record.getName());
+                            candidate.addProperty("database_index", Math.max(owner, 0));
+                            candidate.add("library", fidLibrary(library));
+                            candidate.addProperty("entry_point", "0x" + Long.toHexString(record.getEntryPoint()));
+                            candidate.addProperty("code_unit_size", record.getCodeUnitSize());
+                            candidate.addProperty("full_hash", Long.toHexString(record.getFullHash()));
+                            candidate.addProperty("specific_hash", Long.toHexString(record.getSpecificHash()));
+                            candidate.addProperty("match_mode", String.valueOf(match.getPrimaryFunctionMatchMode()));
+                            JsonObject scores = new JsonObject();
+                            scores.addProperty("overall", match.getOverallScore());
+                            scores.addProperty("function", match.getPrimaryFunctionCodeUnitScore());
+                            scores.addProperty("children", match.getChildFunctionCodeUnitScore());
+                            scores.addProperty("parents", match.getParentFunctionCodeUnitScore());
+                            candidate.add("scores", scores);
+                            JsonObject flags = new JsonObject();
+                            flags.addProperty("auto_pass", record.autoPass());
+                            flags.addProperty("force_specific", record.isForceSpecific());
+                            flags.addProperty("force_relation", record.isForceRelation());
+                            candidate.add("flags", flags);
+                            candidates.add(candidate);
+                        }
+                        row.add("candidates", candidates);
+                        found.add(row);
+                    }
+                }
+            }
+        } finally {
+            for (FidFile file : files) manager.removeUserFile(file);
+            try (var entries = Files.list(scratch)) {
+                for (Path entry : (Iterable<Path>) entries::iterator) Files.deleteIfExists(entry);
+            }
+            Files.deleteIfExists(scratch);
+        }
+        JsonArray limitations = new JsonArray();
+        limitations.add("Candidates are Ghidra Function ID hash matches against the caller's pinned databases, which are inferences about statically linked library functions rather than observations of this binary.");
+        limitations.add("Function ID hashes mask operand values and need at least four code units, so a match does not establish identical constants or call targets, and shorter functions are not hashed (functions_too_short).");
+        limitations.add("Databases whose language does not match the target (applies_to_target false) are not consulted. Installed Ghidra databases are never consulted.");
+        JsonObject result = new JsonObject();
+        result.add("databases", databases);
+        result.addProperty("functions_examined", examined);
+        result.addProperty("functions_too_short", tooShort);
+        result.add("matches", found);
         result.add("limitations", limitations);
         return result;
     }

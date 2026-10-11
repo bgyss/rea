@@ -228,6 +228,7 @@ const sessionInfo = ({
     "inspect_native_data_type",
     "inspect_native_instruction",
     "inspect_native_function_instructions",
+    "match_native_function_signatures",
     "resolve_native_call_targets",
     "analyze_function",
     "procedure_assembly",

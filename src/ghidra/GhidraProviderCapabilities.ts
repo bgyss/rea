@@ -142,6 +142,12 @@ export const limitationsFor = (operation: string): readonly string[] => {
         "Instructions, operand tokens and relocations are Ghidra Listing and RelocationTable observations. For a relocatable object Ghidra may already have applied a relocation to the loaded bytes; the relocation records the symbol and the file bytes where the loader kept them.",
         "Does not invoke the decompiler or whole-program name and string inventories.",
       ];
+    case "match_native_function_signatures":
+      return [
+        ...common,
+        "Matches come from the Ghidra Function ID databases the caller supplied, verified by SHA-256 in the bridge; installed Ghidra databases are not consulted. A match is an inference from code hashes, not an observation of this binary.",
+        "Functions shorter than the Function ID minimum are not hashed. Hashes mask operand values, so a match does not establish identical constants or call targets.",
+      ];
     case "procedure_assembly":
       return [
         ...common,

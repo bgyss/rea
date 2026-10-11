@@ -545,6 +545,17 @@ owned cleanup. It needs the Ghidra/JDK prerequisites above and a host C compiler
 (`CC`, default `cc`); the other object-file formats it can read are not
 exercised.
 
+`npm run verify:ghidra:signatures` builds a library object with the host `cc`,
+links it into a reference executable and, under other names, into an
+application, then builds a Function ID database from the reference with
+`scripts/verify/ghidra/PopulateFixtureFid.java` (a headless Ghidra run that uses
+your Ghidra settings directory). Through MCP it checks that
+`match_native_function_signatures` names the application's two library functions
+with the pinned database's identity, narrows to one procedure, refuses a wrong
+digest, leaves unrelated application code unnamed, and reports the same result
+through the CLI. Only the host architecture is exercised; the bundled x86
+Windows databases are not.
+
 ## Apple Interface Builder archives
 
 `npm run verify:interface-builder` compiles the source-owned AppKit XIB into a

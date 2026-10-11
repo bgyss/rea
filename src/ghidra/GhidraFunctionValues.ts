@@ -17,6 +17,10 @@ import {
   resolveAnnotationSet,
 } from "../domain/native/nativeLabelPacks.js";
 import { nativeDataTypeSchema } from "../domain/native/nativeDataType.js";
+import {
+  nativeSignatureMatchesInputSchema,
+  nativeSignatureMatchesSchema,
+} from "../domain/native/nativeSignatureMatches.js";
 import { nativeFunctionInstructionsSchema } from "../domain/native/nativeFunctionInstructions.js";
 import {
   nativeInstructionSchema,
@@ -60,6 +64,7 @@ export const GHIDRA_FUNCTION_OPERATIONS = [
   "inspect_native_data_type",
   "inspect_native_instruction",
   "inspect_native_function_instructions",
+  "match_native_function_signatures",
   "resolve_native_call_targets",
   "analyze_function",
   "procedure_assembly",
@@ -109,6 +114,9 @@ const inputSchemas = {
     .object({ document, address: ghidraInputAddressSchema })
     .strict(),
   inspect_native_function_instructions: z.object(directProcedure).strict(),
+  match_native_function_signatures: nativeSignatureMatchesInputSchema
+    .extend({ document })
+    .strict(),
   resolve_native_call_targets: z
     .object({ document, address: ghidraInputAddressSchema })
     .strict(),
@@ -413,6 +421,7 @@ const resultSchemas = {
   inspect_native_function_instructions: nativeFunctionInstructionsSchema.extend(
     { procedure: procedureIdentity },
   ),
+  match_native_function_signatures: nativeSignatureMatchesSchema,
   inspect_native_data_type: nativeDataTypeSchema,
   resolve_native_call_targets: nativeCallTargetsSchema,
   procedure_references: procedureReferences,
