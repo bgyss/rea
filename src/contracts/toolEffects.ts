@@ -168,6 +168,8 @@ export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
   inspect_native_instruction: evidence,
   inspect_native_function_instructions: evidence,
   match_native_function_signatures: evidence,
+  search_native_encoded_text: evidence,
+  scan_native_pointer_tables: evidence,
   inspect_native_data_type: evidence,
   resolve_native_call_targets: evidence,
   read_bytes: evidence,

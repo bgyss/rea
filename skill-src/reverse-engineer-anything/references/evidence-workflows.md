@@ -21,6 +21,9 @@ or absence:
   metadata, and graph relations.
 - `compare_functions` compares explicit function Evidence, not fuzzy
   whole-binary matches.
+- `search_native_encoded_text` finds text in Shift-JIS, EUC-JP, UTF-16 or a
+  pinned `.tbl` table as exact byte matches; `scan_native_pointer_tables` finds
+  candidate pointer tables. Both are hypotheses to confirm with `read_bytes`.
 - `match_native_function_signatures` proposes names for statically linked
   library functions from Function ID databases you pin by SHA-256. Candidates
   are inferred; accept one with `annotate_native_function`.

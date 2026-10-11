@@ -20,6 +20,8 @@ import { toolContractMetadata } from "./toolEffects.js";
 import { nativeDataTypeInputSchema } from "../domain/native/nativeDataType.js";
 import { nativeFunctionInstructionsInputSchema } from "../domain/native/nativeFunctionInstructions.js";
 import { nativeSignatureMatchesInputSchema } from "../domain/native/nativeSignatureMatches.js";
+import { nativeEncodedTextSearchInputSchema } from "../domain/native/nativeEncodedText.js";
+import { nativePointerTableScanInputSchema } from "../domain/native/nativePointerTables.js";
 import { nativeInstructionInputSchema } from "../domain/native/nativeInstruction.js";
 import { functionInstructionInputSchema } from "./functionInstructionContract.js";
 import { HOPPER_MEMORY_TOOL_DEFINITIONS } from "./hopperMemoryContracts.js";
@@ -88,6 +90,16 @@ export const OFFICIAL_TOOL_CONTRACTS = [
     "match_native_function_signatures",
     "Match the open binary's functions against operator-supplied Ghidra Function ID databases, each pinned by SHA-256 and verified before use. Returns inferred candidates per function with the library, version and variant that named them, hash identities and Ghidra's match scores, plus the identity of every database consulted. A name from a signature database is a hypothesis about a statically linked library function, not an observation of this binary. Bundled Ghidra databases are never consulted; pass the databases to use. Narrow with procedure for one function.",
     nativeSignatureMatchesInputSchema,
+  ),
+  official(
+    "search_native_encoded_text",
+    'Search initialized memory for a text pattern in an explicit encoding (shift_jis, cp932, euc_jp, utf16le, utf16be, or a custom Thingy-format .tbl character table pinned by SHA-256 with encoding "table"). Returns every exact byte match with its address, block, file offset, the searched bytes, 16 bytes of context either side and the following text decoded from the match. Unlike search_strings it scans raw bytes rather than Ghidra\'s defined-string inventory, so it finds text the analyzer never defined. A match is not checked for character boundaries. Narrow with start and end; limit bounds the matches returned while total_matches stays exact.',
+    nativeEncodedTextSearchInputSchema,
+  ),
+  official(
+    "scan_native_pointer_tables",
+    "Scan initialized memory for candidate pointer tables: runs of at least min_entries consecutive entry_size-byte values (little or big endian, plus an optional target_base) that each resolve into initialized memory, optionally within a target window and strictly ascending by default. Returns each run's address, file offset, entry count and every target address. A candidate is a structural hypothesis, not evidence of a table; verify targets with search_native_encoded_text or read_bytes. Narrow the scanned region with start and end.",
+    nativePointerTableScanInputSchema,
   ),
   official(
     "resolve_native_call_targets",

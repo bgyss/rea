@@ -69,6 +69,8 @@ type DirectAnalysisTool =
   | "inspect_native_instruction"
   | "inspect_native_function_instructions"
   | "match_native_function_signatures"
+  | "search_native_encoded_text"
+  | "scan_native_pointer_tables"
   | "inspect_native_data_type"
   | "resolve_native_call_targets"
   | "analyze_function"

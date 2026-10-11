@@ -14,6 +14,7 @@ import {
 } from "./options.js";
 import type { CliInstance } from "./types.js";
 import { LABEL_PACKS } from "../domain/native/nativeLabelPacks.js";
+import { NATIVE_TEXT_ENCODINGS } from "../domain/native/nativeEncodedText.js";
 import { jsonObjectSchema } from "../domain/jsonValue.js";
 
 /** Register native load-image, memory, and annotation CLI commands. */
@@ -288,10 +289,123 @@ export const registerCoreNativeCommands = (
           args.path,
           "match_native_function_signatures",
           {
-            databases: options.database.map(parseSignatureDatabase),
+            databases: options.database.map(parsePinnedFile),
             ...(options.procedure === undefined
               ? {}
               : { procedure: options.procedure }),
+          },
+          directAnalysisOptions(logger, undefined, options.provider, options),
+        ),
+      ),
+  });
+  cli.command(CLI_COMMANDS.searchNativeEncodedText, {
+    description:
+      "Search memory for text in Shift-JIS, EUC-JP, UTF-16 or a pinned .tbl table",
+    args: z.object({
+      path: z.string().describe("Local native executable or object file"),
+    }),
+    options: z.object({
+      ...formatSelectionOptions,
+      ...annotationLedgerOptions,
+      provider: providerSelectionOption,
+      pattern: z.string().describe("Text to search for"),
+      encoding: z
+        .enum(NATIVE_TEXT_ENCODINGS)
+        .describe("Encoding that turns the pattern into bytes"),
+      table: z
+        .string()
+        .optional()
+        .describe("Character table as SHA256=ABSOLUTE_PATH (encoding table)"),
+      start: z.string().optional().describe("First address to scan"),
+      end: z.string().optional().describe("Last address to scan (inclusive)"),
+      limit: z.coerce
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Most matches to return; total_matches stays exact"),
+    }),
+    run: ({ args, options }) =>
+      logCliCommand(logger, CLI_COMMANDS.searchNativeEncodedText, () =>
+        runDirectAnalysis(
+          args.path,
+          "search_native_encoded_text",
+          {
+            pattern: options.pattern,
+            encoding: options.encoding,
+            ...(options.table === undefined
+              ? {}
+              : { table: parsePinnedFile(options.table) }),
+            ...(options.start === undefined ? {} : { start: options.start }),
+            ...(options.end === undefined ? {} : { end: options.end }),
+            ...(options.limit === undefined ? {} : { limit: options.limit }),
+          },
+          directAnalysisOptions(logger, undefined, options.provider, options),
+        ),
+      ),
+  });
+  cli.command(CLI_COMMANDS.scanNativePointerTables, {
+    description: "Scan memory for candidate pointer tables",
+    args: z.object({
+      path: z.string().describe("Local native executable or object file"),
+    }),
+    options: z.object({
+      ...formatSelectionOptions,
+      ...annotationLedgerOptions,
+      provider: providerSelectionOption,
+      entrySize: z.coerce
+        .number()
+        .int()
+        .describe("Pointer width in bytes: 2, 4 or 8"),
+      endianness: z.enum(["little", "big"]).describe("Byte order of entries"),
+      minEntries: z.coerce
+        .number()
+        .int()
+        .optional()
+        .describe("Shortest run to report (default 8)"),
+      targetBase: z
+        .string()
+        .optional()
+        .describe("Hex offset added to each value before it is resolved"),
+      targetStart: z.string().optional().describe("First valid target address"),
+      targetEnd: z.string().optional().describe("Last valid target address"),
+      requireAscending: z
+        .boolean()
+        .default(true)
+        .describe("Require strictly ascending targets"),
+      start: z.string().optional().describe("First address to scan"),
+      end: z.string().optional().describe("Last address to scan (inclusive)"),
+      limit: z.coerce
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Most candidates to return; total_candidates stays exact"),
+    }),
+    run: ({ args, options }) =>
+      logCliCommand(logger, CLI_COMMANDS.scanNativePointerTables, () =>
+        runDirectAnalysis(
+          args.path,
+          "scan_native_pointer_tables",
+          {
+            entry_size: options.entrySize,
+            endianness: options.endianness,
+            require_ascending: options.requireAscending,
+            ...(options.minEntries === undefined
+              ? {}
+              : { min_entries: options.minEntries }),
+            ...(options.targetBase === undefined
+              ? {}
+              : { target_base: options.targetBase }),
+            ...(options.targetStart === undefined
+              ? {}
+              : { target_start: options.targetStart }),
+            ...(options.targetEnd === undefined
+              ? {}
+              : { target_end: options.targetEnd }),
+            ...(options.start === undefined ? {} : { start: options.start }),
+            ...(options.end === undefined ? {} : { end: options.end }),
+            ...(options.limit === undefined ? {} : { limit: options.limit }),
           },
           directAnalysisOptions(logger, undefined, options.provider, options),
         ),
@@ -731,8 +845,8 @@ const registerAnnotationSetCommand = (
   });
 };
 
-/** Split a `SHA256=PATH` option; the digest never contains `=`, so paths may. */
-const parseSignatureDatabase = (value: string) => {
+/** Split a `SHA256=PATH` option for a pinned file; the digest never contains `=`, so paths may. */
+const parsePinnedFile = (value: string) => {
   const split = value.indexOf("=");
   return {
     sha256: split < 0 ? "" : value.slice(0, split),

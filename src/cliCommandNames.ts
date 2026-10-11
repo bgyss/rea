@@ -41,6 +41,8 @@ export const CLI_COMMANDS = Object.freeze({
   inspectNativeInstruction: "inspect-native-instruction",
   inspectNativeFunctionInstructions: "inspect-native-function-instructions",
   matchNativeFunctionSignatures: "match-native-function-signatures",
+  searchNativeEncodedText: "search-native-encoded-text",
+  scanNativePointerTables: "scan-native-pointer-tables",
   resolveNativeCallTargets: "resolve-native-call-targets",
   inspectAssetCatalog: "inspect-asset-catalog",
   inspectManagedArtifact: "inspect-managed-artifact",

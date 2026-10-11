@@ -154,6 +154,11 @@ Run Ghidra FID or BSim against operator-supplied databases (pinned by digest). M
 
 `search_strings` and `list_strings` gain an `encoding` parameter (`shift_jis`, `euc_jp`, `utf16le`, or a custom `.tbl` file by path and digest), plus a pointer-table candidate scan. Results preserve exact source bytes and offsets (the dcomp M10 catalog requirements).
 
+**Status: search and pointer scan implemented on `feat/encoded-string-search`; `list_strings` is unchanged.** Two new tools instead of an `encoding` parameter on the existing ones: `search_strings` matches Ghidra's defined-string inventory, which has no raw bytes or encoding, while `search_native_encoded_text` encodes the pattern and scans initialized memory. `scan_native_pointer_tables` takes `entry_size`, `endianness`, `min_entries`, `target_base`, target and scan windows.
+
+- **Verified.** `verify:ghidra:text` (real Ghidra 12.1.4, authored 6502 raw image): Shift-JIS, EUC-JP, UTF-16LE and a pinned `.tbl` (with a double-character entry) match at the authored addresses with exact bytes and file offsets; a wrong table digest and an unencodable character are refused; window, limit and exact totals; the authored ten-entry pointer table is the only candidate; CLI and MCP agree.
+- **Not yet.** Decoding the strings a pointer table addresses, or listing every string in an encoding (a `list_strings` equivalent), is not provided. Matches are not checked for character boundaries. Only a 6502 image was exercised; wider pointers and big-endian tables are covered only by the scan's own arguments.
+
 ## P1: UI/UX lane (see [ui-evidence](ui-evidence.md))
 
 ### B14. Selector model and node geometry (U1, U2)
