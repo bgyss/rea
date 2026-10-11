@@ -237,10 +237,15 @@ try {
     scenarioStatus = "selected-AX-button-action-and-CLI-MCP-parity-observed";
 
     // Attribute and selector coverage against fresh, unmodified fixture state.
-    const fresh = await observeNativeUi(target.value, "observe_native_ui", {
-      ...scope,
-      screenshot: false,
-    });
+    const fresh = await observeNativeUi(
+      target.value,
+      "observe_native_ui",
+      {
+        ...scope,
+        screenshot: false,
+      },
+      { environment: process.env },
+    );
     if (!fresh.ok) throw fresh.error;
     const byIdentifier = (snapshot, identifier) =>
       snapshot?.nodes.find((node) => node.identifier === identifier);
@@ -275,6 +280,7 @@ try {
           { kind: "wait", milliseconds: 200 },
         ],
       },
+      { environment: process.env },
     );
     if (!selected.ok) throw selected.error;
     const final = selected.value.steps.at(-1)?.after;
@@ -300,6 +306,7 @@ try {
         screenshot: false,
         steps: [{ kind: "click", selector: { role: "AXButton" } }],
       },
+      { environment: process.env },
     );
     if (
       !ambiguous.ok ||
@@ -354,6 +361,7 @@ try {
           },
         ],
       },
+      { environment: process.env },
     );
     if (!scenarioSteps.ok) throw scenarioSteps.error;
     const steps = scenarioSteps.value.steps;
@@ -399,6 +407,7 @@ try {
           },
         ],
       },
+      { environment: process.env },
     );
     if (
       !timeout.ok ||
@@ -453,6 +462,7 @@ try {
           },
         ],
       },
+      { environment: process.env },
     );
     if (!pointerScenario.ok) throw pointerScenario.error;
     const pointerSteps = pointerScenario.value.steps;
@@ -500,6 +510,7 @@ try {
           },
         ],
       },
+      { environment: process.env },
     );
     if (
       !occluded.ok ||
