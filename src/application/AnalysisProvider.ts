@@ -1,4 +1,4 @@
-import type { BinaryTarget } from "../domain/binaryTarget.js";
+import type { BinaryTarget } from "../domain/binaryTargetTypes.js";
 import type { OfficialToolName } from "../contracts/officialToolContracts.js";
 import type { EnhancedToolName } from "../contracts/enhancedInputs.js";
 import type { NativeToolName } from "../contracts/native/nativeToolContracts.js";
@@ -19,6 +19,13 @@ import type { ProviderOperationHealth } from "../domain/providerOperationHealth.
 export interface ExecutionOptions {
   readonly signal?: AbortSignal;
   readonly progress?: ProgressReporter;
+  /**
+   * Set when a procedure selector came from provider output, such as a
+   * revisited callee, rather than from the caller. A provider-derived
+   * selector is never the caller's input mistake. Absent means the caller
+   * supplied it.
+   */
+  readonly selectorOrigin?: "provider";
 }
 
 /** Closed operations accepted by provider-backed analysis sessions. */
@@ -41,7 +48,13 @@ export interface AnalysisExecution {
   readonly subject: EvidenceSubjectTarget | null;
 }
 
-/** Build a validated atomic provider observation at an adapter boundary. */
+/**
+ * Build a validated atomic provider observation at an adapter boundary.
+ *
+ * Pass `rawResult` only for a provider representation distinct from
+ * `result`. Omitting it records `null` rather than a second complete copy of
+ * the normalized result in every Evidence record and tool response.
+ */
 export const createAnalysisExecution = (
   result: unknown,
   provider: ProviderIdentity,
@@ -56,7 +69,7 @@ export const createAnalysisExecution = (
   result: jsonValueSchema.parse(result),
   rawResult:
     options.rawResult === undefined
-      ? jsonValueSchema.parse(result)
+      ? null
       : jsonValueSchema.parse(options.rawResult),
   provider,
   ...(options.analysisProfile === undefined
@@ -102,13 +115,12 @@ export interface AnalysisClient extends AnalysisOperationPort {
   requestActivitySnapshots?(): readonly ProviderRequestActivitySnapshot[];
   /** Current operational health for the active provider bridge. */
   operationHealthSnapshot?(): ProviderOperationHealth | undefined;
-  /** Close with a typed result when the provider can verify cleanup. */
-  closeWithOutcome?(
+  /** Close owned resources and retain failed cleanup for a later retry. */
+  close(
     options?: Pick<ExecutionOptions, "progress"> & {
       readonly retainDocument?: boolean;
     },
   ): Promise<Result<null, AnalysisError>>;
-  close(): Promise<void>;
 }
 
 /** Per-client identity allocated before any provider side effect starts. */
@@ -116,22 +128,15 @@ export interface AnalysisClientContext {
   readonly runId: string;
 }
 
-export type AnalysisClientFactory = (
-  target: BinaryTarget,
-  profile?: AnalysisProfileCommitment,
-  context?: AnalysisClientContext,
-) => AnalysisClient;
-
 export interface ProviderIdentity {
   readonly id: string;
   readonly name: string;
   readonly version: string | null;
 }
 
-/** Profile plus opaque compatibility output resolved before provider startup. */
+/** Typed analysis profile resolved before provider startup; null means unresolved. */
 export interface AnalysisProfileResolution {
   readonly profile: AnalysisProfileCommitment | null;
-  readonly compatibility: Readonly<Record<string, JsonValue>>;
 }
 
 /** Cancellation context for side-effect-free provider profile resolution. */
@@ -162,7 +167,12 @@ type CapabilityAvailability =
     };
 
 export type CapabilityDescriptor = CapabilityAvailability & {
-  /** Live external state must be re-observed, including after snapshot import. */
+  /**
+   * Snapshot opts immutable, profile-bound reads into replay despite incidental
+   * private filesystem writes. Live state must always be re-observed. Omitting
+   * this policy retains conservative effect checks; mutation and UI-state
+   * exclusions apply to every policy.
+   */
   readonly cachePolicy?: "snapshot" | "live";
   readonly provider: ProviderIdentity;
   readonly operation: Exclude<AnalysisOperation, "health">;

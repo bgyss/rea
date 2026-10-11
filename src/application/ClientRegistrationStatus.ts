@@ -1,8 +1,14 @@
+import { readClientPolicyBlock } from "./GeminiClientSettings.js";
 import {
+  effectiveClientConfiguration,
+  readClientConfigurationFiles,
+} from "./ClientConfigurationFiles.js";
+import {
+  clientServerForcedEnabled,
+  clientServerListedDisabled,
   effectiveClientServer,
-  parseClientConfiguration,
 } from "./ClientConfigurationDocument.js";
-import { access, readFile } from "node:fs/promises";
+import { access } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { z } from "zod";
@@ -11,10 +17,15 @@ import { PRODUCT_IDENTITY } from "../identity.js";
 import { MCP_STARTUP_POLICY } from "../mcpStartupPolicy.js";
 import {
   isOwnedClientRegistrationCommand,
-  npxRegistrationCommand,
+  packageRunnerRegistrationCommand,
 } from "./ClientRegistrationIdentity.js";
-import { supportedClients } from "./SupportedClients.js";
+import {
+  clientEvidencePaths,
+  manualRegistrationRemediation,
+  supportedClients,
+} from "./SupportedClients.js";
 import type { SetupClient } from "./SupportedClients.js";
+import { compareUnicodeCodePoints } from "../domain/unicodeCodePointOrder.js";
 
 interface ClientRegistrationStatusBase {
   readonly client: string;
@@ -37,7 +48,7 @@ export type ClientRegistrationStatus = ClientRegistrationStatusBase &
       }
     | {
         readonly command: readonly [];
-        readonly state: "missing" | "invalid";
+        readonly state: "missing" | "invalid" | "manual";
         readonly remediation: string;
       }
   );
@@ -73,28 +84,63 @@ export const readClientRegistrationStatuses = async (
   for (const client of supportedClients(
     home,
     options.platform,
-    options.environment === undefined
-      ? undefined
-      : {
-          APPDATA: options.environment.APPDATA,
-          CLAUDE_CONFIG_DIR: options.environment.CLAUDE_CONFIG_DIR,
-          CODEX_HOME: options.environment.CODEX_HOME,
-          COPILOT_HOME: options.environment.COPILOT_HOME,
-          OPENCODE_CONFIG: options.environment.OPENCODE_CONFIG,
-          XDG_CONFIG_HOME: options.environment.XDG_CONFIG_HOME,
-        },
+    options.environment,
   )) {
-    if (
-      client.format === "unsupported" ||
-      (!(await exists(client.markerPath)) && !(await exists(client.configPath)))
-    )
+    if (client.configPathError !== undefined) {
+      statuses.push({
+        client: client.name,
+        config_path: client.configPath,
+        command: [],
+        state: "invalid",
+        remediation: client.configPathError,
+      });
       continue;
+    }
+    if (!(await clientEvidencePresent(client))) continue;
+    const manualRemediation = manualRegistrationRemediation(client.name);
+    if (client.format === "unsupported") {
+      if (manualRemediation !== undefined)
+        statuses.push({
+          client: client.name,
+          config_path: client.markerPath ?? client.configPath,
+          command: [],
+          state: "manual",
+          remediation: manualRemediation,
+        });
+      continue;
+    }
     try {
-      const content = await readFile(client.configPath, "utf8");
-      const raw = effectiveClientServer(
-        parseClientConfiguration(content, client.format),
-        PRODUCT_IDENTITY.mcpServerKey,
-      );
+      const files = await readClientConfigurationFiles(client);
+      if (!files.ok) {
+        statuses.push({
+          client: client.name,
+          config_path: client.configPath,
+          command: [],
+          state: "invalid",
+          remediation: files.error.detail,
+        });
+        continue;
+      }
+      const parsed = effectiveClientConfiguration(files.value);
+      if (parsed === undefined) {
+        statuses.push(
+          unavailableStatus(client.name, client.configPath, "missing"),
+        );
+        continue;
+      }
+      const policy = await readClientPolicyBlock(client, parsed);
+      if (!policy.ok) {
+        statuses.push({
+          client: client.name,
+          config_path: client.configPath,
+          command: [],
+          state: "invalid",
+          remediation: policy.error.detail,
+        });
+        continue;
+      }
+      const policyBlock = policy.value;
+      const raw = effectiveClientServer(parsed, PRODUCT_IDENTITY.mcpServerKey);
       if (raw === undefined) {
         statuses.push(
           unavailableStatus(client.name, client.configPath, "missing"),
@@ -116,9 +162,16 @@ export const readClientRegistrationStatuses = async (
             client,
             currentCommandPath,
             options.platform ?? process.platform,
-          )
+            clientServerForcedEnabled(parsed, PRODUCT_IDENTITY.mcpServerKey),
+          ) &&
+            !clientServerListedDisabled(
+              parsed,
+              PRODUCT_IDENTITY.mcpServerKey,
+            ) &&
+            policyBlock === undefined
             ? "aligned"
             : "stale",
+          policyBlock,
         ),
       );
     } catch (cause: unknown) {
@@ -132,7 +185,7 @@ export const readClientRegistrationStatuses = async (
     }
   }
   return statuses.sort((left, right) =>
-    left.client.localeCompare(right.client),
+    compareUnicodeCodePoints(left.client, right.client),
   );
 };
 
@@ -141,19 +194,30 @@ const registrationAligned = (
   client: SetupClient,
   currentCommandPath: string,
   platform: NodeJS.Platform,
+  forcedEnabled = false,
 ): boolean => {
   const command = [registration.command, ...registration.args];
-  if (registration.disabled === true || registration.enabled === false)
+  if (
+    (client.format !== "grok" && registration.disabled === true) ||
+    (registration.enabled === false && !forcedEnabled)
+  )
     return false;
   if (!isOwnedClientRegistrationCommand(command, currentCommandPath))
     return false;
   if (
-    client.name === "codex" &&
+    (client.name === "codex" || client.name === "grok_build") &&
     registration.startup_timeout_sec !==
       MCP_STARTUP_POLICY.codexStartupTimeoutSeconds
   )
     return false;
   if (client.format === "vscode" && registration.type !== "stdio") return false;
+  // OMP and Pi infer stdio for a command entry without an explicit type.
+  if (
+    (client.format === "omp" || client.format === "pi") &&
+    registration.type !== undefined &&
+    registration.type !== "stdio"
+  )
+    return false;
   if (
     client.format === "copilot_cli" &&
     (registration.type !== "stdio" ||
@@ -169,10 +233,14 @@ const registrationAligned = (
     resolve(command[1] ?? "") === currentCommandPath
   )
     return true;
-  const npxCommand = npxRegistrationCommand(platform);
   if (
-    command.length === npxCommand.length &&
-    command.every((argument, index) => argument === npxCommand[index])
+    (["npx", "bunx"] as const).some((runner) => {
+      const runnerCommand = packageRunnerRegistrationCommand(runner, platform);
+      return (
+        command.length === runnerCommand.length &&
+        command.every((argument, index) => argument === runnerCommand[index])
+      );
+    })
   )
     return true;
   return (
@@ -210,6 +278,12 @@ const parseRegistration = (
     throw new TypeError("Expected an stdio registration");
   if (client.format === "commandcode" && registration.transport !== "stdio")
     throw new TypeError("Expected an stdio registration");
+  if (
+    (client.format === "omp" || client.format === "pi") &&
+    registration.type !== undefined &&
+    registration.type !== "stdio"
+  )
+    throw new TypeError("Expected an stdio registration");
   return registration;
 };
 
@@ -221,10 +295,17 @@ const configuredStatus = (
   configPath: string,
   command: RegistrationCommand,
   state: "aligned" | "stale",
+  policyRemediation?: string,
 ): ClientRegistrationStatus =>
   state === "aligned"
     ? { client, config_path: configPath, command, state, remediation: null }
-    : { client, config_path: configPath, command, state, remediation };
+    : {
+        client,
+        config_path: configPath,
+        command,
+        state,
+        remediation: policyRemediation ?? remediation,
+      };
 
 const unavailableStatus = (
   client: string,
@@ -237,6 +318,12 @@ const unavailableStatus = (
   state,
   remediation,
 });
+
+const clientEvidencePresent = async (client: SetupClient): Promise<boolean> => {
+  for (const path of clientEvidencePaths(client))
+    if (await exists(path)) return true;
+  return false;
+};
 
 const exists = async (path: string | undefined): Promise<boolean> => {
   if (path === undefined) return false;

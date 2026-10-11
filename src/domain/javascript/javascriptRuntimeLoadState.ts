@@ -1,4 +1,4 @@
-import { type ApplicationNode } from "./javascriptApplicationGraph.js";
+import type { ApplicationNode } from "./javascriptApplicationGraphSchemas.js";
 import { uniqueSorted } from "../canonicalOrdering.js";
 import type { ParsedStaticLayer } from "./javascriptRuntimeReconciliationParsing.js";
 import type {
@@ -62,9 +62,7 @@ const classifyLayer = (
     options.reconciliationComplete &&
     layer.graph.coverage.status === "complete" &&
     scopedEntities.length > 0 &&
-    scopedEntities.every(({ capture }) =>
-      captureScriptsComplete(capture.evidence.evidence_id, runtimeEntities),
-    );
+    scopedEntities.every(({ capture }) => capture.scriptsCompleteWithinScope);
   const states = nodes.map((node) => {
     const runtimeNodeIds = uniqueSorted(direct.get(node.node_id) ?? []);
     if (runtimeNodeIds.length > 0)
@@ -133,13 +131,6 @@ const append = (
   if (current === undefined) values.set(key, [value]);
   else current.push(value);
 };
-
-const captureScriptsComplete = (
-  evidenceId: string,
-  entities: readonly RuntimeReconciliationEntity[],
-): boolean =>
-  entities.find(({ capture }) => capture.evidence.evidence_id === evidenceId)
-    ?.capture.scriptsCompleteWithinScope === true;
 
 const isLoadStateNode = (
   node: ApplicationNode,

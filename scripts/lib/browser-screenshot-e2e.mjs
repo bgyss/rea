@@ -1,3 +1,4 @@
+import { requireMcpToolError } from "./mcp-verifier-results.mjs";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -94,10 +95,7 @@ export async function verifyLargeScreenshotE2e(endpoint, origin) {
       { timeout: 60000 },
     );
     assert.notEqual(captured.isError, true, JSON.stringify(captured));
-    const mcpEvidence = parseEvidence({
-      ...captured.structuredContent?.evidence,
-      normalized_result: captured.structuredContent?.result,
-    });
+    const mcpEvidence = parseEvidence(captured.structuredContent);
     const mcpScreenshot = webScreenshotSchema.parse(
       mcpEvidence.normalized_result,
     );
@@ -161,11 +159,11 @@ const verifyDefaultScreenshotDelivery = async ({
     );
     assert.equal(constrained.isError, true);
     assert.equal(
-      constrained.structuredContent?.error?.details?.resource,
+      requireMcpToolError(constrained)?.details?.resource,
       "transport",
     );
     const reference =
-      constrained.structuredContent?.error?.details?.reported_limits
+      requireMcpToolError(constrained)?.details?.reported_limits
         ?.evidence_reference;
     assert.equal(reference?.kind, "retained-evidence");
     await client.ping();

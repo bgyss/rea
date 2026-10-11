@@ -6,7 +6,7 @@ import {
   collectJavaScriptExports,
   fingerprintJavaScriptAst,
 } from "./javascriptAstFingerprint.js";
-import { compareCodePoints } from "../canonicalOrdering.js";
+import { compareUnicodeCodePoints } from "../unicodeCodePointOrder.js";
 import { addFindingOnce } from "./javascriptStaticAnalysisFindings.js";
 import {
   argumentValue,
@@ -40,7 +40,7 @@ export const inspectBundlerRegistration = (
   const table = entry.elements[1];
   const runtimeValue = runtimeMetadata(entry.elements[2]);
   if (!t.isArrayExpression(chunkIds) || !t.isObjectExpression(table)) return;
-  const recovered = recoverBundlerModules(source, table, accumulator);
+  const recovered = recoverBundlerModules(source, table, runtime, accumulator);
   const chunkKeys = staticArrayValues(chunkIds);
   accumulator.unknownFindings += chunkKeys.unknown;
   accumulator.unknownFindings +=
@@ -66,7 +66,7 @@ export const inspectBundlerRegistration = (
     unknown_async_chunk_keys:
       runtimeValue.unknownAsyncChunkKeys + recovered.unknownAsyncChunkKeys,
     modules: recovered.modules.sort((left, right) =>
-      compareCodePoints(left.module_key, right.module_key),
+      compareUnicodeCodePoints(left.module_key, right.module_key),
     ),
     location: range(call),
   };
@@ -92,12 +92,13 @@ export const inspectEsbuildWrapper = (
         : null;
   const table = call.arguments[0];
   if (wrapperKind === null || !t.isObjectExpression(table)) return;
-  const recovered = recoverBundlerModules(source, table, accumulator);
+  const runtime = `esbuild-${wrapperKind}`;
+  const recovered = recoverBundlerModules(source, table, runtime, accumulator);
   if (recovered.modules.length === 0) return;
   accumulator.unknownFindings += recovered.unknownAsyncChunkKeys;
   const registration: JavaScriptBundlerRegistration = {
     bundler: "esbuild",
-    runtime: `esbuild-${wrapperKind}`,
+    runtime,
     chunk_keys: [`${wrapperKind}@${String(call.start ?? 0)}`],
     unknown_chunk_keys: 0,
     runtime_require_name: null,
@@ -107,7 +108,7 @@ export const inspectEsbuildWrapper = (
     async_chunk_keys: recovered.asyncChunkKeys,
     unknown_async_chunk_keys: recovered.unknownAsyncChunkKeys,
     modules: recovered.modules.sort((left, right) =>
-      compareCodePoints(left.module_key, right.module_key),
+      compareUnicodeCodePoints(left.module_key, right.module_key),
     ),
     location: range(call),
   };
@@ -127,13 +128,19 @@ interface RecoveredBundlerModules {
 const recoverBundlerModules = (
   source: string,
   table: t.ObjectExpression,
+  runtime: string,
   accumulator: AnalysisAccumulator,
 ): RecoveredBundlerModules => {
   const modules: JavaScriptBundlerModule[] = [];
   const asyncChunkKeys: string[] = [];
   let unknownAsyncChunkKeys = 0;
   for (const property of table.properties) {
-    const recovered = recoverBundlerModule(source, property, accumulator);
+    const recovered = recoverBundlerModule(
+      source,
+      property,
+      runtime,
+      accumulator,
+    );
     if (recovered === null) continue;
     modules.push(recovered.module);
     asyncChunkKeys.push(...recovered.asyncChunkKeys);
@@ -149,6 +156,7 @@ const recoverBundlerModules = (
 const recoverBundlerModule = (
   source: string,
   property: t.ObjectMethod | t.ObjectProperty | t.SpreadElement,
+  runtime: string,
   accumulator: AnalysisAccumulator,
 ): {
   readonly module: JavaScriptBundlerModule;
@@ -169,6 +177,7 @@ const recoverBundlerModule = (
       start: factory.start,
       end: factory.end,
       key,
+      runtime,
       requireName,
     };
     accumulator.moduleRangeIndex.add(moduleRange);
@@ -225,7 +234,7 @@ const runtimeMetadata = (node: t.Node | null | undefined): RuntimeMetadata => {
       asyncChunkKeys: [],
       unknownAsyncChunkKeys: 0,
     };
-  const entries = collectBundlerEntryModuleKeys(node, requireName);
+  const entries = collectBundlerCallArgumentValues(node, requireName);
   const asyncChunks = collectBundlerAsyncChunkKeys(node, requireName);
   return {
     requireName,
@@ -235,11 +244,6 @@ const runtimeMetadata = (node: t.Node | null | undefined): RuntimeMetadata => {
     unknownAsyncChunkKeys: asyncChunks.unknown,
   };
 };
-
-const collectBundlerEntryModuleKeys = (
-  factory: BundlerFunction,
-  requireName: string,
-): StaticValues => collectBundlerCallArgumentValues(factory, requireName);
 
 const collectBundlerAsyncChunkKeys = (
   factory: BundlerFunction,
@@ -277,7 +281,7 @@ const isBundlerFunction = (
   t.isObjectMethod(node);
 
 const uniqueValues = (values: readonly string[], unknown = 0): StaticValues => {
-  const unique = [...new Set(values)].sort(compareCodePoints);
+  const unique = [...new Set(values)].sort(compareUnicodeCodePoints);
   return {
     values: unique,
     unknown,

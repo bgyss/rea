@@ -11,25 +11,14 @@ import { supportedClients } from "../../../src/application/SupportedClients.js";
 import { PRODUCT_IDENTITY } from "../../../src/identity.js";
 import { isOwnedClientRegistrationCommand } from "../../../src/application/ClientRegistrationIdentity.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
+import {
+  clearClientLocationEnvironment,
+  NPX_REGISTRATION_COMMAND,
+} from "../../fixtures/clientEnvironment.js";
 
-const command = [
-  "npx",
-  "-y",
-  PRODUCT_IDENTITY.registrationPackageSpecifier,
-  "mcp",
-] as const;
+const command = NPX_REGISTRATION_COMMAND;
 
-beforeEach(() => {
-  for (const name of [
-    "APPDATA",
-    "CLAUDE_CONFIG_DIR",
-    "CODEX_HOME",
-    "COPILOT_HOME",
-    "OPENCODE_CONFIG",
-    "XDG_CONFIG_HOME",
-  ])
-    vi.stubEnv(name, undefined);
-});
+beforeEach(clearClientLocationEnvironment);
 
 afterEach(() => vi.unstubAllEnvs());
 
@@ -42,6 +31,8 @@ const getClients = (home: string) =>
       "commandcode",
       "vscode",
       "devin",
+      "omp",
+      "pi",
     ].includes(name),
   );
 
@@ -53,6 +44,8 @@ describe("additional client configuration dialects", () => {
     "commandcode",
     "vscode",
     "devin",
+    "omp",
+    "pi",
   ] as const)("registers, reads back, and uninstalls %s", async (name) => {
     const home = await createTestTempDirectory("rea-client-dialect-");
     const client = getClients(home).find(
@@ -87,7 +80,7 @@ describe("additional client configuration dialects", () => {
         command,
         enabled: true,
       });
-    if (name === "vscode")
+    if (name === "vscode" || name === "omp" || name === "pi")
       expect(registration).toMatchObject({
         type: "stdio",
         command: "npx",
@@ -398,6 +391,40 @@ describe("platform-aware client config paths", () => {
     },
   );
 
+  it("honors Grok Build and Grok Bot configuration roots", () => {
+    expect(
+      supportedClients("/home/a", "linux", {
+        GROK_HOME: "/custom/grok",
+        SAND_DATA_ROOT: "/custom/grokbot",
+      }).filter(({ name }) => name === "grok_build" || name === "grok_bot"),
+    ).toEqual([
+      expect.objectContaining({
+        name: "grok_build",
+        displayName: "Grok Build",
+        configPath: "/custom/grok/config.toml",
+        markerPath: "/custom/grok",
+        format: "grok",
+      }),
+      expect.objectContaining({
+        name: "grok_bot",
+        displayName: "Grok Bot",
+        configPath: "/custom/grokbot",
+        markerPath: "/custom/grokbot",
+        format: "unsupported",
+      }),
+    ]);
+    expect(
+      supportedClients("/home/a", "linux", {
+        SAND_DATA_ROOT: "relative/sand",
+      }).find(({ name }) => name === "grok_bot")?.configPath,
+    ).toBe("/home/a/.grokbot");
+    expect(
+      supportedClients("/home/a", "darwin", {}).find(
+        ({ name }) => name === "grok_build",
+      )?.configPath,
+    ).toBe("/home/a/.grok/config.toml");
+  });
+
   it("honors Copilot CLI and Devin platform configuration roots", () => {
     expect(
       supportedClients("/home/a", "linux", {
@@ -458,6 +485,16 @@ describe("platform-aware client config paths", () => {
     ).toBe(true);
     expect(
       isOwnedClientRegistrationCommand(["npx", "-y", "another-package", "mcp"]),
+    ).toBe(false);
+    expect(
+      isOwnedClientRegistrationCommand([
+        "bunx",
+        `${PRODUCT_IDENTITY.packageName}@3.2.0`,
+        "mcp",
+      ]),
+    ).toBe(true);
+    expect(
+      isOwnedClientRegistrationCommand(["bunx", "another-package", "mcp"]),
     ).toBe(false);
     expect(
       isOwnedClientRegistrationCommand(

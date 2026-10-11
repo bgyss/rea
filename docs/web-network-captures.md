@@ -125,6 +125,21 @@ both commands have a 30-second wall deadline and independently supervised
 process cleanup. Owned decoder diagnostics retain at most 1 MiB across stdout
 and stderr; the collector drops overflow as it arrives, reports the limit
 failure and verifies cleanup. Heap limits alone do not establish aggregate RSS limits.
+When REA runs on Bun, the HAR decoder runs on Bun, which ignores these V8 heap
+flags; its limitations and resource failures then omit the heap sizes. On
+Windows, the decoder's owned Job Object instead limits its committed memory to
+704 MiB, the 192 MiB budget plus a 512 MiB reserve for Bun itself. The
+limitations state that limit, and reaching it returns `resource_constraint`
+with `process_memory_limit_bytes`, whatever exit status Bun reports.
+
+Observed decoder memory exhaustion returns `resource_constraint`, with the
+selected capture, applicable limits and retained process diagnostics. HAR's
+old-generation heap is fixed; inherited `NODE_OPTIONS` cannot raise it.
+Record selection happens after complete decoding and does not reduce that
+workload. Use a smaller capture exported by its producer or another decoder
+with sufficient capacity, retaining the original for provenance. Subsets do
+not establish complete-capture coverage. Repeating the same workload or
+running provider health diagnostics does not resolve the heap constraint.
 
 Stable regular-file reads reject symlinks, replacement and concurrent changes.
 Private snapshots, declarations and tool configuration are removed before the

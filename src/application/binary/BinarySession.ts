@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
 
-import type { BinaryTarget } from "../../domain/binaryTarget.js";
+import type { BinaryTarget } from "../../domain/binaryTargetTypes.js";
 import {
   analysisProfilesEqual,
   type AnalysisProfileCommitment,
 } from "../../domain/analysisProfile.js";
 import { AnalysisCancelledError } from "../../domain/analysisErrorCore.js";
-import { type AnalysisError } from "../../domain/analysisErrorBase.js";
+import type { AnalysisError } from "../../domain/analysisErrorBase.js";
 import { err, ok, type Result } from "../../domain/result.js";
 import type { JsonValue } from "../../domain/jsonValue.js";
 import { createEvidence } from "../../domain/evidence.js";
@@ -45,13 +45,21 @@ import {
   prepareSessionExecution,
 } from "./BinarySessionExecution.js";
 import { closeAnalysisClient } from "./AnalysisClientCleanup.js";
-export type { BinarySessionPort } from "./BinarySessionPort.js";
+import { analysisErrorWithCleanupFailure } from "../../domain/analysisErrorCleanup.js";
 const OFFICIAL_OPERATIONS: ReadonlySet<string> = new Set(
   OFFICIAL_TOOL_CONTRACTS.map(({ name }) => name),
 );
 const ENHANCED_OPERATIONS: ReadonlySet<string> = new Set(
   ENHANCED_TOOL_CONTRACTS.map(({ name }) => name),
 );
+
+interface SessionBinding {
+  readonly target: BinaryTarget;
+  readonly client: AnalysisClient;
+  readonly profile: AnalysisProfileCommitment | null;
+  readonly route: SessionProviderRoute;
+  readonly runId: string;
+}
 
 /**
  * Owns the single active target shared by CLI and MCP adapters.
@@ -64,14 +72,12 @@ export class BinarySession
   extends BinarySessionRecords
   implements BinarySessionPort
 {
-  #active:
+  #active: SessionBinding | undefined;
+  #pendingCleanup:
     | {
-        readonly target: BinaryTarget;
         readonly client: AnalysisClient;
-        readonly profile: AnalysisProfileCommitment | null;
-        readonly compatibility: Readonly<Record<string, JsonValue>>;
-        readonly route: SessionProviderRoute;
-        readonly runId: string;
+        readonly providerId: string;
+        readonly retainDocument: boolean;
       }
     | undefined;
   #transition: Promise<void> = Promise.resolve();
@@ -92,16 +98,40 @@ export class BinarySession
     this.#providerRouter = providerRouter;
   }
 
+  /**
+   * Fast-path liveness gate (#1719): short-circuit only when the retained
+   * client is genuinely alive. The probe reads the child's operation health
+   * rather than the composite's unconditionally-ok `health`, so a dead child
+   * falls through and a real client is started; an aborted caller leaves the
+   * session untouched. Returns the fast-path result, or undefined to fall
+   * through to the slow path.
+   */
+  async #tryRetainedFastPath(
+    retained: SessionBinding,
+    target: BinaryTarget,
+    options: Pick<BinarySessionOpenOptions, "signal" | "snapshot">,
+  ): Promise<Result<BinaryTarget, AnalysisError> | undefined> {
+    const live = await this.#retainedClientLive(retained.client, options);
+    if (isAborted(options.signal))
+      return err(new AnalysisCancelledError("open_binary"));
+    if (!live) return undefined;
+    if (options.snapshot !== undefined) {
+      const imported = this.importAnalysisSnapshot(options.snapshot);
+      if (!imported.ok) return imported;
+    }
+    return ok(target);
+  }
+
   /** Identify the provider producing evidence for this session. */
   providerIdentity(operation?: AnalysisOperation): ProviderIdentity {
     const route = this.#currentRoute();
-    let selected = route.identity;
+    let selected = route.binding?.identity ?? route.identity;
     if (operation !== undefined) {
-      const exact = route.capabilities?.get(operation)?.provider;
+      const exact = route.capabilities.get(operation)?.provider;
       if (exact !== undefined) selected = exact;
       else if (ENHANCED_OPERATIONS.has(operation)) {
         const providers = new Map<string, ProviderIdentity>();
-        for (const descriptor of route.capabilities?.values() ?? [])
+        for (const descriptor of route.capabilities.values())
           if (
             descriptor.available &&
             OFFICIAL_OPERATIONS.has(descriptor.operation)
@@ -145,11 +175,6 @@ export class BinarySession
     )
       return undefined;
     return structuredClone(profile);
-  }
-
-  /** Return opaque adapter metadata retained for legacy open_binary output. */
-  openCompatibility(): Readonly<Record<string, JsonValue>> {
-    return structuredClone(this.#active?.compatibility ?? {});
   }
 
   /** Observe runtime provider-health changes that affect discovery metadata. */
@@ -231,7 +256,7 @@ export class BinarySession
       const resolved = await resolve();
       if (!resolved.ok) return resolved;
       const { target, route, sameTarget } = resolved.value;
-      const { profile, compatibility } = route;
+      const { profile } = route;
       if (isAborted(options.signal))
         return err(new AnalysisCancelledError("open_binary"));
       const activeProfile = this.#active?.profile;
@@ -242,17 +267,23 @@ export class BinarySession
       await this.#drainCalls(admittedThrough);
       if (isAborted(options.signal))
         return err(new AnalysisCancelledError("open_binary"));
-      if (sameTarget && sameProfile) {
-        if (options.snapshot !== undefined) {
-          const imported = this.importAnalysisSnapshot(options.snapshot);
-          if (!imported.ok) return imported;
-        }
-        return ok(target);
+      const pendingClosed = await this.#retryPendingCleanup();
+      if (!pendingClosed.ok) return pendingClosed;
+      if (isAborted(options.signal))
+        return err(new AnalysisCancelledError("open_binary"));
+      const retained = sameTarget && sameProfile ? this.#active : undefined;
+      if (retained !== undefined) {
+        const fastPath = await this.#tryRetainedFastPath(
+          retained,
+          target,
+          options,
+        );
+        if (fastPath !== undefined) return fastPath;
       }
       const previous = this.#active;
       this.#active = undefined;
       if (previous !== undefined) {
-        const closed = await closeAnalysisClient(
+        const closed = await this.#retireClient(
           previous.client,
           previous.route.identity.id,
         );
@@ -262,24 +293,40 @@ export class BinarySession
           return closed;
         }
       }
+      if (isAborted(options.signal))
+        return err(
+          await this.#restoreAfterFailedOpen(
+            previous,
+            new AnalysisCancelledError("open_binary"),
+          ),
+        );
       const runId = randomUUID();
       const client = route.createClient(target, { runId });
       const started = await client.execute("health", {}, options);
       if (!started.ok) {
-        await client.close();
-        await this.#restore(previous);
-        return started;
+        return err(
+          await this.#failedOpen(
+            client,
+            route.identity.id,
+            previous,
+            started.error,
+          ),
+        );
       }
       if (isAborted(options.signal)) {
-        await client.close();
-        await this.#restore(previous);
-        return err(new AnalysisCancelledError("open_binary"));
+        return err(
+          await this.#failedOpen(
+            client,
+            route.identity.id,
+            previous,
+            new AnalysisCancelledError("open_binary"),
+          ),
+        );
       }
       this.#active = {
         target,
         client,
         profile,
-        compatibility: structuredClone(compatibility),
         route,
         runId,
       };
@@ -293,9 +340,14 @@ export class BinarySession
         const imported = this.importAnalysisSnapshot(options.snapshot);
         if (!imported.ok) {
           this.#active = undefined;
-          await client.close();
-          await this.#restore(previous);
-          return imported;
+          return err(
+            await this.#failedOpen(
+              client,
+              route.identity.id,
+              previous,
+              imported.error,
+            ),
+          );
         }
       }
       return ok(target);
@@ -332,7 +384,12 @@ export class BinarySession
       if (!written.ok) return written;
       const closed = await this.#closeActive(options);
       return closed.ok
-        ? ok({ ...written.value, entries: snapshot.value.entries.length })
+        ? ok({
+            ...written.value,
+            primitive_entries: snapshot.value.entries.length,
+            workflow_entries: snapshot.value.workflow_entries.length,
+            evidence_records: snapshot.value.evidence_bundle.records.length,
+          })
         : closed;
     });
   }
@@ -346,8 +403,11 @@ export class BinarySession
     this.#active = undefined;
     const closed =
       previous === undefined
-        ? ok(null)
-        : await closeAnalysisClient(
+        ? await this.#retryPendingCleanup(
+            options.progress,
+            options.retainProviderDocuments,
+          )
+        : await this.#retireClient(
             previous.client,
             previous.route.identity.id,
             {
@@ -362,6 +422,69 @@ export class BinarySession
     this.clearSessionRecords();
     this.#clearRuntimeAvailability();
     return closed;
+  }
+
+  async #retireClient(
+    client: AnalysisClient,
+    providerId: string,
+    options: Pick<ExecutionOptions, "progress"> & {
+      readonly retainDocument?: boolean;
+    } = {},
+  ): Promise<Result<null, AnalysisError>> {
+    this.#pendingCleanup = {
+      client,
+      providerId,
+      retainDocument: options.retainDocument === true,
+    };
+    return this.#retryPendingCleanup(options.progress);
+  }
+
+  async #retryPendingCleanup(
+    progress?: ExecutionOptions["progress"],
+    retainDocument?: boolean,
+  ): Promise<Result<null, AnalysisError>> {
+    let pending = this.#pendingCleanup;
+    if (pending === undefined) return ok(null);
+    if (retainDocument !== undefined) {
+      pending = { ...pending, retainDocument };
+      this.#pendingCleanup = pending;
+    }
+    const closed = await closeAnalysisClient(
+      pending.client,
+      pending.providerId,
+      {
+        ...(progress === undefined ? {} : { progress }),
+        ...(pending.retainDocument ? { retainDocument: true } : {}),
+      },
+    );
+    if (closed.ok) this.#pendingCleanup = undefined;
+    return closed;
+  }
+
+  async #failedOpen(
+    client: AnalysisClient,
+    providerId: string,
+    previous: SessionBinding | undefined,
+    primary: AnalysisError,
+  ): Promise<AnalysisError> {
+    const closed = await this.#retireClient(client, providerId);
+    if (!closed.ok)
+      return analysisErrorWithCleanupFailure(
+        primary,
+        closed.error,
+        "open_binary",
+      );
+    return this.#restoreAfterFailedOpen(previous, primary);
+  }
+
+  async #restoreAfterFailedOpen(
+    previous: SessionBinding | undefined,
+    primary: AnalysisError,
+  ): Promise<AnalysisError> {
+    const restored = await this.#restore(previous);
+    return restored.ok
+      ? primary
+      : analysisErrorWithCleanupFailure(primary, restored.error, "open_binary");
   }
 
   /** Describe the active binary session. */
@@ -400,7 +523,7 @@ export class BinarySession
   execute(
     name: Parameters<AnalysisOperationPort["execute"]>[0],
     arguments_: Readonly<Record<string, JsonValue>>,
-    options?: { readonly signal?: AbortSignal },
+    options?: Pick<ExecutionOptions, "signal" | "selectorOrigin">,
   ): Promise<Result<AnalysisExecution, AnalysisError>> {
     const generation = this.#transitionGeneration;
     const call = this.#execute(name, arguments_, options, this.#transition);
@@ -408,10 +531,37 @@ export class BinarySession
     return call.finally(() => this.#calls.delete(call));
   }
 
+  /** Admit one composed request until its result and session bookkeeping settle. */
+  withAdmittedAnalysis<Value>(
+    operationName: string,
+    signal: AbortSignal | undefined,
+    operation: (analysis: AnalysisOperationPort) => Promise<Value>,
+  ): Promise<Result<Value, AnalysisError>> {
+    const generation = this.#transitionGeneration;
+    const transition = this.#transition;
+    const call = (async (): Promise<Result<Value, AnalysisError>> => {
+      const admission = await this.#waitForTransition(
+        operationName,
+        signal,
+        transition,
+      );
+      if (!admission.ok) return admission;
+      return ok(
+        await operation({
+          execute: (name, arguments_, options) =>
+            this.#execute(name, arguments_, options, Promise.resolve()),
+        }),
+      );
+    })();
+    // Register synchronously before a lifecycle transition can snapshot calls.
+    this.#calls.set(call, generation);
+    return call.finally(() => this.#calls.delete(call));
+  }
+
   async #execute(
     name: Parameters<AnalysisOperationPort["execute"]>[0],
     arguments_: Readonly<Record<string, JsonValue>>,
-    options: { readonly signal?: AbortSignal } | undefined,
+    options: Pick<ExecutionOptions, "signal" | "selectorOrigin"> | undefined,
     transition: Promise<void>,
   ): Promise<Result<AnalysisExecution, AnalysisError>> {
     const transitioned = await this.#waitForTransition(
@@ -476,7 +626,7 @@ export class BinarySession
         parameters: arguments_,
         execution: profiled.value,
       });
-    } else if (profiled.ok && capability?.effects.mutatesArtifact === true) {
+    } else if (profiled.ok && capability.effects.mutatesArtifact) {
       this.invalidateSnapshot();
     }
     return profiled;
@@ -579,32 +729,63 @@ export class BinarySession
     );
   }
 
+  /**
+   * Probe whether a retained provider client is still live.
+   *
+   * On production routes the client is a CompositeProvider whose `health`
+   * answers unconditionally ok without touching a child, so `health` alone
+   * cannot see a dead child. `operationHealthSnapshot` reaches the
+   * instantiated children instead. Only the known-live states allow the
+   * fast path: `exited`/`unreachable` are dead, `unknown` is never
+   * evidence of health (it is what a recorded but uncharacterized failure
+   * reports), and `not_started` is a startup that never completed — in the
+   * Hopper timeout case the client holds retained resources that block the
+   * next `start()` until `close()` retries cleanup, so treating it as live
+   * would skip the retire path and hand the wedged client to subsequent
+   * analysis. The gate fails closed: without a snapshot signal, fall back
+   * to the `health` admission probe.
+   */
+  async #retainedClientLive(
+    client: AnalysisClient,
+    options: Pick<BinarySessionOpenOptions, "signal">,
+  ): Promise<boolean> {
+    const snapshot = client.operationHealthSnapshot?.();
+    if (snapshot !== undefined)
+      return snapshot.state === "idle" || snapshot.state === "busy";
+    try {
+      return (await client.execute("health", {}, options)).ok;
+    } catch {
+      return false;
+    }
+  }
+
   async #restore(
-    previous:
-      | {
-          readonly target: BinaryTarget;
-          readonly client: AnalysisClient;
-          readonly profile: AnalysisProfileCommitment | null;
-          readonly compatibility: Readonly<Record<string, JsonValue>>;
-          readonly route: SessionProviderRoute;
-          readonly runId: string;
-        }
-      | undefined,
-  ): Promise<void> {
-    if (previous === undefined) return;
+    previous: SessionBinding | undefined,
+  ): Promise<Result<null, AnalysisError>> {
+    if (previous === undefined) return ok(null);
     const runId = randomUUID();
     const client = previous.route.createClient(previous.target, { runId });
     const started = await client.execute("health", {});
-    if (started.ok)
+    if (started.ok) {
       this.#active = {
         target: previous.target,
         client,
         profile: previous.profile,
-        compatibility: previous.compatibility,
         route: previous.route,
         runId,
       };
-    else await client.close();
+      return ok(null);
+    }
+    const closed = await this.#retireClient(client, previous.route.identity.id);
+    return closed.ok
+      ? ok(null)
+      : err(
+          analysisErrorWithCleanupFailure(
+            started.error,
+            closed.error,
+            "open_binary",
+          ),
+        );
   }
 
   async #waitForTransition(

@@ -1,10 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import { CdpBrowserProvider } from "../../../src/browser/CdpBrowserProvider.js";
-import {
-  inspectWebPageInputSchema,
-  webPageInspectionSchema,
-} from "../../../src/domain/browserObservation.js";
+import { inspectWebPageInputSchema } from "../../../src/domain/browserObservation.js";
+import { webPageInspectionSchema } from "../../../src/domain/browserObservationSchemas.js";
 import {
   startFakeCdpBrowser,
   type FakeCdpBrowser,
@@ -71,20 +69,24 @@ describe("CdpBrowserProvider: passive evidence redaction", () => {
       line: 3,
       column: 5,
     });
-    expect(result.value.network.websocket_events).toEqual([
+    expect(result.value.network.websocket_connections).toEqual([
       {
         request_id: "websocket-1",
-        direction: "sent",
-        opcode: 1,
-        payload_bytes: Buffer.byteLength("websocket-secret"),
-        payload_shape: null,
-      },
-      {
-        request_id: "websocket-1",
-        direction: "received",
-        opcode: 2,
-        payload_bytes: 3,
-        payload_shape: null,
+        url: `ws://${new URL(browser.allowedOrigin).host}/live?token=websocket-url-secret`,
+        events: [
+          {
+            direction: "sent",
+            opcode: 1,
+            payload_bytes: Buffer.byteLength("websocket-secret"),
+            payload_shape: null,
+          },
+          {
+            direction: "received",
+            opcode: 2,
+            payload_bytes: 3,
+            payload_shape: null,
+          },
+        ],
       },
     ]);
     expect(result.value.console.events[0]?.argument_types).toEqual(["string"]);
@@ -222,6 +224,7 @@ describe("CdpBrowserProvider: explicitly requested text and payload shapes", () 
     const browser = await startFakeCdpBrowser({
       sensitiveShapes: true,
       binaryWebSocketEvent: true,
+      eventsBeforeReply: ["Network.enable"],
     });
     trackBrowser(browser);
     const result = await new CdpBrowserProvider().inspectPage(
@@ -256,9 +259,15 @@ describe("CdpBrowserProvider: explicitly requested text and payload shapes", () 
       request: {
         root_type: "object",
         properties: expect.arrayContaining([
-          expect.objectContaining({ path: "/token", types: ["string"] }),
           expect.objectContaining({
-            path: "/filters/active",
+            path: [{ kind: "property", name: "token" }],
+            types: ["string"],
+          }),
+          expect.objectContaining({
+            path: [
+              { kind: "property", name: "filters" },
+              { kind: "property", name: "active" },
+            ],
             types: ["boolean"],
           }),
         ]),
@@ -267,31 +276,48 @@ describe("CdpBrowserProvider: explicitly requested text and payload shapes", () 
         root_type: "object",
         properties: expect.arrayContaining([
           expect.objectContaining({
-            path: "/result/token",
+            path: [
+              { kind: "property", name: "result" },
+              { kind: "property", name: "token" },
+            ],
             types: ["string"],
           }),
-          expect.objectContaining({ path: "/items/*/id", types: ["number"] }),
+          expect.objectContaining({
+            path: [
+              { kind: "property", name: "items" },
+              { kind: "array-element" },
+              { kind: "property", name: "id" },
+            ],
+            types: ["number"],
+          }),
         ]),
       },
     });
-    expect(result.value.network.websocket_events).toEqual([
+    expect(result.value.network.websocket_connections).toEqual([
       expect.objectContaining({
-        opcode: 1,
-        payload_shape: expect.objectContaining({
-          format: "json",
-          json_shape: expect.objectContaining({
-            properties: expect.arrayContaining([
-              expect.objectContaining({ path: "/token", types: ["string"] }),
-            ]),
+        events: [
+          expect.objectContaining({
+            opcode: 1,
+            payload_shape: expect.objectContaining({
+              format: "json",
+              json_shape: expect.objectContaining({
+                properties: expect.arrayContaining([
+                  expect.objectContaining({
+                    path: [{ kind: "property", name: "token" }],
+                    types: ["string"],
+                  }),
+                ]),
+              }),
+            }),
           }),
-        }),
-      }),
-      expect.objectContaining({
-        opcode: 2,
-        payload_shape: {
-          format: "binary",
-          json_shape: null,
-        },
+          expect.objectContaining({
+            opcode: 2,
+            payload_shape: {
+              format: "binary",
+              json_shape: null,
+            },
+          }),
+        ],
       }),
     ]);
     const serialized = JSON.stringify(result.value);
@@ -306,6 +332,29 @@ describe("CdpBrowserProvider: explicitly requested text and payload shapes", () 
     expect(methods).toContain("Network.getResponseBody");
     expect(methods).not.toContain("Runtime.getProperties");
     expect(methods).not.toContain("Runtime.callFunctionOn");
+  });
+});
+
+describe("CdpBrowserProvider: WebSocket connection projection", () => {
+  it("retains allowed connections created without observed frames", async () => {
+    const browser = await startFakeCdpBrowser({ webSocketWithoutFrames: true });
+    trackBrowser(browser);
+    const result = await new CdpBrowserProvider().inspectPage(
+      inspectWebPageInputSchema.parse({
+        cdp_endpoint: browser.endpoint,
+        allowed_origins: [browser.allowedOrigin],
+        target_id: "allowed-page",
+        observation_ms: 0,
+      }),
+    );
+    if (!result.ok) throw result.error;
+    expect(result.value.network.websocket_connections).toEqual([
+      {
+        request_id: "websocket-1",
+        url: `ws://${new URL(browser.allowedOrigin).host}/live?token=websocket-url-secret`,
+        events: [],
+      },
+    ]);
   });
 });
 
@@ -342,9 +391,11 @@ describe("CdpBrowserProvider: malformed approved payloads", () => {
       // The security-relevant claim: malformed base64 never yields a shape.
       response: null,
     });
-    expect(result.value.network.websocket_events[1]).toMatchObject({
+    expect(
+      result.value.network.websocket_connections[0]?.events[1],
+    ).toMatchObject({
       opcode: 2,
-      payload_bytes: 0,
+      payload_bytes: null,
       payload_shape: { format: "binary", json_shape: null },
     });
     expect(result.value.completeness.unavailable_sections).toEqual(

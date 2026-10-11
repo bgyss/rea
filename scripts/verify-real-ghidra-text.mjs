@@ -352,13 +352,19 @@ process.stdout.write(
 function digest(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
+/** Evidence carries its operation result as normalized_result. */
+function withResult(content) {
+  return "normalized_result" in content
+    ? { ...content, result: content.normalized_result }
+    : content;
+}
 async function call(name, args = {}) {
   const value = await client.callTool(
     { name, arguments: args },
     { timeout: 240000 },
   );
   assert.notEqual(value.isError, true, JSON.stringify(value));
-  return value.structuredContent;
+  return withResult(value.structuredContent);
 }
 async function refused(name, args, message) {
   const value = await client.callTool(

@@ -4,7 +4,6 @@ import {
   compatibleSlice,
   directoryOf,
   expandPrefix,
-  joinPath,
   resolveTreePath,
   type Expansion,
 } from "./dyldPaths.js";
@@ -19,10 +18,20 @@ import {
   deriveFindings,
 } from "./dylibResolutionFindings.js";
 
-/** Normalized path below the analyzed root: no `.`/`..` or empty segments. */
+/**
+ * Normalized path below the analyzed root: nonempty segments joined by single
+ * `/`, none of them `.` or `..`, without backslash or NUL. Advertised schema
+ * patterns avoid look-around, which RE2 and Rust validators reject.
+ */
 const ROOT_RELATIVE_PATH =
-  /^(?!\/)(?!(?:.*\/)?\.{1,2}(?:\/|$))(?!.*\/\/)(?!.*\/$)[^\\\0]+$/u;
-const rootRelativePathSchema = z.string().min(1).regex(ROOT_RELATIVE_PATH);
+  /^(?:[^\x2f\\\x00.][^\x2f\\\x00]*|\.[^\x2f\\\x00.][^\x2f\\\x00]*|\.\.[^\x2f\\\x00]+)(?:\x2f(?:[^\x2f\\\x00.][^\x2f\\\x00]*|\.[^\x2f\\\x00.][^\x2f\\\x00]*|\.\.[^\x2f\\\x00]+))*$/u;
+const rootRelativePathSchema = z
+  .string()
+  .min(1)
+  .regex(
+    ROOT_RELATIVE_PATH,
+    "Use a normalized path relative to the analyzed root, without a leading or trailing '/', '//', or '.' and '..' segments",
+  );
 
 /** Caller selection of process roots and one CPU slice. */
 export const dylibResolutionInputSchema = z.strictObject({
@@ -265,7 +274,7 @@ const candidateTemplates = (
         path:
           base.scope === "outside"
             ? `${base.path.replace(/\/+$/u, "")}/${rest}`
-            : joinPath(base.path, rest),
+            : `${base.path}${base.path === "" ? "" : "/"}${rest}`,
       };
       return { expansion, source: "rpath" as const, rpath, rpathOwner: owner };
     }),

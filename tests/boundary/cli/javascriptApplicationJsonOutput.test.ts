@@ -5,7 +5,7 @@ import { Filter } from "incur";
 import { expect } from "vitest";
 import { z } from "zod";
 
-import { analyzeJavaScriptApplication } from "../../../src/application/javascript/JavaScriptApplicationService.js";
+import { analyzeJavaScriptApplication } from "../../support/javascriptApplicationScope.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 import { cliTest } from "../../support/cli/cliFixture.js";
 
@@ -99,8 +99,8 @@ cliTest(
       ],
     });
     expect(output.json).toMatchObject({
-      code: "artifact_operation_failed",
-      details: { reason: "io" },
+      code: "invalid_request",
+      details: { issues: [{ path: ["input_path"], reason: "invalid_value" }] },
     });
   },
 );

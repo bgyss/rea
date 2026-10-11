@@ -1,19 +1,19 @@
 import { AnalysisCapabilityUnavailableError } from "../../domain/analysisErrorCore.js";
 import { err, ok } from "../../domain/result.js";
-import type { BinaryTarget } from "../../domain/binaryTarget.js";
+import type { BinaryTarget } from "../../domain/binaryTargetTypes.js";
 import type { AnalysisProfileCommitment } from "../../domain/analysisProfile.js";
 import type {
   AnalysisClient,
   AnalysisClientContext,
-  AnalysisProfileResolutionOptions,
   AnalysisProvider,
   CapabilityDescriptor,
   ProviderIdentity,
 } from "../AnalysisProvider.js";
 import { closeAnalysisClient } from "./AnalysisClientCleanup.js";
+import { compareUnicodeCodePoints } from "../../domain/unicodeCodePointOrder.js";
 
-/** Synthetic compatibility identity for a deterministic provider set. */
-export const compositeProviderIdentity = (
+/** Synthetic identity for a deterministic provider set. */
+const compositeProviderIdentity = (
   identities: readonly ProviderIdentity[],
 ): ProviderIdentity => ({
   id: `composite:${identities
@@ -29,19 +29,10 @@ export class CompositeProvider implements AnalysisProvider {
   readonly #identity: ProviderIdentity;
   readonly #capabilities: readonly CapabilityDescriptor[];
   readonly #providerByOperation: ReadonlyMap<string, AnalysisProvider>;
-  readonly #profileProvider: AnalysisProvider | undefined;
 
   constructor(readonly providers: readonly AnalysisProvider[]) {
     if (providers.length === 0)
       throw new RangeError("CompositeProvider requires at least one provider");
-    const profileProviders = providers.filter(
-      ({ resolveAnalysisProfile }) => resolveAnalysisProfile !== undefined,
-    );
-    if (profileProviders.length > 1)
-      throw new TypeError(
-        "CompositeProvider supports at most one target-bound analysis profile",
-      );
-    this.#profileProvider = profileProviders[0];
     this.#identity = Object.freeze(
       compositeProviderIdentity(
         providers.map((provider) => provider.identity()),
@@ -63,8 +54,8 @@ export class CompositeProvider implements AnalysisProvider {
     this.#capabilities = Object.freeze(
       capabilities.sort(
         (left, right) =>
-          left.operation.localeCompare(right.operation) ||
-          left.provider.id.localeCompare(right.provider.id),
+          compareUnicodeCodePoints(left.operation, right.operation) ||
+          compareUnicodeCodePoints(left.provider.id, right.provider.id),
       ),
     );
   }
@@ -75,16 +66,6 @@ export class CompositeProvider implements AnalysisProvider {
 
   capabilities(): readonly CapabilityDescriptor[] {
     return this.#capabilities;
-  }
-
-  resolveAnalysisProfile(
-    target: BinaryTarget,
-    options?: AnalysisProfileResolutionOptions,
-  ) {
-    const resolve = this.#profileProvider?.resolveAnalysisProfile;
-    return resolve === undefined
-      ? Promise.resolve(ok({ profile: null, compatibility: {} }))
-      : resolve.call(this.#profileProvider, target, options);
   }
 
   createClient(
@@ -104,9 +85,7 @@ export class CompositeProvider implements AnalysisProvider {
       clients.set(provider, created);
       return created;
     };
-    const closeWithOutcome: NonNullable<
-      AnalysisClient["closeWithOutcome"]
-    > = async (options) => {
+    const close: AnalysisClient["close"] = async (options) => {
       const outcomes = await Promise.all(
         [...clients.entries()].map(([provider, client]) =>
           closeAnalysisClient(client, provider.identity().id, options),
@@ -144,13 +123,13 @@ export class CompositeProvider implements AnalysisProvider {
         [...clients.values()]
           .flatMap((client) => client.runtimeLineageSnapshots?.() ?? [])
           .sort((left, right) =>
-            left.provider.id.localeCompare(right.provider.id),
+            compareUnicodeCodePoints(left.provider.id, right.provider.id),
           ),
       requestActivitySnapshots: () =>
         [...clients.values()]
           .flatMap((client) => client.requestActivitySnapshots?.() ?? [])
           .sort((left, right) =>
-            left.provider.id.localeCompare(right.provider.id),
+            compareUnicodeCodePoints(left.provider.id, right.provider.id),
           ),
       operationHealthSnapshot: () => {
         for (const client of clients.values()) {
@@ -164,10 +143,7 @@ export class CompositeProvider implements AnalysisProvider {
         }
         return undefined;
       },
-      closeWithOutcome,
-      close: async () => {
-        await closeWithOutcome();
-      },
+      close,
     };
   }
 }

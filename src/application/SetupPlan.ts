@@ -1,12 +1,11 @@
-import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { PRODUCT_IDENTITY } from "../identity.js";
 import { isOwnedClientRegistrationCommand } from "./ClientRegistrationIdentity.js";
 import {
   linuxHopperInstallDisclosure,
   type LinuxPackageFamily,
 } from "./LinuxHopper.js";
+import type { SkillDestination } from "./SetupSkill.js";
 import { macHopperInstallDisclosure } from "./MacHopper.js";
 import type {
   SetupAction,
@@ -15,14 +14,13 @@ import type {
   SetupProviderEnvironment,
 } from "./SetupTypes.js";
 import type { SetupClient } from "./SupportedClients.js";
-import type { DoctorScope } from "./Doctor.js";
 import type { DoctorReport } from "./Doctor.js";
+import { compareUnicodeCodePoints } from "../domain/unicodeCodePointOrder.js";
 
 /** Read-only setup facts shared by client selection and preflight. */
 export interface SetupDiscovery {
   readonly initialDoctor: Awaited<ReturnType<SetupHost["doctor"]>>;
   readonly installHopper: boolean;
-  readonly skillNeedsInstall: boolean;
   readonly clients: readonly SetupClient[];
   readonly detectedClientIds: readonly string[];
   readonly defaultClientIds: readonly string[];
@@ -36,11 +34,9 @@ export const discoverSetupState = async (input: {
   readonly providerEnvironment: SetupProviderEnvironment;
   readonly forceHopperInstall: boolean;
   readonly proposeHopper: boolean;
-  readonly doctorScope: DoctorScope | undefined;
-  readonly initialDoctor?: DoctorReport;
+  readonly initialDoctor: DoctorReport;
 }): Promise<SetupDiscovery> => {
-  const initialDoctor =
-    input.initialDoctor ?? (await input.host.doctor(input.doctorScope));
+  const { initialDoctor } = input;
   const linuxHopperRepairNeeded = initialDoctor.checks.some(
     ({ name, ok, detail }) =>
       !ok &&
@@ -61,10 +57,9 @@ export const discoverSetupState = async (input: {
       input.proposeHopper &&
       (Object.keys(input.providerEnvironment).length === 0 ||
         linuxHopperRepairNeeded));
-  const [clients, detectedClients, skillNeedsInstall] = await Promise.all([
-    input.host.supportedClients?.() ?? input.host.detectedClients(),
+  const [clients, detectedClients] = await Promise.all([
+    input.host.supportedClients(),
     input.host.detectedClients(),
-    input.host.skillNeedsInstall(),
   ]);
   const detectedIds = new Set(detectedClients.map(({ name }) => name));
   const registrations = initialDoctor.identity?.registrations ?? [];
@@ -104,7 +99,6 @@ export const discoverSetupState = async (input: {
   return {
     initialDoctor,
     installHopper,
-    skillNeedsInstall,
     clients,
     detectedClientIds: [...detectedIds],
     defaultClientIds,
@@ -122,6 +116,7 @@ export const planSetupActions = async (input: {
   readonly providerEnvironment: SetupProviderEnvironment;
   readonly command: readonly string[];
   readonly clientIds: readonly string[];
+  readonly skillClientIds: readonly string[];
   readonly installSkill: boolean;
 }): Promise<{
   readonly plannedActions: readonly SetupAction[];
@@ -148,12 +143,11 @@ export const planSetupActions = async (input: {
   const inspections = await Promise.all(
     selectedClients.map(async (client) => ({
       client,
-      inspection:
-        (await input.host.inspectClientConfiguration?.(
-          client,
-          input.providerEnvironment,
-          input.command,
-        )) ?? ({ status: "update" } as const),
+      inspection: await input.host.inspectClientConfiguration(
+        client,
+        input.providerEnvironment,
+        input.command,
+      ),
     })),
   );
   const invalid = inspections.find(
@@ -168,9 +162,11 @@ export const planSetupActions = async (input: {
     };
   }
   const clientPlans = inspections.flatMap(({ client, inspection }) =>
-    inspection.status === "create" ||
-    inspection.status === "update" ||
-    (input.discovery.installHopper && inspection.status === "already_current")
+    client.format !== "unsupported" &&
+    (inspection.status === "create" ||
+      inspection.status === "update" ||
+      (input.discovery.installHopper &&
+        inspection.status === "already_current"))
       ? [
           {
             client,
@@ -189,8 +185,11 @@ export const planSetupActions = async (input: {
   return {
     plannedActions: setupPlan({
       platform: input.host.platform,
+      homeDirectory: input.host.homeDirectory,
       installHopper: input.discovery.installHopper,
       installSkill: input.installSkill,
+      skillClientIds: input.skillClientIds,
+      skillDestinations: input.host.skillDestinations(input.skillClientIds),
       clients: clientPlans,
       providerEnvironment: input.providerEnvironment,
       ...(input.discovery.linuxPackageFamily === undefined
@@ -208,8 +207,11 @@ export const planSetupActions = async (input: {
 /** Describe every selected setup mutation before user approval. */
 const setupPlan = (input: {
   readonly platform: NodeJS.Platform;
+  readonly homeDirectory: string;
   readonly installHopper: boolean;
   readonly installSkill: boolean;
+  readonly skillClientIds: readonly string[];
+  readonly skillDestinations: readonly SkillDestination[];
   readonly clients: readonly {
     readonly client: SetupClient;
     readonly operation: "create" | "update";
@@ -227,7 +229,10 @@ const setupPlan = (input: {
           label: "Hopper deep-analysis provider",
           target:
             input.platform === "darwin"
-              ? join(homedir(), "Applications/Hopper Disassembler.app")
+              ? join(
+                  input.homeDirectory,
+                  "Applications/Hopper Disassembler.app",
+                )
               : "system package manager",
           detail:
             input.platform === "linux"
@@ -264,18 +269,21 @@ const setupPlan = (input: {
       ...(backupPath === undefined ? {} : { backupPath }),
     })),
   ...(input.installSkill
-    ? [
-        {
-          id: "install_skill",
-          kind: "install_skill" as const,
-          label: "REA reverse-engineering skill",
-          target: join(homedir(), ".agents/skills", PRODUCT_IDENTITY.skillName),
-          detail:
-            "Install or update the bundled REA reverse-engineering skill and on-demand references.",
-          external: false,
-          operation: "install" as const,
-        },
-      ]
+    ? input.skillDestinations.map(({ client, path }): SetupAction => ({
+        id: client === "shared" ? "install_skill" : `install_skill:${client}`,
+        kind: "install_skill",
+        label:
+          client === "claude_code"
+            ? "REA skill for Claude Code"
+            : "REA reverse-engineering skill",
+        target: path,
+        detail:
+          client === "claude_code"
+            ? "Install or update the REA skill in Claude Code's personal skill directory."
+            : "Install or update the bundled REA reverse-engineering skill and on-demand references.",
+        external: false,
+        operation: "install",
+      }))
     : []),
 ];
 
@@ -301,12 +309,12 @@ const clientConfigurationDetail = (
   installHopper: boolean,
 ): string => {
   const entries = Object.entries(environment)
-    .sort(([left], [right]) => left.localeCompare(right))
+    .sort(([left], [right]) => compareUnicodeCodePoints(left, right))
     .map(([name, value]) => `${name}=${value}`);
   const environmentDetail =
     entries.length === 0
-      ? " No additional environment variables."
-      : ` Environment: ${entries.join(", ")}.`;
+      ? " No additional provider environment variables. Existing server environment overrides are retained."
+      : ` Detected provider environment: ${entries.join(", ")}. Existing server environment overrides are retained; detected values replace matching keys.`;
   const hopperDetail = installHopper
     ? environment.HOPPER_LAUNCHER_PATH === undefined
       ? " If this plan installs Hopper, REA will add HOPPER_LAUNCHER_PATH using the launcher path reported by that installation."

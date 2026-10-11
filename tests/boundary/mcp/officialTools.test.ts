@@ -1,3 +1,4 @@
+import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { afterEach, describe, expect, it } from "vitest";
@@ -31,7 +32,7 @@ describe("read_bytes contract", () => {
       contract?.inputSchema.safeParse({ address: "0x1000", length: 0 }).success,
     ).toBe(false);
     expect(
-      contract?.outputSchema.shape.result.safeParse({
+      contract?.outputSchema.shape.normalized_result.safeParse({
         address: "0x1000",
         requested_bytes: 4097,
         returned_bytes: 4097,
@@ -48,7 +49,7 @@ describe("list_strings contract", () => {
       ({ name }) => name === "list_strings",
     );
     expect(
-      contract?.outputSchema.shape.result.safeParse([
+      contract?.outputSchema.shape.normalized_result.safeParse([
         {
           address: "0x1000",
           value: "coffee",
@@ -71,7 +72,7 @@ afterEach(async () => {
 });
 
 const connect = async (analysis: AnalysisOperationPort) => {
-  const server = createServer(analysis);
+  const server = createServer({ kind: "fixed", analysis });
   const client = new Client({ name: "contract-test", version: "1.0.0" });
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
@@ -140,11 +141,11 @@ describe("official Hopper proxy tools", () => {
     expect(result.isError).toBe(true);
     expect(result.content[0]).toEqual({
       type: "text",
-      text: JSON.stringify(result.structuredContent),
+      text: JSON.stringify(parseMcpToolError(result)),
     });
   });
 
-  it("binds list_procedures and projects its omitted Python document option", async () => {
+  it("binds list_procedures without adding omitted document arguments", async () => {
     const invocations: Invocation[] = [];
     const client = await connect({
       execute: (name, arguments_) => {
@@ -164,14 +165,14 @@ describe("official Hopper proxy tools", () => {
     });
 
     expect(result.structuredContent).toMatchObject({
-      result: [
+      normalized_result: [
         { address: "0x1", value: "procedure" },
         { address: "0x2", value: "procedure" },
       ],
     });
     expect(invocations).toHaveLength(1);
     expect(invocations[0]?.name).toBe("list_procedures");
-    expect(invocations[0]?.arguments_).toEqual({ document: null });
+    expect(invocations[0]?.arguments_).toEqual({});
     expect(
       (await client.listTools()).tools.find(
         ({ name }) => name === "list_procedures",
@@ -199,7 +200,7 @@ describe("official Hopper proxy tools", () => {
     });
 
     expect(result.structuredContent).toMatchObject({
-      result: [
+      normalized_result: [
         { address: "0x1", value: "coffee" },
         { address: "0x2", value: "coffee" },
       ],

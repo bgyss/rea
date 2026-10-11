@@ -9,6 +9,7 @@ import type {
   BridgeLauncher,
   BridgeSession,
 } from "../../../../src/hopper/BridgeLauncher.js";
+import { waitForExit } from "../../../support/process/processFixture.js";
 import { HopperClient } from "../../../../src/hopper/HopperClient.js";
 
 export const hopperFixturePath = fileURLToPath(
@@ -27,15 +28,21 @@ export class HopperFixtureLauncher implements BridgeLauncher {
   readonly socketPaths: string[] = [];
   readonly directories: string[] = [];
   readonly runIds: string[] = [];
+  readonly tokens: string[] = [];
   readonly processes: ChildProcess[] = [];
   readonly requests: FixtureRequest[] = [];
 
-  constructor(readonly tokenOverride?: string) {}
+  constructor(
+    readonly tokenOverride?: string,
+    readonly diagnosticMode: "quiet" | "noisy" | "noisy_no_socket" = "quiet",
+    readonly healthMode: "ready" | "gated" = "ready",
+  ) {}
 
   launch(session: BridgeSession) {
     this.socketPaths.push(session.socketPath);
     this.directories.push(session.directory);
     this.runIds.push(session.runId);
+    this.tokens.push(session.token);
     const child = spawn(
       process.execPath,
       [
@@ -43,8 +50,11 @@ export class HopperFixtureLauncher implements BridgeLauncher {
         session.socketPath,
         this.tokenOverride ?? session.token,
         session.runId,
+        "acknowledge",
+        this.diagnosticMode,
+        this.healthMode,
       ],
-      { stdio: ["ignore", "ignore", "pipe", "ipc"] },
+      { stdio: ["ignore", "pipe", "pipe", "ipc"] },
     );
     child.on("message", (value: unknown) => {
       const request = requestSchema.safeParse(value);
@@ -56,7 +66,17 @@ export class HopperFixtureLauncher implements BridgeLauncher {
         process: child,
         ownsProcessLifetime: true as const,
         providerLifetime: "launcher-process" as const,
-        shutdownMode: "bridge-request" as const,
+        shutdownMode: "process-cleanup" as const,
+        cleanup: async () => {
+          const exited = child.exitCode !== null || child.signalCode !== null;
+          const signaled = !exited && child.kill("SIGTERM");
+          return (await waitForExit(child, 5_000))
+            ? { cleaned: true as const, signaled }
+            : {
+                cleaned: false as const,
+                reason: "Fixture process did not exit",
+              };
+        },
       }),
     );
   }
@@ -93,7 +113,9 @@ export class HopperFixtureLauncher implements BridgeLauncher {
 
 /** Register owned client cleanup before any startup assertion can fail. */
 export const trackHopperClient = (client: HopperClient): HopperClient => {
-  onTestFinished(() => client.close());
+  onTestFinished(async () => {
+    await client.close();
+  });
   return client;
 };
 

@@ -4,6 +4,46 @@ import { runSetup } from "./Setup.js";
 import type { SetupProgressEvent } from "./SetupTypes.js";
 import { FakeSetupHost, options } from "./Setup.fixture.js";
 
+describe("skill plan destinations", () => {
+  it("plans a Claude-only skill in its personal location", async () => {
+    const host = new FakeSetupHost();
+    host.clients = [{ name: "claude_code", configPath: "/claude.json" }];
+
+    const result = await runSetup(
+      { ...options(false), clientIds: ["claude_code"] },
+      host,
+    );
+
+    expect(
+      result.plannedActions
+        .filter(({ kind }) => kind === "install_skill")
+        .map(({ target }) => target),
+    ).toEqual(["/fixture/home/.claude/skills/reverse-engineer-anything"]);
+  });
+
+  it("plans both shared and personal skill roots for mixed clients", async () => {
+    const host = new FakeSetupHost();
+    host.clients = [
+      { name: "claude_code", configPath: "/claude.json" },
+      { name: "codex", configPath: "/codex.toml", format: "toml" },
+    ];
+
+    const result = await runSetup(
+      { ...options(false), clientIds: ["claude_code", "codex"] },
+      host,
+    );
+
+    expect(
+      result.plannedActions
+        .filter(({ kind }) => kind === "install_skill")
+        .map(({ target }) => target),
+    ).toEqual([
+      "/fixture/home/.agents/skills/reverse-engineer-anything",
+      "/fixture/home/.claude/skills/reverse-engineer-anything",
+    ]);
+  });
+});
+
 describe("setup workflow", () => {
   it("returns a complete plan without mutation", async () => {
     const host = new FakeSetupHost();
@@ -253,5 +293,37 @@ describe("setup workflow lifecycle and provider planning", () => {
     expect(host.hopperReplaceRequests).toEqual([true]);
     expect(host.configurations).toBe(0);
     expect(host.checkedHopperPaths).toEqual(["/manual/Hopper"]);
+  });
+
+  it("does not write a file when Grok Bot is selected", async () => {
+    const host = new FakeSetupHost();
+    host.doctorHealthy = true;
+    host.skill = "unchanged";
+    host.clients = [
+      {
+        name: "grok_bot",
+        displayName: "Grok Bot",
+        configPath: "/home/user/.grokbot",
+        format: "unsupported",
+      },
+    ];
+
+    const planned = await runSetup(
+      { ...options(true), clientIds: ["grok_bot"], dryRun: true },
+      host,
+    );
+    expect(planned.status).toBe("planned");
+    expect(planned.plannedActions).toEqual([]);
+    expect(planned.remediation).toContain("hosted computer");
+    expect(host.configurations).toBe(0);
+
+    const applied = await runSetup(
+      { ...options(true), clientIds: ["grok_bot"] },
+      host,
+    );
+    expect(applied.status).toBe("needs_human");
+    expect(applied.appliedActions).toEqual([]);
+    expect(applied.remediation).toContain("hosted computer");
+    expect(host.configurations).toBe(0);
   });
 });

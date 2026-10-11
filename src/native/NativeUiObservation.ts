@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import type { BinaryTarget } from "../domain/binaryTarget.js";
+import type { BinaryTarget } from "../domain/binaryTargetTypes.js";
 import {
   nativeUiObservationInputSchema,
   nativeUiScenarioInputSchema,
@@ -14,9 +14,12 @@ import {
   AnalysisInputError,
 } from "../domain/analysisErrorCore.js";
 import { ProviderAdapterError } from "../domain/providerAdapterError.js";
-import { type AnalysisError } from "../domain/analysisErrorBase.js";
+import type { AnalysisError } from "../domain/analysisErrorBase.js";
 import { err, ok, type Result } from "../domain/result.js";
-import { createNativeUiHelperRuntime } from "./NativeUiHelperRuntime.js";
+import {
+  createNativeUiHelperRuntime,
+  type NativeUiHelperRuntime,
+} from "./NativeUiHelperRuntime.js";
 import { runNativeUiStep, type NativeUiCapture } from "./NativeUiSteps.js";
 import {
   NATIVE_UI_OUTPUT_BUDGET_BYTES,
@@ -45,16 +48,22 @@ export const observeNativeUi = async (
   target: BinaryTarget,
   operation: "observe_native_ui" | "capture_native_ui_scenario",
   parameters: unknown,
-  options: { signal?: AbortSignal | undefined; invoke?: NativeUiHelper } = {},
+  options: {
+    environment: Readonly<NodeJS.ProcessEnv>;
+    signal?: AbortSignal | undefined;
+    invoke?: NativeUiHelper;
+    runtime?: NativeUiHelperRuntime;
+  },
 ): Promise<Result<z.infer<typeof nativeUiResultSchema>, AnalysisError>> => {
-  const runtime = createNativeUiHelperRuntime();
+  const runtime =
+    options.runtime ?? createNativeUiHelperRuntime(options.environment);
   try {
     return await observeWithHelper(target, operation, parameters, {
       ...options,
       invoke: options.invoke ?? runtime.invoke,
     });
   } finally {
-    await runtime.close();
+    if (options.runtime === undefined) await runtime.close();
   }
 };
 

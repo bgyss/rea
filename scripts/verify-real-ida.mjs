@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { requireMcpToolError } from "./lib/mcp-verifier-results.mjs";
 
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -144,11 +145,11 @@ const mcp = async (cliDossier) => {
     const analyzed = await call("analyze_function", {
       procedure: values.procedure,
     });
-    const dossier = functionDossierSchema.parse(observe(analyzed.evidence));
+    const dossier = functionDossierSchema.parse(observe(analyzed));
     assert.deepEqual(dossier.procedure, cliDossier.procedure);
     assert.equal(dossier.pseudocode, cliDossier.pseudocode);
     assert.deepEqual(dossier.assembly, cliDossier.assembly);
-    assert.equal(analyzed.evidence_id, analyzed.evidence.evidence_id);
+    assert.equal(analyzed.operation, "analyze_function");
     for (const [name, args] of [
       ["list_procedures", {}],
       ["list_strings", {}],
@@ -165,14 +166,14 @@ const mcp = async (cliDossier) => {
       ["xrefs", { address: dossier.procedure.address }],
     ]) {
       const result = await call(name, args);
-      observe(result.evidence);
+      observe(result);
     }
     const invalid = await client.callTool({
       name: "xrefs",
       arguments: { address: "not-an-address" },
     });
     assert.equal(invalid.isError, true);
-    assert.equal(invalid.structuredContent.error.code, "invalid_request");
+    assert.equal(requireMcpToolError(invalid).code, "invalid_request");
     await call("close_binary", {});
     opened = false;
     report.checks.push(
@@ -190,7 +191,7 @@ const mcp = async (cliDossier) => {
 };
 const cleanup = async () => {
   phase = "upstream lifecycle verification";
-  const upstream = createIdaMcpConnection(config);
+  const upstream = createIdaMcpConnection(config, process.env);
   try {
     await upstream.connect();
     if (config.mode === "attached") {

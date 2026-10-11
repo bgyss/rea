@@ -1,3 +1,4 @@
+import { ok as resultOk } from "../../../src/domain/result.js";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { describe, expect, it } from "vitest";
 
@@ -46,7 +47,7 @@ describe("function comparison reconstruction MCP integration", () => {
                 authority: left.authority,
               },
             );
-      const server = createServer(session, session);
+      const server = createServer({ kind: "session", session });
       const client = new Client({
         name: "function-verification-test",
         version: "1",
@@ -61,9 +62,7 @@ describe("function comparison reconstruction MCP integration", () => {
           arguments: { left, right },
         });
         expect(compared.isError).not.toBe(true);
-        const comparison = parseEvidence(
-          jsonObjectSchema.parse(compared.structuredContent).evidence,
-        );
+        const comparison = parseEvidence(compared.structuredContent);
         expect(comparison.normalized_result).toMatchObject({
           status: comparisonStatus,
         });
@@ -96,9 +95,7 @@ describe("function comparison reconstruction MCP integration", () => {
           verified.isError,
           JSON.stringify(verified.structuredContent),
         ).not.toBe(true);
-        const verification = parseEvidence(
-          jsonObjectSchema.parse(verified.structuredContent).evidence,
-        );
+        const verification = parseEvidence(verified.structuredContent);
         expect(verification.normalized_result).toMatchObject({
           status: verificationStatus,
           summary: {
@@ -143,7 +140,7 @@ describe("function comparison MCP integration", () => {
     const session = createTestBinarySession(() => ({
       health: () => Promise.resolve(),
       execute: () => Promise.resolve(observed(null)),
-      close: () => Promise.resolve(),
+      close: () => Promise.resolve(resultOk(null)),
     }));
     expect(session.recordEvidence(FUNCTION_COMPARISON_EXAMPLE.left).ok).toBe(
       true,
@@ -151,7 +148,7 @@ describe("function comparison MCP integration", () => {
     expect(session.recordEvidence(FUNCTION_COMPARISON_EXAMPLE.right).ok).toBe(
       true,
     );
-    const server = createServer(session, session);
+    const server = createServer({ kind: "session", session });
     const client = new Client({
       name: "function-comparison-test",
       version: "1",
@@ -170,7 +167,7 @@ describe("function comparison MCP integration", () => {
       });
       expect(result.isError).not.toBe(true);
       expect(result.structuredContent).toMatchObject({
-        result: { status: expect.any(String) },
+        normalized_result: { status: expect.any(String) },
         evidence_id: expect.stringMatching(/^ev_[a-f0-9]{64}$/u),
       });
       const unknowns = await client.callTool({
@@ -205,9 +202,9 @@ describe("function comparison MCP integration", () => {
     const session = createTestBinarySession(() => ({
       health: () => Promise.resolve(),
       execute: () => Promise.resolve(observed(null)),
-      close: () => Promise.resolve(),
+      close: () => Promise.resolve(resultOk(null)),
     }));
-    const server = createServer(session, session);
+    const server = createServer({ kind: "session", session });
     const client = new Client({ name: "function-link-test", version: "1" });
     const [clientTransport, serverTransport] =
       InMemoryTransport.createLinkedPair();
@@ -223,7 +220,7 @@ describe("function comparison MCP integration", () => {
       });
       expect(result.isError).not.toBe(true);
       expect(result.structuredContent).toMatchObject({
-        result: { status: expect.any(String) },
+        normalized_result: { status: expect.any(String) },
       });
     } finally {
       await Promise.allSettled([
@@ -238,7 +235,7 @@ describe("function comparison MCP integration", () => {
     const session = createTestBinarySession(() => ({
       health: () => Promise.resolve(),
       execute: () => Promise.resolve(observed(null)),
-      close: () => Promise.resolve(),
+      close: () => Promise.resolve(resultOk(null)),
     }));
     const wrong = createEvidence(
       undefined,
@@ -251,7 +248,7 @@ describe("function comparison MCP integration", () => {
     );
     session.recordEvidence(wrong);
     session.recordEvidence(FUNCTION_COMPARISON_EXAMPLE.right);
-    const server = createServer(session, session);
+    const server = createServer({ kind: "session", session });
     const client = new Client({
       name: "function-authority-test",
       version: "1",
@@ -285,7 +282,7 @@ describe("function comparison facet projections", () => {
     const session = createTestBinarySession(() => ({
       health: () => Promise.resolve(),
       execute: () => Promise.resolve(observed(null)),
-      close: () => Promise.resolve(),
+      close: () => Promise.resolve(resultOk(null)),
     }));
     const complete = FUNCTION_COMPARISON_EXAMPLE.left;
     const projected = createEvidence(
@@ -306,7 +303,7 @@ describe("function comparison facet projections", () => {
         ),
       },
     );
-    const server = createServer(session, session);
+    const server = createServer({ kind: "session", session });
     const client = new Client({ name: "function-facets-test", version: "1" });
     const [clientTransport, serverTransport] =
       InMemoryTransport.createLinkedPair();
@@ -318,7 +315,8 @@ describe("function comparison facet projections", () => {
         arguments: { left: complete, right: projected },
       });
       expect(result.isError).toBe(true);
-      expect(result.structuredContent).toMatchObject({
+      const [text] = result.content as { type: "text"; text: string }[];
+      expect(JSON.parse(text?.text ?? "null")).toMatchObject({
         error: {
           code: "invalid_request",
           details: {

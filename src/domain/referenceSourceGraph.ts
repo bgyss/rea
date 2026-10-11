@@ -2,7 +2,12 @@ import { posix } from "node:path";
 
 import { z } from "zod";
 
-import { canonicalDigest, canonicalJson } from "./comparisonSemantics.js";
+import { canonicalJson } from "./comparisonSemantics.js";
+import { digestCanonicalValue } from "./canonicalDigest.js";
+import {
+  createReferenceSourcePathLookup,
+  isPortableAbsoluteReferenceTarget,
+} from "./referenceSourcePathIdentity.js";
 import { compareUnicodeCodePoints } from "./unicodeCodePointOrder.js";
 import { digestSchema } from "./../domain/digests.js";
 import { prefixedDigestSchema } from "./../domain/digests.js";
@@ -80,31 +85,27 @@ const symlinkTargetSchema = z
   .min(1)
   .refine(
     (target) =>
-      target === "<outside-root>" ||
-      isPortableAbsoluteSymlinkTarget(target) ||
+      isPortableAbsoluteReferenceTarget(target) ||
       (!target.startsWith("/") &&
         !target.includes("\\") &&
         posix.normalize(target) === target),
     "Expected a normalized POSIX symlink target",
   );
 
-const isPortableAbsoluteSymlinkTarget = (target: string): boolean =>
-  target.startsWith("/") ||
-  /^[A-Za-z]:[\\/]/u.test(target) ||
-  /^\\\\[^\\/]+[\\/][^\\/]+/u.test(target);
-
-const sourceSymlinkSchema = z.strictObject({
-  ...entryBaseShape,
-  kind: z.literal("symlink"),
-  target: symlinkTargetSchema,
-  target_state: z.enum([
-    "internal",
-    "external",
-    "missing",
-    "unreadable",
-    "unknown",
-  ]),
-});
+const sourceSymlinkSchema = z.union([
+  z.strictObject({
+    ...entryBaseShape,
+    kind: z.literal("symlink"),
+    target: symlinkTargetSchema,
+    target_state: z.enum(["internal", "external", "missing"]),
+  }),
+  z.strictObject({
+    ...entryBaseShape,
+    kind: z.literal("symlink"),
+    target: z.null(),
+    target_state: z.enum(["unreadable", "unknown"]),
+  }),
+]);
 
 const sourceEntrySchema = z.union([
   sourceFileSchema,
@@ -126,17 +127,22 @@ const parseFailureSchema = z.strictObject({
   reason: boundedTextSchema,
 });
 
-const exclusionSchema = z.strictObject({
-  path: relativePathSchema,
-  reason: z.enum([
-    "configured-secret",
-    "symlink-escape",
-    "size-limit",
-    "inventory-limit",
-    "unreadable",
-    "caller-excluded",
-  ]),
-});
+const exclusionSchema = z.discriminatedUnion("reason", [
+  z.strictObject({
+    path: relativePathSchema,
+    reason: z.enum([
+      "configured-secret",
+      "project-ignored",
+      "default-ignored",
+      "caller-excluded",
+    ]),
+    pattern: boundedTextSchema,
+  }),
+  z.strictObject({
+    path: relativePathSchema,
+    reason: z.enum(["symlink-escape", "unreadable"]),
+  }),
+]);
 
 const vcsSchema = z
   .discriminatedUnion("kind", [
@@ -177,7 +183,7 @@ const graphShape = {
     caller: z
       .string()
       .min(1)
-      .regex(/^[\w .:@/+-]+$/u),
+      .regex(/^[\w .:@\x2f+\x2d]+$/u),
   }),
   limitations: z.array(boundedTextSchema),
 };
@@ -313,16 +319,14 @@ const checkSymlinks = (
   paths: ReadonlySet<string>,
   context: z.RefinementCtx,
 ): void => {
+  const lookupPath = createReferenceSourcePathLookup(paths);
   for (const [index, entry] of graph.entries.entries()) {
     if (entry.kind !== "symlink") continue;
-    const absolute = isPortableAbsoluteSymlinkTarget(entry.target);
+    if (entry.target === null) continue;
+    const absolute = isPortableAbsoluteReferenceTarget(entry.target);
     if (
-      (entry.target_state === "external" &&
-        entry.target !== "<outside-root>" &&
-        !absolute) ||
-      (entry.target_state === "internal" &&
-        (entry.target === "<outside-root>" || absolute)) ||
-      (entry.target_state === "missing" && entry.target === "<outside-root>")
+      (entry.target_state === "external" && !absolute) ||
+      (entry.target_state === "internal" && absolute)
     )
       context.addIssue({
         code: "custom",
@@ -333,7 +337,12 @@ const checkSymlinks = (
     const resolved = posix.normalize(
       posix.join(posix.dirname(entry.path), entry.target),
     );
-    if (resolved.startsWith("../") || resolved === ".." || !paths.has(resolved))
+    if (
+      resolved.startsWith("../") ||
+      resolved === ".." ||
+      // The inventory root is implicit rather than an entry with path ".".
+      (resolved !== "." && lookupPath.resolve(resolved) === undefined)
+    )
       context.addIssue({
         code: "custom",
         message: "Internal symlink target must resolve to an inventoried entry",
@@ -403,7 +412,10 @@ function checkGraphInvariants(
     context,
   );
   checkSortedUnique(
-    graph.exclusions.map(({ path, reason }) => `${path}\u0000${reason}`),
+    graph.exclusions.map(
+      (exclusion) =>
+        `${exclusion.path}\u0000${exclusion.reason}\u0000${"pattern" in exclusion ? exclusion.pattern : ""}`,
+    ),
     "exclusions",
     context,
   );
@@ -475,7 +487,7 @@ const computeRootSha256 = (
   entries: readonly z.infer<typeof sourceEntrySchema>[],
   exclusions: readonly z.infer<typeof exclusionSchema>[],
 ): string =>
-  canonicalDigest(
+  digestCanonicalValue(
     rootCommitment(entries, exclusions),
     "Reference source graph",
   );
@@ -498,7 +510,10 @@ export const parseHistoricalSourceGraph = (
 
 /** Compute a deterministic graph commitment containing no absolute root path. */
 export const computeHistoricalSourceGraphSha256 = (input: unknown): string =>
-  canonicalDigest(parseHistoricalSourceGraph(input), "Reference source graph");
+  digestCanonicalValue(
+    parseHistoricalSourceGraph(input),
+    "Reference source graph",
+  );
 
 /** Build a deterministic, relocation-independent manifest for a source graph. */
 export const createHistoricalSourceManifest = (
@@ -516,7 +531,7 @@ export const createHistoricalSourceManifest = (
   };
   return historicalSourceManifestBaseSchema.parse({
     ...semantic,
-    manifest_id: `hsm_${canonicalDigest(semantic, "Reference source graph")}`,
+    manifest_id: `hsm_${digestCanonicalValue(semantic, "Reference source graph")}`,
   });
 };
 
@@ -527,7 +542,8 @@ export const parseHistoricalSourceManifest = (
   const manifest = historicalSourceManifestBaseSchema.parse(input);
   const { manifest_id: manifestId, ...semantic } = manifest;
   if (
-    `hsm_${canonicalDigest(semantic, "Reference source graph")}` !== manifestId
+    `hsm_${digestCanonicalValue(semantic, "Reference source graph")}` !==
+    manifestId
   )
     throw new TypeError("Historical source manifest identifier does not match");
   return manifest;

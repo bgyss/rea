@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { browserScenarioBrowserSchema } from "../domain/browserScenarioValues.js";
 import { firmwareInputSchemas } from "../domain/firmware/firmwareAnalysis.js";
 import { electronActiveObservationInputSchema } from "../domain/javascript/electronActiveObservation.js";
-import { managedArtifactInputSchema } from "./managed/managedToolContracts.js";
+import { managedTargetInputSchema } from "./managed/managedToolContracts.js";
 import { exportEvidenceBundleInputSchema } from "./sessionToolContracts.js";
 import {
   closeBinaryInputSchema,
@@ -48,10 +48,10 @@ const cases: readonly PathCase[] = [
   },
   {
     name: "managed target",
-    accepts: (path) => managedArtifactInputSchema.safeParse({ path }).success,
+    accepts: (path) => managedTargetInputSchema.safeParse({ path }).success,
     relative: ["bin/app.dll"],
     absolute: "/tmp/app.dll",
-    omitted: () => managedArtifactInputSchema.safeParse({}).success,
+    omitted: () => managedTargetInputSchema.safeParse({}).success,
   },
   {
     name: "open binary target",
@@ -147,10 +147,27 @@ it.each(cases)("$name requires an absolute local path", (pathCase) => {
     expect(pathCase.omitted(), pathCase.name).toBe(true);
 });
 
-it("keeps evidence bundle export overwrite disabled by default", () => {
+it("preserves whitespace in selected browser and Electron filesystem names", () => {
+  const executable = "/opt/browser with trailing space ";
   expect(
-    exportEvidenceBundleInputSchema.safeParse({ path: "/tmp/bundle.json" }),
-  ).toMatchObject({ success: true, data: { overwrite: false } });
+    browserScenarioBrowserSchema.parse({
+      mode: "launch",
+      executable_path: executable,
+    }),
+  ).toMatchObject({ executable_path: executable });
+  const application = "/tmp/application ";
+  const root = "/tmp/application root ";
+  expect(
+    electronActiveObservationInputSchema.parse({
+      executable_path: executable,
+      application_path: application,
+      application_root: root,
+    }),
+  ).toMatchObject({
+    executable_path: executable,
+    application_path: application,
+    application_root: root,
+  });
 });
 
 describe.runIf(process.platform === "win32")(

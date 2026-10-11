@@ -58,7 +58,11 @@ const unavailableFileEntry = (
   ...overrides,
 });
 
-const symlinkEntry = (overrides: Partial<SymlinkEntry> = {}): SymlinkEntry => ({
+type KnownTargetSymlinkEntry = Extract<SymlinkEntry, { target: string }>;
+
+const symlinkEntry = (
+  overrides: Partial<KnownTargetSymlinkEntry> = {},
+): KnownTargetSymlinkEntry => ({
   path: "src/package.json",
   kind: "symlink",
   target: "main.ts",
@@ -171,7 +175,11 @@ describe("historical source graph", () => {
       },
       (input: HistoricalSourceGraphInput) => {
         input.exclusions = [
-          { path: "private.env", reason: "configured-secret" },
+          {
+            path: "private.env",
+            reason: "configured-secret",
+            pattern: ".env",
+          },
         ];
         input.inventory_state = "partial";
       },
@@ -184,7 +192,21 @@ describe("historical source graph", () => {
     }
   });
 
-  it("retains actual external targets and accepts legacy markers", () => {
+  it("commits the matched pattern for each exclusion", () => {
+    const graphWith = (pattern: string) =>
+      createHistoricalSourceGraph({
+        ...graphInput(),
+        inventory_state: "partial",
+        exclusions: [
+          { path: "private.env", reason: "configured-secret", pattern },
+        ],
+      });
+    expect(graphWith(".env").root_sha256).not.toBe(
+      graphWith("*.env").root_sha256,
+    );
+  });
+
+  it("retains actual external targets and rejects placeholder targets", () => {
     const input = { ...graphInput(), inventory_state: "partial" as const };
     input.entries[2] = symlinkEntry({
       target: "/private/shared/target.js",
@@ -205,7 +227,7 @@ describe("historical source graph", () => {
             : entry,
         ),
       }),
-    ).not.toThrow();
+    ).toThrow(/target path does not match/u);
   });
 
   it("derives language and manifest indexes and enforces code-point order", () => {
@@ -237,6 +259,50 @@ describe("historical source graph", () => {
 });
 
 describe("partial historical source graphs", () => {
+  it("keeps an unreadable symlink target unknown and out of root identity", () => {
+    const base = graphInput();
+    base.inventory_state = "partial";
+    base.entries[2] = {
+      path: "src/package.json",
+      kind: "symlink",
+      target: null,
+      target_state: "unreadable",
+      classifications: ["manifest"],
+      limitations: ["Target could not be read."],
+    };
+    const graph = createHistoricalSourceGraph(base);
+    expect(graph.entries[2]).toMatchObject({
+      kind: "symlink",
+      target: null,
+      target_state: "unreadable",
+    });
+
+    const changedMessage = structuredClone(base);
+    changedMessage.entries[2] = {
+      path: "src/package.json",
+      kind: "symlink",
+      target: null,
+      target_state: "unreadable",
+      classifications: ["manifest"],
+      limitations: ["A different diagnostic."],
+    };
+    const revised = createHistoricalSourceGraph(changedMessage);
+    expect(revised.root_sha256).toBe(graph.root_sha256);
+    expect(computeHistoricalSourceGraphSha256(revised)).not.toBe(
+      computeHistoricalSourceGraphSha256(graph),
+    );
+    expect(() =>
+      createHistoricalSourceGraph({
+        ...base,
+        entries: base.entries.map((entry) =>
+          entry.kind === "symlink"
+            ? { ...entry, target: "<unreadable>" }
+            : entry,
+        ),
+      }),
+    ).toThrow();
+  });
+
   it("preserves partial observations but rejects every partial complete graph", () => {
     const partial = graphInput();
     partial.inventory_state = "partial";
@@ -252,7 +318,13 @@ describe("partial historical source graphs", () => {
       { entries: partial.entries },
       { parse_failures: partial.parse_failures },
       {
-        exclusions: [{ path: "secret", reason: "configured-secret" as const }],
+        exclusions: [
+          {
+            path: "secret",
+            reason: "configured-secret" as const,
+            pattern: "secret",
+          },
+        ],
       },
       { limitations: ["Incomplete"] },
       {
@@ -337,7 +409,7 @@ describe("historical source graph validation", () => {
             : entry,
         ),
       }),
-    ).not.toThrow();
+    ).toThrow(/target path does not match/u);
     expect(() =>
       createHistoricalSourceGraph({
         ...graphInput(),
@@ -359,5 +431,58 @@ describe("historical source graph validation", () => {
     expect(() =>
       parseHistoricalSourceManifest({ ...manifest, entry_count: 999 }),
     ).toThrow(/identifier does not match/u);
+  });
+});
+
+describe("historical source graph symlink path identity", () => {
+  it("joins internal symlink targets with the inventory NFC normalizer", () => {
+    // "café" spelled NFC, as the inventory produces it, and the same
+    // name spelled NFD, as a macOS readlink can report it.
+    const nfcPath = "src/café.ts";
+    const nfdTarget = "cafe\u0301.ts";
+    expect(nfcPath).not.toBe(nfdTarget);
+
+    const input = { ...graphInput(), inventory_state: "partial" as const };
+    input.entries[1] = fileEntry({ path: nfcPath });
+    input.entries[2] = symlinkEntry({
+      path: "src/link.js",
+      target: nfdTarget,
+      target_state: "internal",
+    });
+    input.relationships = [];
+    const graph = createHistoricalSourceGraph(input);
+    expect(graph.entries[2]).toMatchObject({
+      kind: "symlink",
+      target: nfdTarget,
+      target_state: "internal",
+    });
+  });
+
+  it("preserves an exact NFD inventory spelling when resolving its symlink", () => {
+    const input = { ...graphInput(), inventory_state: "partial" as const };
+    input.entries[1] = fileEntry({ path: "src/cafe\u0301.ts" });
+    input.entries[2] = symlinkEntry({
+      path: "src/link.js",
+      target: "cafe\u0301.ts",
+      target_state: "internal",
+    });
+    input.relationships = [];
+    expect(createHistoricalSourceGraph(input).entries[1]?.path).toBe(
+      "src/cafe\u0301.ts",
+    );
+  });
+
+  it("still rejects an internal symlink target that no inventory holds", () => {
+    const input = { ...graphInput(), inventory_state: "partial" as const };
+    input.entries[2] = symlinkEntry({
+      path: "src/link.js",
+      // The NFD spelling normalizes to "src/café.ts", which the
+      // inventory does not contain, so the join must still miss.
+      target: "cafe\u0301.ts",
+      target_state: "internal",
+    });
+    expect(() => createHistoricalSourceGraph(input)).toThrow(
+      /must resolve to an inventoried entry/u,
+    );
   });
 });

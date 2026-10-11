@@ -2,6 +2,7 @@ import { execFile, spawn, type ChildProcess } from "node:child_process";
 import {
   access,
   chmod,
+  mkdir,
   mkdtemp,
   readFile,
   rm,
@@ -14,6 +15,8 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { _electron as electron } from "playwright-core";
 import { expect, it, vi } from "vitest";
+import { z } from "zod";
+import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 
 import {
   createSystemProcessOwnershipHost,
@@ -21,7 +24,7 @@ import {
 } from "../../../src/process/ProcessOwnershipObservation.js";
 import { createDarwinProcessRunTokenReader } from "../../../src/process/DarwinProcessRunTokenReader.js";
 import { execFileOutput } from "../../../src/process/ExecFileOutput.js";
-import { normalizeCaptureFailure } from "../../../src/process/capture/ProcessHarness.js";
+import { normalizeCaptureFailure } from "../../../src/process/capture/ProcessCaptureError.js";
 import { PlaywrightElectronActiveProvider } from "../../../src/browser/PlaywrightElectronActiveProvider.js";
 import { electronActiveObservationInputSchema } from "../../../src/domain/javascript/electronActiveObservation.js";
 
@@ -33,18 +36,18 @@ const writeBlockingCompiler = async (directory: string) => {
   const statePath = join(directory, "compile-state.json");
   const releasePath = join(directory, "release-compiler");
   const source = `#!/usr/bin/env node
-const fs = require("node:fs");
-const path = require("node:path");
+const fs = process.getBuiltinModule("node:fs");
+const path = process.getBuiltinModule("node:path");
 const statePath = ${JSON.stringify(statePath)};
 const releasePath = ${JSON.stringify(releasePath)};
 const state = fs.existsSync(statePath)
   ? JSON.parse(fs.readFileSync(statePath, "utf8"))
   : { calls: 0 };
 state.calls += 1;
-const moduleIndex = process.argv.indexOf("-module-cache-path");
-state.root = path.dirname(process.argv[moduleIndex + 1]);
 const outputIndex = process.argv.indexOf("-o");
 state.output = process.argv[outputIndex + 1];
+state.root = path.dirname(state.output);
+state.arguments = process.argv.slice(2);
 state.releasePath = releasePath;
 fs.writeFileSync(statePath, JSON.stringify(state));
 if (state.calls === 1) {
@@ -66,14 +69,14 @@ const writeBlockingIdentityCompiler = async (directory: string) => {
   const executable = join(directory, "fake-identity-xcrun");
   const statePath = join(directory, "identity-helper-state.json");
   const helperSource = `#!/usr/bin/env node
-const fs = require("node:fs");
+const fs = process.getBuiltinModule("node:fs");
 fs.writeFileSync(${JSON.stringify(statePath)}, JSON.stringify({
-  root: __dirname,
+  root: process.getBuiltinModule("node:path").dirname(fs.realpathSync(process.argv[1])),
 }));
 setInterval(() => {}, 1000);
 `;
   const compilerSource = `#!/usr/bin/env node
-const fs = require("node:fs");
+const fs = process.getBuiltinModule("node:fs");
 const outputIndex = process.argv.indexOf("-o");
 const output = process.argv[outputIndex + 1];
 fs.writeFileSync(output, ${JSON.stringify(helperSource)});
@@ -106,6 +109,10 @@ const waitForCompileState = async (statePath: string) => {
           root: parsed.root,
           output: parsed.output,
           releasePath: parsed.releasePath,
+          arguments:
+            "arguments" in parsed && Array.isArray(parsed.arguments)
+              ? parsed.arguments
+              : [],
         };
     } catch {
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -162,6 +169,87 @@ it("reports an actionable missing Swift compiler without installing it", async (
 });
 
 it.skipIf(process.platform === "win32")(
+  "preserves compiler diagnostics when Swift preparation fails",
+  async () => {
+    const directory = await createTestTempDirectory(
+      "rea-process-token-compiler-failure-test-",
+    );
+    const executable = join(directory, "failing-xcrun");
+    await writeFile(
+      executable,
+      '#!/usr/bin/env node\nprocess.stderr.write("module cache is not writable\\n"); process.exitCode = 1;\n',
+    );
+    await chmod(executable, 0o755);
+    const reader = createDarwinProcessRunTokenReader({ xcrun: executable });
+    try {
+      await expect(reader.prepare()).rejects.toThrow(
+        /compilation failed.*module cache is not writable/su,
+      );
+    } finally {
+      await reader.close();
+    }
+  },
+);
+
+it
+  .skipIf(!onDarwin || process.getuid?.() === 0)
+  .each(["file", "read-only directory"])(
+  "ignores unusable inherited Swift module cache: %s",
+  async (kind) => {
+    const directory = await createTestTempDirectory(
+      "rea-process-token-inherited-cache-test-",
+    );
+    const cacheParent = join(directory, "cache-parent");
+    if (kind === "file") await writeFile(cacheParent, "not a directory");
+    else {
+      await mkdir(cacheParent);
+      await chmod(cacheParent, 0o500);
+    }
+    const cachePath = join(cacheParent, "modules");
+    vi.stubEnv("CLANG_MODULE_CACHE_PATH", cachePath);
+    const reader = createDarwinProcessRunTokenReader();
+    try {
+      const executable = await reader.prepare();
+      const { stdout } = await execFileOutput(
+        executable,
+        ["--identities", String(process.pid)],
+        { timeout: 15_000 },
+      );
+      expect(JSON.parse(stdout)).toMatchObject({
+        results: [{ pid: process.pid, state: "readable" }],
+      });
+      expect(process.env.CLANG_MODULE_CACHE_PATH).toBe(cachePath);
+    } finally {
+      vi.unstubAllEnvs();
+      if (kind === "read-only directory") await chmod(cacheParent, 0o700);
+      await reader.close();
+    }
+  },
+);
+
+it.skipIf(process.platform === "win32")(
+  "uses the compiler-managed module cache instead of rebuilding system modules per REA process",
+  async () => {
+    const directory = await createTestTempDirectory(
+      "rea-process-token-module-cache-test-",
+    );
+    const fakeCompiler = await writeBlockingCompiler(directory);
+    const reader = createDarwinProcessRunTokenReader({
+      xcrun: fakeCompiler.executable,
+    });
+    const preparation = reader.prepare();
+    try {
+      const state = await waitForCompileState(fakeCompiler.statePath);
+      expect(state.arguments).not.toContain("-module-cache-path");
+      await writeFile(fakeCompiler.releasePath, "release");
+      await preparation;
+    } finally {
+      await Promise.all([reader.close(), Promise.allSettled([preparation])]);
+    }
+  },
+);
+
+it.skipIf(process.platform === "win32")(
   "rethrows compile cancellation, removes its temporary root, and permits retry",
   async () => {
     const directory = await mkdtemp(
@@ -203,6 +291,94 @@ it.skipIf(process.platform === "win32")(
       await compilation;
       await reader.close();
       await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+const temporaryStateSchema = z.object({
+  root: z.string(),
+  temporary: z.string(),
+});
+
+/**
+ * A compiler that behaves like swift-driver: a job in its own process group
+ * writes an object under TMPDIR, SIGINT stops the job and deletes the object,
+ * and any other signal leaves the job writing after the driver exits.
+ */
+const writeTemporaryObjectCompiler = async (directory: string) => {
+  const executable = join(directory, "fake-temporary-xcrun");
+  const statePath = join(directory, "temporary-state.json");
+  const source = `#!/usr/bin/env node
+const fs = process.getBuiltinModule("node:fs");
+const os = process.getBuiltinModule("node:os");
+const path = process.getBuiltinModule("node:path");
+const { spawn } = process.getBuiltinModule("node:child_process");
+const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "TemporaryDirectory."));
+const object = path.join(temporary, "ProcessRunTokenReader-1.o");
+const job = spawn(process.execPath, ["-e",
+  "setTimeout(() => { const fs = process.getBuiltinModule('node:fs'); fs.mkdirSync(" + JSON.stringify(temporary) +
+  ", { recursive: true }); fs.writeFileSync(" + JSON.stringify(object) + ", 'object'); }, 300)"],
+  { detached: true, stdio: "ignore" });
+job.unref();
+process.on("SIGINT", () => {
+  job.kill("SIGKILL");
+  fs.rmSync(object, { force: true });
+  process.exit(130);
+});
+const output = process.argv[process.argv.indexOf("-o") + 1];
+fs.writeFileSync(${JSON.stringify(statePath)}, JSON.stringify({ root: path.dirname(output), temporary }));
+setInterval(() => {}, 1000);
+`;
+  await writeFile(executable, source);
+  await chmod(executable, 0o755);
+  return { executable, statePath };
+};
+
+it.skipIf(process.platform === "win32")(
+  "removes cancelled compiler temporaries with the helper root",
+  async () => {
+    const directory = await createTestTempDirectory(
+      "rea-process-token-temporary-test-",
+    );
+    const compiler = await writeTemporaryObjectCompiler(directory);
+    const reader = createDarwinProcessRunTokenReader({
+      xcrun: compiler.executable,
+    });
+    const controller = new AbortController();
+    const preparation = reader.prepare(controller.signal).then(
+      () => undefined,
+      (cause: unknown) => cause,
+    );
+    let temporary: string | undefined;
+    try {
+      const deadline = Date.now() + 5_000;
+      let state: z.infer<typeof temporaryStateSchema> | undefined;
+      while (state === undefined && Date.now() < deadline) {
+        const parsed = temporaryStateSchema.safeParse(
+          await readFile(compiler.statePath, "utf8").then(
+            (text): unknown => JSON.parse(text),
+            () => undefined,
+          ),
+        );
+        if (parsed.success) state = parsed.data;
+        else await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      if (state === undefined) throw new Error("fake compiler did not start");
+      temporary = state.temporary;
+      expect(state.temporary.startsWith(`${state.root}/`)).toBe(true);
+
+      controller.abort();
+      expect(await preparation).toMatchObject({ name: "AbortError" });
+      await reader.close();
+      // A job that outlived the compiler would recreate the root by now.
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      await expect(access(state.root)).rejects.toThrow();
+    } finally {
+      if (!controller.signal.aborted) controller.abort();
+      await preparation;
+      await reader.close();
+      if (temporary !== undefined)
+        await rm(temporary, { recursive: true, force: true });
     }
   },
 );
@@ -362,7 +538,7 @@ it.skipIf(process.platform === "win32")(
         executable_path: "/missing/electron",
         application_path: "/missing/application.js",
       });
-      captureOutcome = new PlaywrightElectronActiveProvider()
+      captureOutcome = new PlaywrightElectronActiveProvider({})
         .capture(input, { signal: controller.signal })
         .then(
           (value) => ({ state: "result" as const, value }),
@@ -391,9 +567,9 @@ it.skipIf(process.platform === "win32")(
   },
 );
 
-it.skipIf(process.platform === "win32")(
-  "preserves cancellation through system-host baseline identity inspection",
-  async () => {
+it.skipIf(process.platform === "win32").each(["baseline", "tokens"] as const)(
+  "preserves cancellation through system-host %s inspection",
+  async (kind) => {
     const directory = await mkdtemp(
       join(tmpdir(), "rea-process-baseline-abort-test-"),
     );
@@ -403,8 +579,23 @@ it.skipIf(process.platform === "win32")(
     });
     const controller = new AbortController();
     let helperRoot: string | undefined;
+    const inspection =
+      kind === "baseline"
+        ? host.captureBaseline?.(controller.signal)
+        : host.runTokens?.(
+            [
+              {
+                pid: process.pid,
+                parentPid: process.ppid,
+                processGroupId: process.pid,
+                state: "S",
+                command: process.execPath,
+              },
+            ],
+            controller.signal,
+          );
     const baseline =
-      host.captureBaseline?.(controller.signal).then(
+      inspection?.then(
         () => ({ state: "fulfilled" as const }),
         (cause: unknown) => ({ state: "rejected" as const, cause }),
       ) ?? Promise.resolve({ state: "missing" as const });
@@ -474,7 +665,7 @@ it.skipIf(process.platform === "win32")(
         application_path: fileURLToPath(import.meta.url),
         application_root: process.cwd(),
       });
-      captureOutcome = new PlaywrightElectronActiveProvider()
+      captureOutcome = new PlaywrightElectronActiveProvider({})
         .capture(input, { signal: controller.signal })
         .then(
           (value) => ({ state: "result" as const, value }),
@@ -548,7 +739,6 @@ it.skipIf(!onDarwin)(
         clearedAppleVectorTokenFailsClosed: true,
         callerPfzBeforeTokenRead: true,
         emptyLaterArgumentRead: true,
-        emptyEnvironmentFailsClosed: true,
         emptyArgv0Read: true,
         emptyEnvironmentRecordsBeforeTokenFailClosed: true,
         duplicateTokenFailsClosed: true,
@@ -677,7 +867,7 @@ it.skipIf(!onDarwin)(
 );
 
 it.skipIf(!onDarwin)(
-  "reads owned tokens with empty later arguments across executable path padding",
+  "reads owned tokens across executable padding and distinguishes a real empty environment",
   async () => {
     const root = await mkdtemp(join(tmpdir(), "rea-process-token-padding-"));
     const host = createSystemProcessOwnershipHost("darwin");
@@ -699,6 +889,7 @@ it.skipIf(!onDarwin)(
           ),
         );
       }
+      children.push(await startNodeChild({}));
       const processes = await host.listProcesses();
       const entries = children.map(({ pid }) => {
         const entry = processes.find((process) => process.pid === pid);
@@ -710,6 +901,7 @@ it.skipIf(!onDarwin)(
       expect(children.map(({ pid }) => observations?.get(pid))).toEqual([
         { state: "readable", runId: "synthetic-padding-0" },
         { state: "readable", runId: "synthetic-padding-1" },
+        { state: "readable" },
       ]);
     } finally {
       for (const { child } of children) await stopNodeChild(child);

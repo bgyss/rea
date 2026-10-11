@@ -6,12 +6,14 @@ import { expect, it } from "vitest";
 
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 
-import { readJavaScriptArtifactFiles } from "../../../src/artifacts/javascript/JavaScriptArtifactFiles.js";
-import { reconstructJavaScriptArtifact } from "../../../src/application/javascript/JavaScriptArtifactReconstruction.js";
-import { scanArtifactInventory } from "../../../src/artifacts/inventory/ArtifactInventory.js";
 import {
-  type ArtifactEntry,
-  type ArtifactReader,
+  reconstructJavaScriptArtifact,
+  readJavaScriptArtifactFiles,
+} from "../../support/javascriptApplicationScope.js";
+import { scanArtifactInventory } from "../../fixtures/artifactInventory.js";
+import type {
+  ArtifactEntry,
+  ArtifactReader,
 } from "../../../src/artifacts/ArtifactReader.js";
 import { writeJavaScriptArtifactFixture } from "../../fixtures/javascriptArtifactApplication.js";
 
@@ -268,8 +270,13 @@ it("preserves cancellation and explicit format diagnostics", async () => {
   await expect(
     reconstructJavaScriptArtifact({ input_path: root, format: "asar" }),
   ).rejects.toMatchObject({
-    reason: "format",
-    message: expect.stringContaining(root),
+    issues: [
+      {
+        path: ["format"],
+        reason: "invalid_value",
+        message: expect.stringContaining(root),
+      },
+    ],
   });
 });
 

@@ -7,6 +7,7 @@ import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 import { cliTest } from "../../support/cli/cliFixture.js";
 
 const JSON_COMMANDS = [
+  ["inspect-analysis-view", "inspect-analysis-view"],
   ["trace-application-feature", "trace-application-feature"],
   ["trace-javascript-semantics", "trace-javascript-semantics"],
   ["compare-application-versions", "compare-application-versions"],
@@ -246,9 +247,15 @@ describe("compiled CLI JSON path ambiguity", () => {
         });
 
         expect(result.json).toMatchObject({
-          code: "invalid_request",
+          code: "access_denied",
           input_path: input,
           input_reason: "read-failed",
+          details: {
+            operation: "capture_browser_scenario",
+            path: input,
+            system_code: "EACCES",
+            boundary: "filesystem-read",
+          },
         });
         expect(result.exitCode).toBe(1);
       } finally {

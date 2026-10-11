@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { open, type FileHandle } from "node:fs/promises";
 import { z } from "zod";
 
-import type { BinaryTarget } from "../domain/binaryTarget.js";
+import type { BinaryTarget } from "../domain/binaryTargetTypes.js";
 import { BinaryTargetError } from "../domain/configurationErrors.js";
 import { AnalysisCancelledError } from "../domain/analysisErrorCore.js";
 import {
@@ -35,17 +35,25 @@ export const resolveHopperMachOImage = async (
 ): Promise<
   Result<HopperMachOImage, BinaryTargetError | AnalysisCancelledError>
 > => {
-  const invalid = (reason: string) =>
-    err(new BinaryTargetError(target.path, reason));
+  const invalid = (reason: string, cause?: unknown) =>
+    err(
+      new BinaryTargetError(
+        target.path,
+        reason,
+        cause === undefined ? undefined : { cause },
+      ),
+    );
   if (signal?.aborted) return err(new AnalysisCancelledError("open_binary"));
-  if (target.format === "raw-image")
+  if (target.format !== "mach-o")
     return invalid("Hopper FAT64 image preparation requires a Mach-O target");
   let file: FileHandle;
   try {
     file = await open(target.path, "r");
   } catch (cause: unknown) {
+    // Keep the OS error so a read-permission denial reports access_denied.
     return invalid(
       `Cannot read FAT64 source for Hopper image preparation: ${cause instanceof Error ? cause.message : String(cause)}`,
+      cause,
     );
   }
   try {

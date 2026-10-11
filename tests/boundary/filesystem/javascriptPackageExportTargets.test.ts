@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { expect, it } from "vitest";
 import { z } from "zod";
 
-import { reconstructJavaScriptArtifact } from "../../../src/application/javascript/JavaScriptArtifactReconstruction.js";
+import { reconstructJavaScriptArtifact } from "../../support/javascriptApplicationScope.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 
 const cases: readonly {
@@ -52,6 +52,18 @@ const cases: readonly {
     rejectedTarget: "./../outside.cjs",
   },
   {
+    name: "extensionless target is not completed with an extension",
+    exports: "./actual",
+    expected: null,
+    nodeError: "MODULE_NOT_FOUND",
+  },
+  {
+    // Node reports ERR_UNSUPPORTED_DIR_IMPORT for import, MODULE_NOT_FOUND for require.
+    name: "directory target does not load its index",
+    exports: "./folder",
+    expected: null,
+  },
+  {
     name: "top-level array skips an invalid target",
     exports: ["./../outside.cjs", "./actual.cjs"],
     expected: "node_modules/fixture/actual.cjs",
@@ -89,6 +101,27 @@ const cases: readonly {
   {
     name: "inactive invalid condition does not block default",
     exports: { browser: "./../outside.cjs", default: "./actual.cjs" },
+    expected: "node_modules/fixture/actual.cjs",
+  },
+  {
+    name: "active module-sync rejects an invalid target instead of default",
+    exports: { "module-sync": "./../outside.cjs", default: "./actual.cjs" },
+    expected: null,
+    nodeError: "ERR_INVALID_PACKAGE_TARGET",
+    rejectedTarget: "./../outside.cjs",
+  },
+  {
+    name: "module-sync null blocks default",
+    exports: { "module-sync": null, default: "./actual.cjs" },
+    expected: null,
+    nodeError: "ERR_PACKAGE_PATH_NOT_EXPORTED",
+  },
+  {
+    name: "unmatched nested module-sync permits default",
+    exports: {
+      "module-sync": { browser: "./missing.cjs" },
+      default: "./actual.cjs",
+    },
     expected: "node_modules/fixture/actual.cjs",
   },
   ...["./bad%.cjs", "./bad%C3.cjs"].map((target) => ({
@@ -136,27 +169,13 @@ const nativeResultSchema = z.object({
   code: z.string().nullable(),
 });
 
-it.each(
-  (["import", "require"] as const).flatMap((moduleKind) =>
-    cases.map((testCase) => ({ ...testCase, moduleKind })),
-  ),
-)(
-  "matches Node $moduleKind target selection for $name",
-  async ({
-    moduleKind,
-    name,
-    exports,
-    expected,
-    nodeError,
-    rejectedTarget,
-  }) => {
+it.each(cases)(
+  "matches Node import and require target selection for $name",
+  async ({ name, exports, expected, nodeError, rejectedTarget }) => {
     const root = await createTestTempDirectory("rea-package-target-");
-    const mainPath = moduleKind === "import" ? "main.mjs" : "main.cjs";
     const files = {
-      [mainPath]:
-        moduleKind === "import"
-          ? 'import value from "fixture"; export default value;'
-          : 'module.exports = require("fixture");',
+      "main.mjs": 'import value from "fixture"; export default value;',
+      "main.cjs": 'module.exports = require("fixture");',
       "node_modules/fixture/package.json": JSON.stringify({ exports }),
       ...Object.fromEntries(
         [
@@ -166,6 +185,7 @@ it.each(
           "node_modules/fixture/node_modules/actual.cjs",
           "node_modules/fixture/node_modules.cjs",
           "node_modules/fixture/literal%2e.cjs",
+          "node_modules/fixture/folder/index.js",
         ].map((path) => [path, `module.exports = ${JSON.stringify(path)};`]),
       ),
     };
@@ -175,57 +195,78 @@ it.each(
         await writeFile(join(root, path), text);
       }),
     );
-    const runner =
-      moduleKind === "import"
-        ? 'const load = async () => (await import("fixture")).default;'
-        : 'const load = async () => require("fixture");';
-    const native = await promisify(execFile)(
-      process.execPath,
-      [
-        "--input-type",
-        moduleKind === "import" ? "module" : "commonjs",
-        "--eval",
-        `${runner} load().then(value => console.log(JSON.stringify({value,code:null})), error => console.log(JSON.stringify({value:null,code:error.code ?? error.name})));`,
-      ],
-      { cwd: root, timeout: 5_000 },
-    );
-    const oracle = nativeResultSchema.parse(JSON.parse(native.stdout));
-    expect(oracle.value, name).toBe(expected);
-    if (nodeError !== undefined)
-      expect(oracle.code).toBe(
-        moduleKind === "import" && nodeError === "MODULE_NOT_FOUND"
-          ? "ERR_MODULE_NOT_FOUND"
-          : nodeError,
+    for (const moduleKind of ["import", "require"] as const) {
+      const runner =
+        moduleKind === "import"
+          ? 'const load = async () => (await import("fixture")).default;'
+          : 'const load = async () => require("fixture");';
+      const native = await promisify(execFile)(
+        process.execPath,
+        [
+          "--input-type",
+          moduleKind === "import" ? "module" : "commonjs",
+          "--eval",
+          `${runner} load().then(value => console.log(JSON.stringify({value,code:null})), error => console.log(JSON.stringify({value:null,code:error.code ?? error.name})));`,
+        ],
+        { cwd: root, timeout: 5_000 },
       );
+      const oracle = nativeResultSchema.parse(JSON.parse(native.stdout));
+      expect(oracle.value, `${name} (${moduleKind})`).toBe(expected);
+      if (nodeError !== undefined)
+        expect(oracle.code, `${name} (${moduleKind})`).toBe(
+          moduleKind === "import" && nodeError === "MODULE_NOT_FOUND"
+            ? "ERR_MODULE_NOT_FOUND"
+            : nodeError,
+        );
+    }
+
     const result = await reconstructJavaScriptArtifact({
       input_path: root,
       format: "directory",
     });
-    const edge = result.graph.edges.find(
-      ({ properties }) =>
-        properties.specifier === "fixture" &&
-        properties.resolution_status !== undefined &&
-        properties.resolution_status !== null,
-    );
-    expect(edge).toBeDefined();
-    expect(edge?.properties.resolved_path).toBe(expected);
-    if (expected !== null) {
-      expect(edge?.properties.resolution_status).toBe("resolved");
-    } else {
-      expect(edge?.properties.resolution_status).not.toBe("resolved");
-    }
-    if (rejectedTarget !== undefined) {
-      expect(edge?.properties.resolution_status).toBe("rejected");
-      expect(edge?.evidence.limitations.join(" ")).toContain(
-        JSON.stringify(rejectedTarget),
+    for (const mainPath of ["main.mjs", "main.cjs"] as const) {
+      const edge = result.graph.edges.find(
+        ({ evidence, properties }) =>
+          properties.specifier === "fixture" &&
+          properties.resolution_status !== undefined &&
+          properties.resolution_status !== null &&
+          evidence.location.available &&
+          evidence.location.value.kind === "source-range" &&
+          evidence.location.value.source === mainPath,
       );
-      expect(edge?.evidence.limitations.join(" ")).toContain("exports target");
-      expect(edge?.evidence.limitations.join(" ")).not.toContain(
-        "not valid package JSON",
+      expect(edge, `${name} (${mainPath})`).toBeDefined();
+      expect(edge?.properties.resolved_path, `${name} (${mainPath})`).toBe(
+        expected,
       );
-      expect(edge?.evidence.location).toMatchObject({
-        value: { kind: "source-range", source: mainPath },
-      });
+      if (expected !== null) {
+        expect(
+          edge?.properties.resolution_status,
+          `${name} (${mainPath})`,
+        ).toBe("resolved");
+      } else {
+        expect(
+          edge?.properties.resolution_status,
+          `${name} (${mainPath})`,
+        ).not.toBe("resolved");
+      }
+      if (rejectedTarget !== undefined) {
+        expect(
+          edge?.properties.resolution_status,
+          `${name} (${mainPath})`,
+        ).toBe("rejected");
+        expect(edge?.evidence.limitations.join(" ")).toContain(
+          JSON.stringify(rejectedTarget),
+        );
+        expect(edge?.evidence.limitations.join(" ")).toContain(
+          "exports target",
+        );
+        expect(edge?.evidence.limitations.join(" ")).not.toContain(
+          "not valid package JSON",
+        );
+        expect(edge?.evidence.location).toMatchObject({
+          value: { kind: "source-range", source: mainPath },
+        });
+      }
     }
   },
 );

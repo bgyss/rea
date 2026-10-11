@@ -1,3 +1,4 @@
+import { ok as resultOk } from "../../src/domain/result.js";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 
 import { createTestBinarySession } from "./binarySession.js";
@@ -16,9 +17,9 @@ export interface ApplicationMcpHarness {
 export async function createApplicationMcpHarness(): Promise<ApplicationMcpHarness> {
   const session = createTestBinarySession(() => ({
     execute: () => Promise.resolve(observed(null)),
-    close: () => Promise.resolve(),
+    close: () => Promise.resolve(resultOk(null)),
   }));
-  const server = createServer(session, session);
+  const server = createServer({ kind: "session", session });
   const client = new Client({
     name: "application-workflow-test",
     version: "1",

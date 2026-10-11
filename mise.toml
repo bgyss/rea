@@ -11,6 +11,7 @@ description = "Real Ghidra lanes: native fixtures, raw images, compiled-function
 run = [
   "npm run verify:ghidra",
   "npm run verify:ghidra:raw",
+  "npm run verify:ghidra:raw-image",
   "npm run verify:ghidra:compare",
   "npm run verify:ghidra:signatures",
   "npm run verify:ghidra:text",

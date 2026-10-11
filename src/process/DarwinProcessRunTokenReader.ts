@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -64,6 +64,13 @@ const sourceFiles = [
     ),
   ),
 ];
+
+/**
+ * swift-driver runs each frontend job in its own process group. On SIGINT it
+ * stops those jobs and deletes their objects before exiting; on SIGTERM it
+ * exits while a job can still write objects under TMPDIR.
+ */
+export const SWIFTC_INTERRUPT = "SIGINT";
 
 /** The native Darwin process-ownership reader could not be prepared. */
 export class DarwinProcessOwnershipInspectionError extends Error {
@@ -149,21 +156,26 @@ export const createDarwinProcessRunTokenReader = (
       exitCleanupInstalled = true;
       if (signal.aborted || closed) throw abortReason(signal);
       const output = join(operationRoot, "reader");
+      // swiftc keeps intermediate objects under TMPDIR, so keep them inside
+      // the root that cleanup removes.
+      const compilerTemporary = join(operationRoot, "tmp");
+      await mkdir(compilerTemporary);
+      const compilerEnvironment: NodeJS.ProcessEnv = {
+        ...process.env,
+        TMPDIR: compilerTemporary,
+      };
+      // Use Swift's reusable default cache for REA's internal helper compilation.
+      delete compilerEnvironment.CLANG_MODULE_CACHE_PATH;
       try {
         await execFileOutput(
           options.xcrun ?? "/usr/bin/xcrun",
-          [
-            "swiftc",
-            "-module-cache-path",
-            join(operationRoot, "modules"),
-            ...sourceFiles,
-            "-o",
-            output,
-          ],
+          ["swiftc", ...sourceFiles, "-o", output],
           {
             timeout: 60_000,
             maxBuffer: 1024 * 1024,
             signal,
+            stopSignal: SWIFTC_INTERRUPT,
+            env: compilerEnvironment,
           },
         );
       } catch (cause: unknown) {
@@ -173,7 +185,9 @@ export const createDarwinProcessRunTokenReader = (
             ? String(cause.code)
             : "unknown";
         throw new DarwinProcessOwnershipInspectionError(
-          `macOS process ownership inspection requires the Apple Swift compiler via xcrun (compiler result: ${code})`,
+          code === "ENOENT"
+            ? `macOS process ownership inspection requires the Apple Swift compiler via xcrun (compiler result: ${code})`
+            : `macOS process ownership helper compilation failed via xcrun (compiler result: ${code}): ${cause instanceof Error ? cause.message : String(cause)}`,
           { cause },
         );
       }
@@ -248,11 +262,17 @@ export const createDarwinProcessRunTokenReader = (
 
   const read = async (
     processes: readonly ProcessTableEntry[],
+    signal?: AbortSignal,
   ): Promise<ReadonlyMap<number, ProcessRunTokenObservation>> => {
+    signal?.throwIfAborted();
     if (processes.length === 0) return new Map();
-    const binary = await compile();
+    const binary = await compile(signal);
     const pids = processes.map(({ pid }) => String(pid));
-    const { stdout } = await execFileOutput(binary, pids, { timeout: 15_000 });
+    const { stdout } = await execFileOutput(binary, pids, {
+      timeout: 15_000,
+      ...(signal === undefined ? {} : { signal }),
+    });
+    signal?.throwIfAborted();
     const decoded = safeParseJson(stdout);
     if (!decoded.ok)
       throw new Error(

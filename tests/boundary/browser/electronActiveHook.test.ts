@@ -4,12 +4,14 @@ import { spawn } from "node:child_process";
 
 import { afterEach, expect, it } from "vitest";
 
+import { electronActiveTimelineEventSchema } from "../../../src/domain/javascript/electronActiveObservation.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 
 const temporary: string[] = [];
 
 const electronModuleSource = `const { EventEmitter } = require("node:events");
 const app = new EventEmitter();
+app.isReady = () => true;
 app.relaunch = () => undefined;
 app.setAsDefaultProtocolClient = () => true;
 app.setLoginItemSettings = () => undefined;
@@ -40,6 +42,8 @@ class BrowserWindow extends EventEmitter {
     this.id = 3;
     this.webContents = new WebContents();
     this.options = options;
+    this.webContents.getLastWebPreferences = () => options.webPreferences;
+    app.emit("browser-window-created", {}, this);
   }
 }
 const utilityProcess = {
@@ -66,7 +70,7 @@ const contextBridge = {
 };
 module.exports = {
   app,
-  BrowserWindow,
+  get BrowserWindow() { return BrowserWindow; },
   contextBridge,
   ipcMain,
   ipcRenderer,
@@ -150,6 +154,9 @@ it("retains active hook evidence within its event-retention budget", async () =>
     };
   };
   const { snapshot } = result;
+  expect(
+    electronActiveTimelineEventSchema.array().parse(snapshot.events),
+  ).toHaveLength(snapshot.retained);
 
   expect(snapshot.hook_error).toBe(false);
   expect(snapshot.events).toHaveLength(snapshot.retained);

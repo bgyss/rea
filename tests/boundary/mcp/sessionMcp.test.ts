@@ -1,3 +1,4 @@
+import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
@@ -15,7 +16,9 @@ import type {
   AnalysisClient,
   AnalysisProvider,
   CapabilityDescriptor,
+  ProviderAvailability,
 } from "../../../src/application/AnalysisProvider.js";
+import type { AndroidAnalysisPort } from "../../../src/application/android/AndroidAnalysisPort.js";
 import { observed as ok } from "../../fixtures/analysisExecution.js";
 import { createServer } from "../../../src/server/createServer.js";
 import { silentLogger } from "../../../src/logger.js";
@@ -149,6 +152,52 @@ describe("MCP snapshot lifecycle ordering", () => {
 });
 
 describe("target-free MCP lifecycle", () => {
+  it("takes the session snapshot after Android readiness inspection completes", async () => {
+    directory = await createTestTempDirectory("rea-mcp-status-readiness-");
+    const targetPath = join(directory, "target.hop");
+    await writeFile(targetPath, "fixture target");
+    const entered = createDeferred<void>();
+    const availability = createDeferred<ProviderAvailability>();
+    const closed: string[] = [];
+    const session = createTestBinarySession(provider(closed));
+    const androidAnalysis: AndroidAnalysisPort = {
+      inspectAvailability: () => {
+        entered.resolve();
+        return availability.promise;
+      },
+      close: () => Promise.resolve(),
+      execute: () => Promise.resolve(ok(null)),
+    };
+    const server = createServer(
+      { kind: "session", session },
+      {
+        androidAnalysis,
+        logger: silentLogger,
+      },
+    );
+    const mcp = new Client({ name: "status-readiness", version: "1.0.0" });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    resources.push(mcp, server);
+    await server.connect(serverTransport);
+    await mcp.connect(clientTransport);
+
+    const status = mcp.callTool({ name: "binary_session", arguments: {} });
+    await entered.promise;
+    expect((await session.open(targetPath)).ok).toBe(true);
+    availability.resolve({
+      status: "available",
+      code: null,
+      reason: null,
+      diagnostics: { configured: true },
+    });
+
+    expect(structured(await status).result).toMatchObject({
+      open: true,
+      path: targetPath,
+    });
+  });
+
   it("reopens replaced content at one canonical path through MCP", async () => {
     directory = await createTestTempDirectory("rea-mcp-replaced-target-");
     const targetPath = join(directory, "mutable.hop");
@@ -156,11 +205,12 @@ describe("target-free MCP lifecycle", () => {
     const closed: string[] = [];
     const session = createTestBinarySession(provider(closed), {
       resolveAnalysisProfile: () =>
-        Promise.resolve(
-          resultOk({ profile: SNAPSHOT_PROFILE, compatibility: {} }),
-        ),
+        Promise.resolve(resultOk({ profile: SNAPSHOT_PROFILE })),
     });
-    const server = createServer(session, session, { logger: silentLogger });
+    const server = createServer(
+      { kind: "session", session },
+      { logger: silentLogger },
+    );
     const mcp = new Client({ name: "replaced-target", version: "1.0.0" });
     const [clientTransport, serverTransport] =
       InMemoryTransport.createLinkedPair();
@@ -174,6 +224,9 @@ describe("target-free MCP lifecycle", () => {
         arguments: { path: targetPath },
       }),
     ).result;
+    expect(
+      (await mcp.callTool({ name: "current_document", arguments: {} })).isError,
+    ).not.toBe(true);
     await writeFile(targetPath, "second");
     const second = structured(
       await mcp.callTool({
@@ -302,7 +355,12 @@ describe("target-free MCP workflow", () => {
           arguments: { snapshot_path: snapshotPath },
         }),
       ).result,
-    ).toMatchObject({ path: snapshotPath, entries: 0 });
+    ).toMatchObject({
+      path: snapshotPath,
+      primitive_entries: 0,
+      workflow_entries: 0,
+      evidence_records: 0,
+    });
     expect(JSON.parse(await readFile(snapshotPath, "utf8"))).toMatchObject({
       evidence_bundle: { records: [], unknowns: [] },
     });
@@ -405,12 +463,16 @@ const client = (path: string, closed: string[]): AnalysisClient => ({
     ),
   close: () => {
     closed.push(path);
-    return Promise.resolve();
+    return Promise.resolve(resultOk(null));
   },
 });
 
 const provider = (closed: string[]): AnalysisProvider => {
-  const identity = { id: "fixture", name: "Fixture", version: "1" };
+  const identity = {
+    id: "fixture",
+    name: "Fixture analysis provider",
+    version: "1",
+  };
   const capability: CapabilityDescriptor = {
     provider: identity,
     operation: "current_document",
@@ -441,6 +503,7 @@ const text = (result: CallToolResult): string => {
 };
 
 const structured = (result: CallToolResult): Record<string, unknown> => {
+  if (result.isError === true) return parseMcpToolError(result);
   if (
     typeof result.structuredContent !== "object" ||
     result.structuredContent === null

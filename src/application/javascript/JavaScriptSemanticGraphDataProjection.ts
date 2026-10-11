@@ -1,5 +1,5 @@
 import { createJavaScriptSemanticGraphUnknown } from "../../domain/javascript/javascriptSemanticGraph.js";
-import type { JavaScriptSemanticGraphNode } from "../../domain/javascript/javascriptSemanticGraph.js";
+import type { JavaScriptSemanticGraphNode } from "../../domain/javascript/javascriptSemanticGraphSchemas.js";
 import type {
   JavaScriptSemanticBoundaryOperation,
   JavaScriptSemanticConfigurationOperation,
@@ -11,10 +11,7 @@ import {
   addSemanticGraphUnknown,
 } from "./JavaScriptSemanticGraphConstruction.js";
 import { unknownSemanticEvidence } from "./JavaScriptSemanticGraphEvidence.js";
-import {
-  semanticCallSiteAt,
-  type SemanticFlowProjectionContext,
-} from "./JavaScriptSemanticGraphFlowProjection.js";
+import type { SemanticFlowProjectionContext } from "./JavaScriptSemanticGraphFlowProjection.js";
 
 /** Project environment, argv, file, default, and precedence candidates. */
 export const projectSemanticConfiguration = (
@@ -140,7 +137,11 @@ const addRequestNode = (
     kind: operation.kind === "request" ? "request" : "response",
     roleKey: operation.requestId,
     location: operation.location,
-    label: operation.endpoint ?? operation.method,
+    label:
+      operation.endpoint !== null &&
+      operation.endpoint.length <= operation.method.length
+        ? operation.endpoint
+        : operation.method,
     functionNodeId:
       operation.ownerCallableId === null
         ? null
@@ -158,7 +159,7 @@ const projectRequestConstruction = (
   operation: JavaScriptSemanticRequestOperation,
   request: JavaScriptSemanticGraphNode,
 ): void => {
-  const callSite = semanticCallSiteAt(context, operation.location);
+  const callSite = context.callSiteAt(operation.location);
   addSemanticGraphRelation(context.state, {
     source: callSite,
     target: request,
@@ -197,7 +198,7 @@ const projectResponseConsumer = (
 ): void => {
   addSemanticGraphRelation(context.state, {
     source: response,
-    target: semanticCallSiteAt(context, operation.location),
+    target: context.callSiteAt(operation.location),
     relation: "consumed-by",
     resolution: operation.resolution === "complete" ? "resolved" : "candidate",
     properties: { method: operation.method },
@@ -310,14 +311,17 @@ const addDataUnknown = (input: DataUnknownInput): void => {
   } = input;
   addSemanticGraphUnknown(
     context.state,
-    createJavaScriptSemanticGraphUnknown({
-      node_id: node.node_id,
-      family,
-      relation_kinds: relationKinds,
-      reason: "ambiguous-target",
-      detail,
-      candidate_node_ids: candidateNodeIds,
-      evidence: unknownSemanticEvidence(context.file, location),
-    }),
+    createJavaScriptSemanticGraphUnknown(
+      {
+        node_id: node.node_id,
+        family,
+        relation_kinds: relationKinds,
+        reason: "ambiguous-target",
+        detail,
+        candidate_node_ids: candidateNodeIds,
+        evidence: unknownSemanticEvidence(context.file, location),
+      },
+      context.state.evidenceContexts,
+    ),
   );
 };

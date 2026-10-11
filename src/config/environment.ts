@@ -4,11 +4,23 @@ import { isAbsolute } from "node:path";
 import { ConfigurationError } from "../domain/configurationErrors.js";
 import { err, ok, type Result } from "../domain/result.js";
 import { analysisProviderSelectorSchema } from "../contracts/providerSelection.js";
+import {
+  ghidraCompilerSpecIdSchema,
+  ghidraLanguageIdSchema,
+} from "./ghidraLanguageOverride.js";
+import { ghidraDisabledAnalyzersSchema } from "./ghidraDisabledAnalyzers.js";
+import {
+  DEFAULT_GHIDRA_STARTUP_TIMEOUT_MS,
+  DEFAULT_HOPPER_STARTUP_TIMEOUT_MS,
+  providerStartupTimeoutSchema,
+} from "./providerStartupTimeout.js";
+import { mcpInputSchemaProfileSchema } from "./mcpInputSchemaProfile.js";
 import { mcpResponseBudgetSchema } from "./mcpResponseBudget.js";
 
 const environmentSchema = z.object({
   REA_ANALYSIS_PROVIDER: analysisProviderSelectorSchema.default("auto"),
   REA_MCP_MAX_RESPONSE_BYTES: mcpResponseBudgetSchema.optional(),
+  REA_MCP_INPUT_SCHEMA_PROFILE: mcpInputSchemaProfileSchema.optional(),
   REA_IDA_MCP_CONFIG: z
     .string()
     .min(1)
@@ -34,6 +46,20 @@ const environmentSchema = z.object({
     .min(1)
     .refine(isAbsolute, "REA_GHIDRA_PROJECT_CACHE_DIR must be absolute")
     .optional(),
+  REA_GHIDRA_STARTUP_TIMEOUT_MS: providerStartupTimeoutSchema.default(
+    DEFAULT_GHIDRA_STARTUP_TIMEOUT_MS,
+  ),
+  REA_HOPPER_STARTUP_TIMEOUT_MS: providerStartupTimeoutSchema.default(
+    DEFAULT_HOPPER_STARTUP_TIMEOUT_MS,
+  ),
+  REA_GHIDRA_LANGUAGE_ID: ghidraLanguageIdSchema.optional(),
+  REA_GHIDRA_COMPILER_SPEC_ID: ghidraCompilerSpecIdSchema.optional(),
+  REA_GHIDRA_DISABLED_ANALYZERS: ghidraDisabledAnalyzersSchema.optional(),
+  REA_GHIDRA_SEED_FILE: z
+    .string()
+    .min(1)
+    .refine(isAbsolute, "REA_GHIDRA_SEED_FILE must be absolute")
+    .optional(),
   REA_ILSPY_CMD_PATH: z
     .string()
     .min(1)
@@ -56,9 +82,15 @@ export const parseEnvironment = (
 ): Result<Environment, ConfigurationError> => {
   const parsed = environmentSchema.safeParse(environment);
   if (!parsed.success) {
+    // Zod messages name the constraint, never the rejected value.
+    const settings = parsed.error.issues.map((issue) => ({
+      setting: String(issue.path[0] ?? "environment"),
+      constraint: issue.message,
+    }));
     return err(
       new ConfigurationError("Invalid REA environment configuration", {
         cause: parsed.error,
+        settings,
       }),
     );
   }

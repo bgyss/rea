@@ -4,7 +4,7 @@ import { join, relative, sep } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { analyzeJavaScriptApplication } from "../../../src/application/javascript/JavaScriptApplicationService.js";
+import { analyzeJavaScriptApplication } from "../../support/javascriptApplicationScope.js";
 import { parseApplicationGraphEvidence } from "../../../src/application/javascript/JavaScriptApplicationEvidenceGraph.js";
 import { javascriptApplicationAnalysisResultSchema } from "../../../src/domain/javascript/javascriptApplicationAnalysis.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
@@ -15,7 +15,9 @@ const analyze = async (root: string) => {
     format: "directory",
   });
   if (!result.ok) throw result.error;
-  const authenticated = parseApplicationGraphEvidence(result.value);
+  const parsed = parseApplicationGraphEvidence(result.value);
+  if (!parsed.ok) throw new Error("Analysis Evidence must parse");
+  const authenticated = parsed.value;
   return {
     graph: authenticated.graph,
     result: javascriptApplicationAnalysisResultSchema.parse(

@@ -8,7 +8,10 @@ import {
   functionBodySchema,
 } from "../domain/hopperValues.js";
 import { analysisProfileSchema } from "../domain/analysisProfile.js";
-import { evidenceEnvelopeSchema } from "../domain/evidence.js";
+import {
+  evidenceSchema,
+  validateAnalysisProfileProvider,
+} from "../domain/evidence.js";
 import { jsonValueSchema } from "../domain/jsonValue.js";
 import {
   PROVIDER_REJECTION_CODES,
@@ -20,27 +23,25 @@ import {
   PROVIDER_RETRY_ACTIONS,
 } from "../domain/providerOperationHealth.js";
 import { analysisErrorProjectionSchema } from "./errorSchemas.js";
-import { prefixedDigestSchema } from "./../domain/digests.js";
 
-/** Inline result with its complete Evidence record. */
-export const inlineEvidenceRecordSchema = evidenceEnvelopeSchema;
+/** Specialize the single normalized result inside a complete Evidence record. */
+export const evidenceResultOf = <Schema extends z.ZodType>(schema: Schema) =>
+  z
+    .strictObject({ ...evidenceSchema.shape, normalized_result: schema })
+    .superRefine(validateAnalysisProfileProvider);
 
-export const evidenceResultOf = (schema: z.ZodType) =>
-  z.strictObject({
-    result: schema,
-    evidence_id: prefixedDigestSchema("ev"),
-    evidence: inlineEvidenceRecordSchema,
-  });
-
-const resultOf = evidenceResultOf;
-export const lifecycleResultOf = (schema: z.ZodType) =>
+/** Wrap a lifecycle result while preserving its exact schema type. */
+export const lifecycleResultOf = <Schema extends z.ZodType>(schema: Schema) =>
   z.object({ result: schema });
 
 /** Resolve a required named output schema or reject contract drift. */
-export const requireOutputSchema = (
-  schemas: Readonly<Record<string, z.ZodObject>>,
-  name: string,
-): z.ZodObject => {
+export const requireOutputSchema = <
+  Schemas extends Readonly<Record<string, z.ZodObject>>,
+  Name extends keyof Schemas & string,
+>(
+  schemas: Schemas,
+  name: Name,
+): Schemas[Name] => {
   const schema = schemas[name];
   if (schema === undefined)
     throw new Error(`Missing output schema for ${name}`);
@@ -56,6 +57,7 @@ export const targetFormatSchema = z.enum([
   "dos-mz",
   "dos-com",
   "raw-image",
+  "raw-binary",
   "zip",
   "ipa",
   "apk",
@@ -292,6 +294,8 @@ const toolAvailabilityFacts = {
     accessesNetwork: z.boolean(),
     changesUiState: z.boolean(),
     mayDiscardData: z.boolean(),
+    executesForeignCode: z.boolean(),
+    mutatesDevice: z.boolean(),
     idempotent: z.boolean(),
   }),
   annotations: z.object({
@@ -332,8 +336,6 @@ export type ToolUnavailabilityReason = z.output<
 
 export const sessionProvider = z
   .object({
-    provider: providerIdentity,
-    providers: z.array(providerIdentity),
     capabilities: z.array(providerCapability),
     analysis_run: analysisRun,
     analysis_activity: analysisActivity,
@@ -407,14 +409,11 @@ export const addressedEntry = z.object({
   address: z.string(),
   name: z.string(),
 });
-export const procedureIdentity = procedureIdentitySchema;
-const localVariable = localVariableSchema;
-
 export const containingProcedureResolution = z.discriminatedUnion("found", [
   z.object({
     query_address: z.string(),
     found: z.literal(true),
-    procedure: procedureIdentity,
+    procedure: procedureIdentitySchema,
   }),
   z.object({
     query_address: z.string(),
@@ -477,28 +476,25 @@ const memoryRegionOutput = z.object({
   overlay: z.boolean().optional(),
 });
 
-export const segmentOutput = resultOf(
+export const segmentOutput = evidenceResultOf(
   z.array(memoryRegionOutput.extend({ sections: z.array(memoryRegionOutput) })),
 );
 
-export const procedureInfoOutput = resultOf(
+export const procedureInfoOutput = evidenceResultOf(
   z.object({
     name: z.string(),
     entrypoint: z.string(),
     basicblock_count: z.number().int().min(0),
     length: z.number().min(0),
     signature: nullableText,
-    locals: z.array(localVariable),
-    classification: procedureClassificationSchema.nullable().default(null),
-    body: functionBodySchema.default({
-      available: false,
-      reason: "The provider did not report complete function body ranges.",
-    }),
+    locals: z.array(localVariableSchema),
+    classification: procedureClassificationSchema.nullable(),
+    body: functionBodySchema,
   }),
 );
 
 export const symbolDiscoveryOutput = (property: "classes" | "protocols") =>
-  resultOf(
+  evidenceResultOf(
     z.object({
       count: z.number().int().min(0),
       [property]: z.array(addressedEntry),
@@ -519,4 +515,6 @@ export const graphNode = z.discriminatedUnion("status", [
 ]);
 
 /** Complete dossier, or the caller-selected facet projection of one. */
-export const functionDossierOutput = resultOf(functionDossierResultSchema);
+export const functionDossierOutput = evidenceResultOf(
+  functionDossierResultSchema,
+);

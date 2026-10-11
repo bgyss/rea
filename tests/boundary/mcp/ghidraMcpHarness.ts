@@ -1,17 +1,16 @@
+import { expect } from "vitest";
+import { parseEvidence } from "../../../src/domain/evidence.js";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { composeBinarySession } from "../../../src/application/binary/BinarySessionComposition.js";
 import type { BinarySession } from "../../../src/application/binary/BinarySession.js";
 import { AnalysisProviderRegistry } from "../../../src/application/binary/AnalysisProviderRegistry.js";
-import { SessionProviderRouter } from "../../../src/application/binary/SessionProviderRouter.js";
-import { parseConfig } from "../../../src/config.js";
+import { parseConfig } from "../../../src/config/parseConfig.js";
 import type { JsonValue } from "../../../src/domain/jsonValue.js";
 import { ok } from "../../../src/domain/result.js";
 import type { GhidraInstallationHost } from "../../../src/ghidra/GhidraInstallation.js";
 import type { GhidraOperation } from "../../../src/ghidra/GhidraClient.js";
-import {
-  GhidraProvider,
-  type GhidraProviderClientFactory,
-} from "../../../src/ghidra/GhidraProvider.js";
+import { GhidraProvider } from "../../../src/ghidra/GhidraProvider.js";
+import type { GhidraProviderClientFactory } from "../../../src/ghidra/GhidraProviderClient.js";
 import { GHIDRA_SESSION_CAPABILITIES } from "../../../src/ghidra/GhidraSessionValues.js";
 import { silentLogger } from "../../../src/logger.js";
 import { createServer } from "../../../src/server/createServer.js";
@@ -39,23 +38,24 @@ export const connectGhidraMcp = async (
       if (execute !== undefined) return execute(operation, input, options);
       return Promise.resolve(ok(resultFor(operation, input)));
     },
-    close: () => Promise.resolve(),
+    close: () => Promise.resolve(ok(null)),
   });
   const config = parseConfig({ GHIDRA_INSTALL_DIR: INSTALL });
   if (!config.ok) throw config.error;
   const provider = new GhidraProvider(
     config.value,
     silentLogger,
+    {},
     installationHost(),
     factory,
   );
   const session = composeBinarySession(
-    SessionProviderRouter.selectable(
-      new AnalysisProviderRegistry([provider]),
-      [],
-    ),
+    new AnalysisProviderRegistry([provider]),
   );
-  const server = createServer(session, session, { logger: silentLogger });
+  const server = createServer(
+    { kind: "session", session },
+    { logger: silentLogger },
+  );
   const mcp = new Client({ name, version: "1.0.0" });
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
@@ -71,7 +71,9 @@ export const connectGhidraMcp = async (
       arguments: { path: process.execPath },
     });
     if (opened.isError === true)
-      throw new Error("The Ghidra MCP harness could not open its target");
+      throw new Error(
+        `The Ghidra MCP harness could not open its target: ${JSON.stringify(opened)}`,
+      );
   } catch (cause: unknown) {
     await close();
     throw cause;
@@ -85,17 +87,8 @@ export const connectGhidraMcp = async (
 };
 
 export const sessionEvidence = (session: BinarySession, value: unknown) => {
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    !("evidence_id" in value) ||
-    typeof value.evidence_id !== "string"
-  )
-    throw new TypeError(
-      `Missing compact Evidence ID: ${JSON.stringify(value)}`,
-    );
-  const evidence = session.evidenceById(value.evidence_id);
-  if (evidence === undefined) throw new TypeError("Missing session Evidence");
+  const evidence = parseEvidence(value);
+  expect(session.evidenceById(evidence.evidence_id)).toEqual(evidence);
   return evidence;
 };
 
@@ -213,15 +206,19 @@ const resultBuilders = new Map<GhidraOperation, GhidraResultBuilder>([
   ["procedure_callers", () => []],
   [
     "procedure_info",
-    () => ({
-      name: "fixture_main",
-      entrypoint: "0x401000",
-      basicblock_count: 1,
-      length: 6,
-      signature: "int fixture_main(void)",
-      locals: [],
-      classification: ghidraFunctionClassification(),
-    }),
+    () => {
+      const identity = ghidraFunctionIdentity();
+      return {
+        name: "fixture_main",
+        entrypoint: "0x401000",
+        basicblock_count: 1,
+        length: 6,
+        signature: "int fixture_main(void)",
+        locals: [],
+        classification: ghidraFunctionClassification(),
+        body: identity.body,
+      };
+    },
   ],
   ["procedure_pseudo_code", () => "int fixture_main(void) { return 42; }"],
   [
@@ -254,8 +251,22 @@ const resultFor = (
   const builder = resultBuilders.get(operation);
   if (builder === undefined)
     throw new TypeError(`Unexpected Ghidra operation: ${operation}`);
-  return builder(input, typeof input.limit === "number" ? input.limit : 100);
+  const value = builder(
+    input,
+    typeof input.limit === "number" ? input.limit : 100,
+  );
+  return functionObservationOperations.has(operation)
+    ? { value, limitations: [] }
+    : value;
 };
+
+const functionObservationOperations: ReadonlySet<GhidraOperation> = new Set([
+  "analyze_function",
+  "procedure_assembly",
+  "procedure_info",
+  "procedure_pseudo_code",
+  "read_function_instructions",
+]);
 
 const stringItem = (address: string, value: string): JsonValue => ({
   address,

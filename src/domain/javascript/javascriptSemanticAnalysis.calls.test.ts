@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import { analyzeJavaScriptSemantics } from "./javascriptSemanticAnalysis.js";
-import { semanticBinding } from "./javascriptSemanticIr.js";
 import {
+  bindingById,
   onlyCallable,
   topLevelBinding,
 } from "./javascriptSemanticAnalysis.fixture.js";
@@ -39,7 +39,7 @@ describe("JavaScript semantic analysis: calls 1", () => {
         .filter(({ callSiteId }) => callSiteId === call.callSiteId)
         .map(({ argumentIndex, parameterBindingId }) => ({
           argumentIndex,
-          parameter: semanticBinding(ir, parameterBindingId)?.name,
+          parameter: bindingById(ir, parameterBindingId)?.name,
         })),
     ).toEqual([
       { argumentIndex: 0, parameter: "value" },
@@ -179,6 +179,34 @@ describe("JavaScript semantic analysis: calls 2", () => {
     ).not.toBe(left.functionFingerprints[0]?.components.literalSetSha256);
   });
 
+  it("keeps nested callable syntax out of its owner's fingerprint", () => {
+    const analyze = (nested: number, owned: number) =>
+      analyzeJavaScriptSemantics(`
+        function outer() {
+          function inner() { return ${nested}; }
+          const object = { method() { return ${nested}; } };
+          class Nested { method() { return ${nested}; } }
+          return ${owned};
+        }
+      `);
+    const first = analyze(1, 2);
+    const changedNested = analyze(3, 2);
+    const changedOwner = analyze(1, 4);
+    const syntax = (ir: typeof first) =>
+      ir.functionFingerprints.map(({ components }) => ({
+        ast: components.normalizedAstSha256,
+        control: components.controlFlowSha256,
+        literals: components.literalSetSha256,
+      }));
+    const original = syntax(first);
+    expect(original).toHaveLength(4);
+    expect(syntax(changedNested)[0]).toEqual(original[0]);
+    for (const index of [1, 2, 3])
+      expect(syntax(changedNested)[index]).not.toEqual(original[index]);
+    expect(syntax(changedOwner)[0]).not.toEqual(original[0]);
+    expect(syntax(changedOwner).slice(1)).toEqual(original.slice(1));
+  });
+
   it("keeps fingerprint relations ordered and effects scoped to their owner", () => {
     const ordered = analyzeJavaScriptSemantics(`
       function first() {}
@@ -309,7 +337,7 @@ describe("JavaScript semantic rest parameter flow", () => {
       expect(
         ir.argumentFlows.map(({ argumentIndex, parameterBindingId }) => [
           argumentIndex,
-          semanticBinding(ir, parameterBindingId)?.name,
+          bindingById(ir, parameterBindingId)?.name,
         ]),
       ).toEqual(expected);
     },

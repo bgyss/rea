@@ -1,16 +1,21 @@
 import { z } from "zod";
+import { localPathStringSchema } from "../localPath.js";
 
 const hexSchema = z.string().regex(/^0x[0-9a-f]+$/u);
-/** Objective-C class names and selectors never contain spaces or brackets. */
-const objcName = z
+const nativeString = z
   .string()
+  .regex(
+    /^[^\x00]*$/u,
+    "Native launch and breakpoint strings cannot contain NUL",
+  );
+/** Objective-C class names and selectors never contain spaces or brackets. */
+const objcName = nativeString
   .min(1)
-  .regex(/^[^\s[\]]+$/u, "Use the bare name without spaces or brackets");
+  .regex(/^[^\s\x5b\x5d]+$/u, "Use the bare name without spaces or brackets");
 
 const functionBreakpoint = {
   kind: z.literal("function"),
-  name: z
-    .string()
+  name: nativeString
     .min(1)
     .describe(
       "Exact symbol name, such as `open`, a C++ or mangled Swift symbol, or `-[NSString length]`.",
@@ -28,8 +33,7 @@ const objcMethodBreakpoint = {
 export const nativeCallBreakpointSchema = z.discriminatedUnion("kind", [
   z.strictObject({
     ...functionBreakpoint,
-    module: z
-      .string()
+    module: nativeString
       .min(1)
       .optional()
       .describe(
@@ -51,18 +55,18 @@ export const nativeCallBreakpointSchema = z.discriminatedUnion("kind", [
  */
 export const nativeCallObservationInputSchema = z.strictObject({
   breakpoints: z.array(nativeCallBreakpointSchema).min(1),
-  arguments: z.array(z.string()).default([]),
+  arguments: z.array(nativeString).default([]),
   environment: z
     .record(
       z
         .string()
         .min(1)
-        .regex(/^[^=\0]+$/u, "Environment names cannot contain '=' or NUL"),
-      z.string().regex(/^[^\0]*$/u, "Environment values cannot contain NUL"),
+        .regex(/^[^=\x00]+$/u, "Environment names cannot contain '=' or NUL"),
+      z.string().regex(/^[^\x00]*$/u, "Environment values cannot contain NUL"),
     )
     .default({})
     .describe("Overrides on top of the environment REA runs with."),
-  working_directory: z.string().min(1).optional(),
+  working_directory: localPathStringSchema.optional(),
   duration_ms: z
     .number()
     .int()

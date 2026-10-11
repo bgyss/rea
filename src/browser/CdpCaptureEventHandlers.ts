@@ -1,4 +1,5 @@
-import type { WebPageInspection } from "../domain/browserObservation.js";
+import type { WebPageInspection } from "../domain/browserObservationSchemas.js";
+import { sanitizeBrowserUrl } from "../domain/browserObservation.js";
 import { inferJsonShape } from "../domain/jsonShape.js";
 import { safeResponseMetadata } from "./CdpSafeMetadata.js";
 import {
@@ -7,6 +8,7 @@ import {
   numberValue,
   recordValue,
   recordsValue,
+  scriptMetadataValues,
   cdpStringValue,
   type UnknownRecord,
 } from "./CdpCaptureValues.js";
@@ -26,7 +28,11 @@ import {
   isMainFrameNavigation,
 } from "./CdpCaptureEventHelpers.js";
 import type { CdpCaptureEventsState } from "./CdpCaptureEventState.js";
-import type { CapturedScript, NetworkState } from "./CdpCaptureEventTypes.js";
+import {
+  CDP_CAPTURE_SCRIPT_METADATA_LIMITS,
+  type CapturedScript,
+  type NetworkState,
+} from "./CdpCaptureEventTypes.js";
 
 export const handleExecutionContextCreated = (
   state: CdpCaptureEventsState,
@@ -42,6 +48,7 @@ export const handleExecutionContextCreated = (
   )
     return;
   const key = String(identifier);
+  // New contexts may reuse an id. Scripts already parsed keep the frame stored on them.
   state.executionContextFrames.set(key, frameId);
 };
 
@@ -64,41 +71,104 @@ export const handleScriptParsed = (
     state.completeness.exclude("scripts", "invalid_protocol_value");
     return;
   }
+  const replacedBytes = state.scriptMetadataBytesById.get(scriptId) ?? 0;
+  state.scriptMetadataBudgetOmissionsById.delete(scriptId);
+  if (replacedBytes > 0) {
+    state.scripts.delete(scriptId);
+    state.scriptMetadataBytesById.delete(scriptId);
+    state.retainedScriptMetadataBytes -= replacedBytes;
+  }
   if (sanitized === undefined) {
     state.completeness.exclude("scripts", exclusionReasonForUrl(rawUrl));
     return;
   }
-  const sourceMap = sourceMapForScript(params.sourceMapURL, rawUrl, state);
-  const script: CapturedScript = {
+  const executionContext = executionContextKey(params.executionContextId);
+  const baseScript = {
     scriptId,
     rawUrl,
     url: sanitized.url,
     origin: sanitized.origin,
-    hash: cdpStringValue(params.hash) ?? "",
-    length: Math.max(
-      0,
-      Math.min(
-        Number.MAX_SAFE_INTEGER,
-        Math.trunc(numberValue(params.length) ?? 0),
-      ),
-    ),
-    isModule: params.isModule === true,
+    ...scriptMetadataValues(params),
     language: cdpStringValue(params.scriptLanguage) ?? null,
-    sourceMapUrl: sourceMap.sanitized,
-    sourceMapRawUrl: sourceMap.raw,
-    executionContextKey: executionContextKey(params.executionContextId),
+    executionContextKey: executionContext,
+    frameId:
+      executionContext === null
+        ? null
+        : (state.executionContextFrames.get(executionContext) ?? null),
   };
+  const baseBytes = scriptMetadataStringBytes(baseScript);
+  const sourceMapDeclared =
+    typeof params.sourceMapURL === "string" && params.sourceMapURL.length > 0;
+  if (
+    state.scripts.size >= CDP_CAPTURE_SCRIPT_METADATA_LIMITS.scripts ||
+    baseBytes >
+      CDP_CAPTURE_SCRIPT_METADATA_LIMITS.retainedBytes -
+        state.retainedScriptMetadataBytes
+  ) {
+    state.rejectedScriptMetadataBudgetCount += 1;
+    if (sourceMapDeclared) state.rejectedSourceMapMetadataBudgetCount += 1;
+    return;
+  }
+  const sourceMap = sourceMapForScript(
+    params.sourceMapURL,
+    rawUrl,
+    state,
+    CDP_CAPTURE_SCRIPT_METADATA_LIMITS.retainedBytes -
+      state.retainedScriptMetadataBytes -
+      baseBytes,
+  );
+  const { budgetExhausted, ...sourceMapFields } = sourceMap;
+  const script: CapturedScript = { ...baseScript, ...sourceMapFields };
+  if (budgetExhausted)
+    state.scriptMetadataBudgetOmissionsById.set(scriptId, true);
+  const retainedBytes =
+    baseBytes +
+    stringByteLength(sourceMap.sourceMapUrl) +
+    stringByteLength(sourceMap.sourceMapRawUrl);
+  state.retainedScriptMetadataBytes += retainedBytes;
+  state.scriptMetadataBytesById.set(scriptId, retainedBytes);
   state.scripts.set(scriptId, script);
 };
+
+const scriptMetadataStringBytes = (script: {
+  readonly scriptId: string;
+  readonly rawUrl: string;
+  readonly url: string;
+  readonly origin: string | null;
+  readonly hash: string | null;
+  readonly language: string | null;
+  readonly executionContextKey: string | null;
+  readonly frameId: string | null;
+}): number =>
+  stringByteLength(script.scriptId) +
+  stringByteLength(script.rawUrl) +
+  stringByteLength(script.url) +
+  stringByteLength(script.origin) +
+  stringByteLength(script.hash) +
+  stringByteLength(script.language) +
+  stringByteLength(script.executionContextKey) +
+  stringByteLength(script.frameId);
+
+const stringByteLength = (value: string | null): number =>
+  value === null ? 0 : Buffer.byteLength(value, "utf8");
 
 const sourceMapForScript = (
   value: unknown,
   scriptUrl: string,
   state: CdpCaptureEventsState,
-): { readonly sanitized: string | null; readonly raw: string | null } => {
+  remainingBytes: number,
+): {
+  readonly sourceMapUrl: string | null;
+  readonly sourceMapRawUrl: string | null;
+  readonly budgetExhausted: boolean;
+} => {
   const declaredUrl = cdpStringValue(value);
   if (declaredUrl === undefined || declaredUrl === "")
-    return { sanitized: null, raw: null };
+    return {
+      sourceMapUrl: null,
+      sourceMapRawUrl: null,
+      budgetExhausted: false,
+    };
   let rawUrl: string;
   try {
     rawUrl = new URL(declaredUrl, scriptUrl).href;
@@ -106,12 +176,36 @@ const sourceMapForScript = (
     // Unparseable URLs are recorded as unsupported, not as failures.
     void cause;
     state.completeness.exclude("source_maps", "unsupported_url");
-    return { sanitized: null, raw: null };
+    return {
+      sourceMapUrl: null,
+      sourceMapRawUrl: null,
+      budgetExhausted: false,
+    };
   }
   const sanitized = allowedSanitizedUrl(rawUrl, state.allowedOrigins);
-  if (sanitized !== undefined) return { sanitized: sanitized.url, raw: rawUrl };
+  if (sanitized !== undefined) {
+    if (
+      stringByteLength(rawUrl) + stringByteLength(sanitized.url) >
+      remainingBytes
+    ) {
+      return {
+        sourceMapUrl: null,
+        sourceMapRawUrl: null,
+        budgetExhausted: true,
+      };
+    }
+    return {
+      sourceMapUrl: sanitized.url,
+      sourceMapRawUrl: rawUrl,
+      budgetExhausted: false,
+    };
+  }
   state.completeness.exclude("source_maps", exclusionReasonForUrl(rawUrl));
-  return { sanitized: null, raw: null };
+  return {
+    sourceMapUrl: null,
+    sourceMapRawUrl: null,
+    budgetExhausted: false,
+  };
 };
 
 export const handleRequestWillBeSent = (
@@ -394,23 +488,20 @@ export const handleWebSocketFrame = (
   direction: "sent" | "received",
 ): void => {
   const requestId = cdpStringValue(params.requestId);
-  if (
-    requestId === undefined ||
-    (!state.network.has(requestId) && !state.allowedWebSockets.has(requestId))
-  )
-    return;
+  if (requestId === undefined) return;
+  const connection = state.webSocketConnectionsById.get(requestId);
+  if (connection === undefined) return;
   const response = recordValue(params.response);
   const payload = cdpStringValue(response?.payloadData) ?? "";
   const opcode = Math.max(0, Math.trunc(numberValue(response?.opcode) ?? 0));
   const decoded = opcode === 1 ? undefined : decodeBase64(payload);
   if (opcode !== 1 && decoded === undefined)
     state.completeness.exclude("websocket_frames", "invalid_protocol_value");
-  state.websockets.push({
-    request_id: requestId,
+  connection.events.push({
     direction,
     opcode,
     payload_bytes:
-      opcode === 1 ? Buffer.byteLength(payload) : (decoded?.byteLength ?? 0),
+      opcode === 1 ? Buffer.byteLength(payload) : (decoded?.byteLength ?? null),
     payload_shape: captureWebSocketShape(state, payload, opcode),
   });
 };
@@ -419,7 +510,7 @@ const captureWebSocketShape = (
   state: CdpCaptureEventsState,
   payload: string,
   opcode: number,
-): WebPageInspection["network"]["websocket_events"][number]["payload_shape"] => {
+): WebPageInspection["network"]["websocket_connections"][number]["events"][number]["payload_shape"] => {
   if (!state.input.include_websocket_shapes) return null;
   if (opcode !== 1) return { format: "binary", json_shape: null };
   const shape = inferJsonShape(payload);
@@ -449,9 +540,10 @@ export const handleWebSocketCreated = (
     );
     return;
   }
+  const sourceUrl = sanitizeBrowserUrl(rawUrl).url;
   let parsed: URL;
   try {
-    parsed = new URL(rawUrl);
+    parsed = new URL(sourceUrl);
   } catch (cause: unknown) {
     // Unparseable URLs are recorded as unsupported, not as failures.
     void cause;
@@ -468,7 +560,18 @@ export const handleWebSocketCreated = (
     state.completeness.exclude("websocket_connections", "disallowed_origin");
     return;
   }
-  state.allowedWebSockets.add(requestId);
+  if (state.webSocketConnectionsById.has(requestId)) {
+    state.completeness.exclude(
+      "websocket_connections",
+      "invalid_protocol_value",
+    );
+    return;
+  }
+  state.webSocketConnectionsById.set(requestId, {
+    request_id: requestId,
+    url: sourceUrl,
+    events: [],
+  });
 };
 
 export const handleFrameNavigated = (

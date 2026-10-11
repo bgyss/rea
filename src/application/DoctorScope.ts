@@ -3,6 +3,7 @@ import type {
   ClientRegistrationStatus,
   UnhealthyClientRegistrationStatus,
 } from "./ClientRegistrationStatus.js";
+import { manualRegistrationRemediation } from "./SupportedClients.js";
 import type {
   DoctorCheck,
   DoctorProviderInspection,
@@ -13,6 +14,7 @@ import type {
 export interface DoctorScopeReport {
   readonly mode: "audit-wide" | "explicit";
   readonly clients: readonly string[];
+  readonly skill_clients?: readonly string[];
   readonly providers: readonly string[];
   readonly skill: boolean;
   readonly target: string | null;
@@ -39,6 +41,9 @@ export const normalizeDoctorScope = (
 ): DoctorScopeReport => ({
   mode: requested === undefined ? "audit-wide" : "explicit",
   clients: uniqueSorted(requested?.clients ?? []),
+  ...(requested?.skillClients === undefined
+    ? {}
+    : { skill_clients: uniqueSorted(requested.skillClients) }),
   providers: uniqueSorted(requested?.providers ?? []),
   skill: requested?.skill === true,
   target: target ?? null,
@@ -135,8 +140,17 @@ const selectedProviderChecksFor = (
 const selectedRegistrationCheck = (
   client: string,
   status: ClientRegistrationStatus | undefined,
-): DoctorCheck =>
-  status === undefined
+): DoctorCheck => {
+  const manual = manualRegistrationRemediation(client);
+  if (status === undefined && manual !== undefined)
+    return {
+      name: `registration:${client}`,
+      ok: false,
+      classification: "config_drift",
+      detail: `${client} is not registered through a local configuration file.`,
+      remediation: manual,
+    };
+  return status === undefined
     ? {
         name: `registration:${client}`,
         ok: false,
@@ -152,6 +166,7 @@ const selectedRegistrationCheck = (
           detail: status.config_path,
         }
       : registrationCheck(status);
+};
 
 const registrationCheck = (
   status: UnhealthyClientRegistrationStatus,

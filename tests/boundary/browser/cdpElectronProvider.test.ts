@@ -1,7 +1,8 @@
-import { rm, writeFile } from "node:fs/promises";
+import { mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { createPackage } from "@electron/asar";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
@@ -199,7 +200,111 @@ describe("CdpElectronProvider target selection", () => {
   });
 });
 
+describe("CdpElectronProvider packaged pages", () => {
+  it("lists and inspects packaged pages served from inside app.asar", async () => {
+    const root = await createTestTempDirectory("rea-electron-asar-provider-");
+    temporary.push(root);
+    const source = join(root, "source");
+    await mkdir(source);
+    await writeFile(
+      join(source, "index.html"),
+      "<script src='app.js'></script>",
+    );
+    await writeFile(join(source, "app.js"), "export const app = true;");
+    const archive = join(root, "app.asar");
+    await createPackage(source, archive);
+    const packaged = await realpath(archive);
+    const browser = await startFakeCdpBrowser({
+      electronFileUrl: `${pathToFileURL(join(archive, "index.html")).href}?isBookDoubleClicked=0#/library`,
+    });
+    browsers.push(browser);
+    const provider = new CdpElectronProvider();
+    const listed = await provider.listTargets(
+      listElectronTargetsInputSchema.parse({ cdp_endpoint: browser.endpoint }),
+    );
+    if (!listed.ok) throw listed.error;
+    expect(listed.value.targets).toEqual([
+      expect.objectContaining({
+        target_id: "electron-page",
+        file_path: join(packaged, "index.html"),
+      }),
+    ]);
+
+    const inspected = await provider.inspectPage(
+      inspectElectronPageInputSchema.parse({
+        cdp_endpoint: browser.endpoint,
+        target_id: "electron-page",
+        observation_ms: 0,
+      }),
+    );
+    if (!inspected.ok) throw inspected.error;
+    expect(inspected.value.target.file_path).toBe(join(packaged, "index.html"));
+    expect(inspected.value.scripts.items).toEqual([
+      expect.objectContaining({ file_path: join(packaged, "app.js") }),
+    ]);
+  });
+});
+
 describe("CdpElectronProvider capture", () => {
+  it.each([{}, { scriptSource: null }, { scriptSource: 123 }])(
+    "rejects malformed Electron source replies instead of inventing source: %j",
+    async (reply) => {
+      const root = await electronFixture();
+      const browser = await startFakeCdpBrowser({
+        electronFileUrl: pathToFileURL(join(root, "index.html")).href,
+        commandResult: ({ method }) =>
+          method === "Debugger.getScriptSource" ? reply : undefined,
+      });
+      browsers.push(browser);
+      const result = await new CdpElectronProvider().inspectPage(
+        inspectElectronPageInputSchema.parse({
+          cdp_endpoint: browser.endpoint,
+          target_id: "electron-page",
+          observation_ms: 0,
+          include_script_sources: true,
+        }),
+      );
+
+      expect(result).toMatchObject({
+        ok: false,
+        error: {
+          operation: "inspect_electron_page",
+          reason: "protocol_error",
+          userMessage: expect.stringContaining("scriptSource must be a string"),
+        },
+      });
+      expect(browser.commands.map(({ method }) => method)).toContain(
+        "Target.detachFromTarget",
+      );
+    },
+  );
+
+  it("retains an explicitly empty Electron producer script", async () => {
+    const root = await electronFixture();
+    const browser = await startFakeCdpBrowser({
+      electronFileUrl: pathToFileURL(join(root, "index.html")).href,
+      commandResult: ({ method }) =>
+        method === "Debugger.getScriptSource"
+          ? { scriptSource: "" }
+          : undefined,
+    });
+    browsers.push(browser);
+    const result = await new CdpElectronProvider().inspectPage(
+      inspectElectronPageInputSchema.parse({
+        cdp_endpoint: browser.endpoint,
+        target_id: "electron-page",
+        observation_ms: 0,
+        include_script_sources: true,
+      }),
+    );
+
+    if (!result.ok) throw result.error;
+    expect(result.value.scripts.items[0]?.source).toMatchObject({
+      included: true,
+      artifact: { text: "", bytes: 0 },
+    });
+  });
+
   it("captures Electron script source only after separate approval", async () => {
     const root = await electronFixture();
     const browser = await startFakeCdpBrowser({

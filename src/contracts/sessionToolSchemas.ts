@@ -1,30 +1,18 @@
 import { z } from "zod";
+import { isAbsolute } from "node:path";
 
-import { isAbsoluteLocalPath } from "../domain/localPath.js";
+import { localPathStringSchema } from "../domain/localPath.js";
 
-import { artifactComparisonInputSchema } from "../domain/artifactComparison.js";
-import { bundleComparisonInputSchema } from "../domain/bundleComparison.js";
-import { callPathInputSchema } from "../domain/callPath.js";
-import { changedBehaviorInputSchema } from "../domain/changedBehavior.js";
-import { compiledFunctionComparisonInputSchema } from "../domain/compiledFunctionComparison.js";
-import { functionComparisonInputSchema } from "../domain/functionComparison.js";
-import { jsonValueSchema } from "../domain/jsonValue.js";
-import { processScenarioSchema } from "../domain/process/processCapture.js";
-import { processTraceSpecificationSchema } from "../domain/process/processTraceComparison.js";
-import { recordUnknownInputSchema } from "../domain/residualUnknown.js";
-import { reconstructionVerificationInputSchema } from "../domain/reconstructionVerification.js";
-import { staticRuntimeCorrelationInputSchema } from "../domain/staticRuntimeCorrelation.js";
+import { processTraceSpecificationSchema } from "../domain/process/processTraceSpecification.js";
 import { evidenceSchema } from "../domain/evidence.js";
-import { updateUnknownInputSchema } from "../domain/residualUnknown.js";
-import {
-  openBinaryInputSchema,
-  closeBinaryInputSchema,
-} from "./sessionLifecycleInputs.js";
-import { binarySessionInputSchema } from "./sessionStatusContract.js";
 import { prefixedDigestSchema } from "./../domain/digests.js";
+import { evidenceRecordFiltersSchema } from "../domain/evidenceRecordSummary.js";
 
-/** Return the current canonical Evidence bundle inline. */
-export const getEvidenceBundleInputSchema = z.strictObject({});
+/** Complete retained Evidence, or selected discovery metadata without payloads. */
+export const getEvidenceBundleInputSchema = z.strictObject({
+  detail: z.enum(["complete", "summary"]).default("complete"),
+  filters: evidenceRecordFiltersSchema.optional(),
+});
 
 /** Optional document selection for volatile navigation context. */
 export const navigationContextInputSchema = z.strictObject({
@@ -39,10 +27,8 @@ export const addressContextInputSchema = z.strictObject({
 
 /** Session-owned Evidence bundle import options. */
 export const importEvidenceBundleInputSchema = z.strictObject({
-  path: z
-    .string()
-    .min(1)
-    .refine(isAbsoluteLocalPath, {
+  path: localPathStringSchema
+    .refine(isAbsolute, {
       message:
         "path must be an absolute local filesystem path (for example /tmp/evidence.json or C:\\rea\\evidence.json)",
     })
@@ -72,20 +58,3 @@ export const listUnknownsInputSchema = z.strictObject({
 export const verifyUnknownResolutionInputSchema = z.strictObject({
   unknown_id: prefixedDigestSchema("unk"),
 });
-
-export {
-  artifactComparisonInputSchema,
-  binarySessionInputSchema,
-  bundleComparisonInputSchema,
-  callPathInputSchema,
-  changedBehaviorInputSchema,
-  closeBinaryInputSchema,
-  compiledFunctionComparisonInputSchema,
-  functionComparisonInputSchema,
-  openBinaryInputSchema,
-  processScenarioSchema,
-  reconstructionVerificationInputSchema,
-  recordUnknownInputSchema,
-  staticRuntimeCorrelationInputSchema,
-  updateUnknownInputSchema,
-};

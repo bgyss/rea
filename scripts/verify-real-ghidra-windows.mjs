@@ -16,20 +16,22 @@ import {
   parseGhidraInventoryInput,
   parseGhidraInventoryResult,
 } from "../dist/ghidra/GhidraInventoryValues.js";
-import {
-  inspectGhidraInstallation,
-  SUPPORTED_GHIDRA_VERSION,
-} from "../dist/ghidra/GhidraInstallation.js";
+import { inspectGhidraInstallation } from "../dist/ghidra/GhidraInstallation.js";
+import { SUPPORTED_GHIDRA_VERSION } from "../dist/ghidra/GhidraInstallationPolicy.js";
 import { GhidraHeadlessLauncher } from "../dist/ghidra/GhidraLauncher.js";
-import { GHIDRA_PROVIDER_IDENTITY } from "../dist/ghidra/GhidraProvider.js";
+import { GHIDRA_PROVIDER_IDENTITY } from "../dist/ghidra/GhidraProviderCapabilities.js";
 import { windowsP0Capabilities } from "../dist/ghidra/GhidraProviderCapabilities.js";
-import { GHIDRA_SESSION_CAPABILITIES } from "../dist/ghidra/GhidraSessionValues.js";
+import {
+  GHIDRA_MUTATING_OPERATIONS,
+  GHIDRA_SESSION_CAPABILITIES,
+} from "../dist/ghidra/GhidraSessionValues.js";
 import { parseBinaryTarget } from "../dist/application/BinaryTargetResolver.js";
 import { completeVerifierRun, createVerifierRun } from "./lib/verifier-run.mjs";
+import { verifyGhidraCompactReferences } from "./lib/real-ghidra-compact-references.mjs";
 
 const verifierRun = createVerifierRun();
 const SESSION_CAPABILITIES = GHIDRA_SESSION_CAPABILITIES.filter(
-  (name) => name !== "annotate_native_function",
+  (name) => !GHIDRA_MUTATING_OPERATIONS.has(name),
 );
 
 if (process.platform !== "win32" || process.arch !== "x64")
@@ -48,6 +50,7 @@ if (installDir === undefined || !isAbsolute(installDir))
     "Set GHIDRA_INSTALL_DIR to the absolute root of Ghidra 12.1.4.",
   );
 const installation = inspectGhidraInstallation({
+  environment: process.env,
   installDir,
   ...(process.env.JAVA_HOME === undefined
     ? {}
@@ -63,21 +66,21 @@ if (
   );
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const architecture = process.argv[2] === "--x86" ? "x86" : "x86_64";
+const architecture = process.argv.includes("--x86") ? "x86" : "x86_64";
+const dllFixture = process.argv.includes("--dll");
+const role = dllFixture ? "shared-library" : "application";
 const targetPath = resolve(
   root,
   "build",
   "fixtures",
-  architecture === "x86"
-    ? "rea-ghidra-windows-x86.exe"
-    : "rea-ghidra-windows.exe",
+  `rea-ghidra-windows${architecture === "x86" ? "-x86" : ""}.${dllFixture ? "dll" : "exe"}`,
 );
 const target = await parseBinaryTarget(targetPath);
 if (
   !target.ok ||
   target.value.format !== "pe" ||
   target.value.architecture !== architecture ||
-  target.value.executableRole !== "application" ||
+  target.value.executableRole !== role ||
   target.value.managed !== false
 )
   throw new Error(
@@ -90,10 +93,13 @@ const profile = await resolveGhidraAnalysisProfile(
 );
 if (!profile.ok || profile.value.profile === null)
   throw new Error("Windows Ghidra profile could not be committed");
+if (profile.value.profile.parameters.executable_role !== role)
+  throw new Error("Windows Ghidra profile lost the observed PE role");
 
 const client = new GhidraClient({
   platform: installation.platform,
   launcher: new GhidraHeadlessLauncher({
+    environment: process.env,
     analyzeHeadlessPath: installation.analyzeHeadlessPath,
     ...(process.env.JAVA_HOME === undefined
       ? {}
@@ -112,6 +118,7 @@ const client = new GhidraClient({
 
 let coordinates;
 let report;
+let primaryFailure;
 const observed = new Set();
 try {
   const started = await client.start();
@@ -161,6 +168,19 @@ try {
     throw new Error(
       "Windows fixture decompilation lost its known return value",
     );
+  if (dllFixture) {
+    const callerAddress = architecture === "x86" ? "0x401000" : "0x140001000";
+    const callees = await functionOperation("procedure_callees", {
+      procedure: callerAddress,
+    });
+    if (!callees.includes(callee.address))
+      throw new Error("DLL export caller lost its controlled call reference");
+    const callerCode = await functionOperation("procedure_pseudo_code", {
+      procedure: callerAddress,
+    });
+    if (typeof callerCode !== "string" || !/\+\s*1\b/u.test(callerCode))
+      throw new Error("DLL export caller lost its addition of one");
+  }
 
   await inventory("inspect_native_load_image", {});
   const memory = await inventory("read_bytes", {
@@ -219,10 +239,8 @@ try {
 
   const expected = [
     ...GHIDRA_INVENTORY_OPERATIONS,
-    ...GHIDRA_FUNCTION_OPERATIONS.filter(
-      (name) => name !== "annotate_native_function",
-    ),
-  ];
+    ...GHIDRA_FUNCTION_OPERATIONS,
+  ].filter((name) => !GHIDRA_MUTATING_OPERATIONS.has(name));
   if (
     observed.size !== expected.length ||
     expected.some((operation) => !observed.has(operation))
@@ -231,6 +249,14 @@ try {
       `Windows Ghidra operation proof was incomplete: ${JSON.stringify([...observed])}`,
     );
 
+  // The reference controls occupy the EXE fixture's additional function.
+  // DLL fixtures retain their independent exported-caller/return controls.
+  const compactReferences = dllFixture
+    ? null
+    : await verifyGhidraCompactReferences(
+        functionOperation,
+        architecture === "x86",
+      );
   report = {
     ok: true,
     provider: { id: "ghidra", version: SUPPORTED_GHIDRA_VERSION },
@@ -245,6 +271,7 @@ try {
     transport: "authenticated-loopback-tcp",
     operations: [...observed].sort((left, right) => left.localeCompare(right)),
     cleanup: "complete",
+    compact_references: compactReferences,
     native_controls: {
       job_object: true,
       protected_dacl: true,
@@ -253,12 +280,22 @@ try {
     limitations: [
       "approved-non-sensitive-fixtures-only",
       "windows-x64-local-ntfs-only",
-      "native-x86-and-x86-64-pe-applications-only",
+      "native-x86-and-x86-64-pe-applications-and-dlls-only",
       "no-gui-or-mutation-authority",
     ],
   };
+} catch (cause) {
+  primaryFailure = cause;
+  throw cause;
 } finally {
-  await client.close();
+  const closed = await client.close();
+  if (!closed.ok)
+    throw primaryFailure === undefined
+      ? closed.error
+      : new AggregateError(
+          [primaryFailure, closed.error],
+          "Ghidra verification and cleanup failed",
+        );
   if (coordinates !== undefined) await assertCleanup(coordinates);
 }
 if (report === undefined)
@@ -286,7 +323,7 @@ async function functionOperation(operation, parameters) {
   const result = parseGhidraFunctionResult(operation, called.value);
   if (!result.ok) throw result.error;
   observed.add(operation);
-  return result.value;
+  return result.value.value;
 }
 
 function assertSession(session, targetSha256, profileDigest) {

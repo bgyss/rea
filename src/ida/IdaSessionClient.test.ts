@@ -1,4 +1,5 @@
 import { readFile, readdir, rm } from "node:fs/promises";
+import { sep } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
@@ -7,14 +8,18 @@ import {
 } from "../../tests/fixtures/idaMcp.js";
 import { IdaSessionClient } from "./IdaSessionClient.js";
 import { functionDossierSchema } from "../domain/hopperValues.js";
-import { jsonValueSchema } from "../domain/jsonValue.js";
+import { jsonValueSchema, type JsonValue } from "../domain/jsonValue.js";
+import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 
 const roots: string[] = [];
 afterEach(async () => {
   for (const root of roots.splice(0))
     await rm(root, { recursive: true, force: true });
 });
-const fixture = async (mode: "attached" | "headless" = "attached") => {
+const fixture = async (
+  mode: "attached" | "headless" = "attached",
+  timeoutMs = 1000,
+) => {
   const { root, target } = await createIdaTarget();
   roots.push(root);
   const producer = new RecordingIdaMcp(target, mode);
@@ -24,7 +29,7 @@ const fixture = async (mode: "attached" | "headless" = "attached") => {
       args: [],
       env: {},
       mode,
-      timeoutMs: 1000,
+      timeoutMs,
       workspaceRoot: root,
     },
     target,
@@ -95,11 +100,40 @@ describe("headless IDA producer pagination", () => {
     const dossier = functionDossierSchema.parse(result.value.result);
     expect(dossier.pseudocode).toBe("first line\nsecond line");
     expect(dossier.assembly).toEqual(["0x1000: push rbp", "0x1001: ret"]);
+    expect(dossier).toMatchObject({
+      procedure: {
+        classification: null,
+        body: {
+          available: false,
+          reason: "IDA MCP does not report complete function body ranges.",
+        },
+      },
+      native_api: null,
+      native_value_flow: null,
+    });
     await client.close();
   });
 });
 
 describe("attached IDA observation semantics", () => {
+  it("accepts a normalized spelling of the bound document path", async () => {
+    const { target, producer, client } = await fixture();
+    const equivalent =
+      process.platform === "win32"
+        ? target.path.toLowerCase().replaceAll("\\", "/")
+        : target.path.split(sep).join(`${sep}.${sep}`);
+
+    const result = await client.execute("list_procedures", {
+      document: equivalent,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(producer.calls.some(({ name }) => name === "list_functions")).toBe(
+      true,
+    );
+    await client.close();
+  });
+
   it("rejects an unrelated document before connecting or opening a provider", async () => {
     const { producer, client } = await fixture();
     const result = await client.execute("list_procedures", {
@@ -127,29 +161,29 @@ describe("attached IDA observation semantics", () => {
     ).toBe(false);
     await client.close();
   });
-  it("accepts MCP's null projection for omitted optional fields without accepting null required fields", async () => {
+  it("preserves omitted optional arguments and rejects explicit null before connecting", async () => {
     const { producer, client } = await fixture();
+    for (const [operation, parameters] of [
+      ["list_procedures", { document: null }],
+      ["list_strings", { address: null }],
+      ["procedure_pseudo_code", { procedure: null }],
+    ] as const) {
+      const result = await client.execute(operation, parameters);
+      expect(result.ok).toBe(false);
+      if (!result.ok)
+        expect(result.error).toMatchObject({
+          _tag: "AnalysisInputError",
+          operation,
+          issues: [{ path: Object.keys(parameters), reason: "invalid_type" }],
+        });
+    }
+    expect(producer.connects).toBe(0);
+    expect(producer.calls).toEqual([]);
+    expect((await client.execute("list_procedures", {})).ok).toBe(true);
+    expect((await client.execute("list_strings", {})).ok).toBe(true);
     expect(
-      (await client.execute("list_procedures", { document: null })).ok,
+      (await client.execute("procedure_pseudo_code", { procedure: "main" })).ok,
     ).toBe(true);
-    expect(
-      (await client.execute("list_strings", { document: null, address: null }))
-        .ok,
-    ).toBe(true);
-    expect(
-      (
-        await client.execute("procedure_pseudo_code", {
-          document: null,
-          procedure: "main",
-        })
-      ).ok,
-    ).toBe(true);
-    const required = await client.execute("procedure_pseudo_code", {
-      document: null,
-      procedure: null,
-    });
-    expect(required.ok).toBe(false);
-    if (!required.ok) expect(required.error._tag).toBe("AnalysisInputError");
     expect(
       producer.calls.filter(({ name }) => name === "decompile_function"),
     ).toHaveLength(1);
@@ -287,7 +321,7 @@ describe("attached IDA function observations", () => {
     );
     await started;
     controller.abort();
-    const close = client.closeWithOutcome();
+    const close = client.close();
     expect(producer.closes).toBe(0);
     release?.();
     const result = await call;
@@ -298,12 +332,297 @@ describe("attached IDA function observations", () => {
   });
 });
 
+const busyHealth = (busyTool?: JsonValue): JsonValue => ({
+  status: "busy",
+  uptime_sec: 1.041,
+  ...(busyTool === undefined ? {} : { busy_tool: busyTool }),
+  busy_sec: 0,
+  queued_calls: 0,
+});
+const healthCalls = (producer: { calls: { name: string }[] }) =>
+  producer.calls.filter(({ name }) => name === "server_health").length;
+
+const expectCleanClose = async (
+  producer: { closes: number },
+  client: { close: () => Promise<{ ok: boolean }> },
+): Promise<void> => {
+  expect((await client.close()).ok, "the owned worker is released").toBe(true);
+  expect(producer.closes, "the upstream connection is closed once").toBe(1);
+};
+
+describe("headless IDA transient busy health", () => {
+  it("re-reads server_health until the worker reports ok", async () => {
+    const { producer, client } = await fixture("headless");
+    let busyReads = 2;
+    producer.overrideCall = (name) =>
+      name === "server_health" && busyReads-- > 0
+        ? busyHealth("config_json_get")
+        : undefined;
+
+    const result = await client.execute("health", {});
+
+    expect(result.ok, "a transient busy worker is waited out").toBe(true);
+    expect(
+      healthCalls(producer),
+      "two busy reads and the ok read that settles the identity",
+    ).toBe(3);
+    await expectCleanClose(producer, client);
+  });
+
+  it("returns a retryable timeout naming the busy tool at the registration deadline", async () => {
+    const { producer, client } = await fixture("headless", 300);
+    const busy = busyHealth("config_json_get");
+    producer.overrideCall = (name) =>
+      name === "server_health" ? busy : undefined;
+    const started = Date.now();
+
+    const result = await client.execute("health", {});
+    const elapsed = Date.now() - started;
+
+    if (result.ok) throw new Error("expected a busy timeout");
+    expect(result.error._tag, "the neutral timeout class is used").toBe(
+      "AnalysisTimeoutError",
+    );
+    const projected = projectAnalysisError(result.error);
+    expect(projected.code, "the outcome is a provider timeout").toBe(
+      "provider_timeout",
+    );
+    expect(projected.retryable, "the caller may retry").toBe(true);
+    expect(
+      projected.details,
+      "the observed busy tool is named exactly in the operation",
+    ).toMatchObject({
+      operation: "server_health: headless worker still busy in config_json_get",
+      timeout_ms: 300,
+    });
+    expect(
+      result.error.message,
+      "the error message names the busy tool",
+    ).toContain("config_json_get");
+    expect(
+      `${result.error.message} ${projected.message}`,
+      "no Hopper wording leaks in",
+    ).not.toContain("Hopper");
+    expect(result.error.cause, "the raw busy payload is the cause").toEqual(
+      busy,
+    );
+    expect(
+      elapsed,
+      "the wait runs to the deadline, not less",
+    ).toBeGreaterThanOrEqual(290);
+    expect(
+      healthCalls(producer),
+      "reads are spaced by the retry delay, not a tight loop",
+    ).toBeLessThanOrEqual(6);
+    await expectCleanClose(producer, client);
+  });
+
+  it("never invents a busy tool the worker did not report", async () => {
+    const { producer, client } = await fixture("headless", 300);
+    producer.overrideCall = (name) =>
+      name === "server_health" ? busyHealth() : undefined;
+
+    const result = await client.execute("health", {});
+
+    if (result.ok) throw new Error("expected a busy timeout");
+    expect(
+      projectAnalysisError(result.error).details,
+      "an omitted busy_tool is reported as exactly unknown",
+    ).toMatchObject({
+      operation: "server_health: headless worker still busy in unknown",
+    });
+    await expectCleanClose(producer, client);
+  });
+
+  it.each([
+    ["free-form text", "token=abc123 /private/home/user secret"],
+    ["an over-long name", "x".repeat(200)],
+  ])(
+    "reports %s from the worker as unknown instead of echoing it",
+    async (_label, tool) => {
+      const { producer, client } = await fixture("headless", 300);
+      producer.overrideCall = (name) =>
+        name === "server_health" ? busyHealth(tool) : undefined;
+
+      const result = await client.execute("health", {});
+
+      if (result.ok) throw new Error("expected a busy timeout");
+      expect(
+        projectAnalysisError(result.error).details,
+        "only a tool-name-shaped value is repeated",
+      ).toMatchObject({
+        operation: "server_health: headless worker still busy in unknown",
+      });
+      expect(
+        result.error.message,
+        "the producer text never reaches the error message",
+      ).not.toContain(tool);
+      await expectCleanClose(producer, client);
+    },
+  );
+
+  it("ends the wait at once when the caller aborts", async () => {
+    const { producer, client } = await fixture("headless", 30_000);
+    producer.overrideCall = (name) =>
+      name === "server_health" ? busyHealth("config_json_get") : undefined;
+    const controller = new AbortController();
+    const started = Date.now();
+    const call = client.execute("health", {}, { signal: controller.signal });
+    while (healthCalls(producer) < 2) {
+      if (Date.now() - started > 5_000) throw new Error("never polled");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    controller.abort();
+    const result = await call;
+
+    if (result.ok) throw new Error("expected cancellation");
+    expect(result.error._tag, "cancellation keeps today's outcome").toBe(
+      "AnalysisCancelledError",
+    );
+    expect(
+      Date.now() - started,
+      "the wait does not run to the registration deadline",
+    ).toBeLessThan(5_000);
+    await expectCleanClose(producer, client);
+  });
+});
+
+describe("headless IDA busy health after an operation", () => {
+  const withInventory = (
+    producer: RecordingIdaMcp,
+    afterObservation: (read: number) => JsonValue | undefined,
+  ) => {
+    let health = 0;
+    producer.overrideCall = (name) => {
+      if (name === "list_funcs")
+        return [
+          {
+            data: [{ addr: "0x1000", name: "main", size: "0x20" }],
+            next_offset: null,
+          },
+        ];
+      if (name !== "server_health") return undefined;
+      health += 1;
+      return health < 2 ? undefined : afterObservation(health);
+    };
+  };
+
+  it("waits out a busy observation taken after the operation", async () => {
+    const { producer, client } = await fixture("headless");
+    withInventory(producer, (read) =>
+      read === 2 ? busyHealth("config_json_get") : undefined,
+    );
+
+    const result = await client.execute("list_procedures", {});
+
+    expect(result.ok, "the operation succeeds once the worker settles").toBe(
+      true,
+    );
+    expect(healthCalls(producer), "before, busy after, ok after").toBe(3);
+    await expectCleanClose(producer, client);
+  });
+
+  it("maps a cancellation during that wait to cancelled", async () => {
+    const { producer, client } = await fixture("headless", 30_000);
+    withInventory(producer, () => busyHealth("config_json_get"));
+    const controller = new AbortController();
+    const call = client.execute(
+      "list_procedures",
+      {},
+      { signal: controller.signal },
+    );
+    const started = Date.now();
+    while (healthCalls(producer) < 3) {
+      if (Date.now() - started > 5_000) throw new Error("never polled");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    controller.abort();
+    const result = await call;
+
+    if (result.ok) throw new Error("expected cancellation");
+    expect(result.error._tag, "the after-observation wait is cancellable").toBe(
+      "AnalysisCancelledError",
+    );
+    await expectCleanClose(producer, client);
+  });
+});
+
+describe("headless IDA non-busy health payloads", () => {
+  it.each([
+    ["an unknown status", { status: "starting" }],
+    ["a non-string busy_tool", busyHealth(5)],
+    ["a payload without a status", { uptime_sec: 1 }],
+  ])(
+    "keeps %s as unreadable output without waiting",
+    async (_label, payload) => {
+      const { producer, client } = await fixture("headless");
+      producer.overrideCall = (name) =>
+        name === "server_health" ? jsonValueSchema.parse(payload) : undefined;
+
+      const result = await client.execute("health", {});
+
+      if (result.ok) throw new Error("expected unreadable output");
+      expect(
+        projectAnalysisError(result.error).code,
+        "only the narrow busy shape enters the wait",
+      ).toBe("unreadable_output");
+      expect(healthCalls(producer), "no re-read happened").toBe(1);
+      await expectCleanClose(producer, client);
+    },
+  );
+
+  it("keeps the busy-shape reason when a busy payload is invalid", async () => {
+    const { producer, client } = await fixture("headless");
+    producer.overrideCall = (name) =>
+      name === "server_health" ? busyHealth(5) : undefined;
+
+    const result = await client.execute("health", {});
+
+    if (result.ok) throw new Error("expected unreadable output");
+    expect(
+      projectAnalysisError(result.error).details,
+      "the diagnostic names the invalid busy_tool, not the ok-schema fields",
+    ).toMatchObject({ reason: expect.stringContaining("busy_tool") });
+    expect(
+      JSON.stringify(projectAnalysisError(result.error).details),
+      "the generic ok-schema field errors are not reported for a busy payload",
+    ).not.toContain("input_path");
+    await expectCleanClose(producer, client);
+  });
+
+  it("stops waiting as soon as a later read is malformed", async () => {
+    const { producer, client } = await fixture("headless");
+    let reads = 0;
+    producer.overrideCall = (name) =>
+      name === "server_health"
+        ? reads++ === 0
+          ? busyHealth("config_json_get")
+          : busyHealth(5)
+        : undefined;
+
+    const result = await client.execute("health", {});
+
+    if (result.ok) throw new Error("expected unreadable output");
+    expect(
+      projectAnalysisError(result.error).code,
+      "a malformed re-read is not treated as busy",
+    ).toBe("unreadable_output");
+    expect(
+      healthCalls(producer),
+      "exactly the busy read and the bad read",
+    ).toBe(2);
+    await expectCleanClose(producer, client);
+  });
+});
+
 describe("headless IDA lifecycle boundaries", () => {
   it("never closes an unowned worker even when open echoes the requested private identity", async () => {
     const { producer, client } = await fixture("headless");
     producer.owned = false;
     expect((await client.execute("health", {})).ok).toBe(false);
-    const closed = await client.closeWithOutcome();
+    const closed = await client.close();
     expect(closed.ok).toBe(false);
     if (!closed.ok) expect(closed.error.cleanupIncomplete).toBe(true);
     expect(producer.calls.some(({ name }) => name === "idb_close")).toBe(false);
@@ -328,9 +647,9 @@ describe("headless IDA session ownership and cleanup", () => {
       });
     };
 
-    const first = client.closeWithOutcome();
+    const first = client.close();
     await closeStarted;
-    const second = client.closeWithOutcome();
+    const second = client.close();
     release?.();
     const results = await Promise.all([first, second]);
 
@@ -352,13 +671,13 @@ describe("headless IDA session ownership and cleanup", () => {
     expect(
       producer.calls.filter(({ name }) => name === "idb_open"),
     ).toHaveLength(1);
-    const closed = await client.closeWithOutcome();
+    const closed = await client.close();
     expect(closed.ok).toBe(false);
     if (!closed.ok) expect(closed.error.cleanupIncomplete).toBe(true);
     expect(
       (await readdir(root)).some((name) => name.startsWith("rea-ida-")),
     ).toBe(true);
-    expect(producer.closes).toBe(1);
+    expect(producer.closes).toBe(0);
   });
   it("opens a private digest-verified copy, scopes requests, closes without saving, and removes only its workspace", async () => {
     const { producer, client, root, target } = await fixture("headless");
@@ -383,7 +702,7 @@ describe("headless IDA session ownership and cleanup", () => {
       ({ name }) => !["idb_open", "idb_list"].includes(name),
     ))
       expect(call.args.database).toBe(producer.database);
-    expect((await client.closeWithOutcome()).ok).toBe(true);
+    expect((await client.close()).ok).toBe(true);
     expect(
       producer.calls.find(({ name }) => name === "idb_close")?.args.save,
     ).toBe(false);
@@ -394,12 +713,58 @@ describe("headless IDA session ownership and cleanup", () => {
     const { producer, client, root } = await fixture("headless");
     await client.execute("health", {});
     producer.failClose = true;
-    const result = await client.closeWithOutcome();
+    const result = await client.close();
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.cleanupIncomplete).toBe(true);
     expect(
       (await readdir(root)).some((name) => name.startsWith("rea-ida-")),
     ).toBe(true);
+  });
+});
+
+describe("headless IDA cleanup verification", () => {
+  it("retries failed worker release through the retained connection before removing its workspace", async () => {
+    const { producer, client, root } = await fixture("headless");
+    expect((await client.execute("health", {})).ok).toBe(true);
+    producer.failClose = true;
+    expect((await client.close()).ok).toBe(false);
+    expect(producer.closes).toBe(0);
+    expect(
+      (await readdir(root)).some((name) => name.startsWith("rea-ida-")),
+    ).toBe(true);
+    producer.failClose = false;
+    expect((await client.close()).ok).toBe(true);
+    expect(
+      producer.calls.filter(({ name }) => name === "idb_close"),
+    ).toHaveLength(2);
+    expect(producer.closes).toBe(1);
+    expect(await readdir(root)).toEqual(["target.elf"]);
+  });
+  it("retries post-close inventory verification without closing an already released database again", async () => {
+    const { producer, client, root } = await fixture("headless");
+    expect((await client.execute("health", {})).ok).toBe(true);
+    let inventoryFails = true;
+    producer.beforeCall = async (name) => {
+      if (
+        name === "idb_list" &&
+        producer.database === undefined &&
+        inventoryFails
+      )
+        throw new Error(
+          "Worker inventory unavailable after acknowledged close",
+        );
+    };
+    expect((await client.close()).ok).toBe(false);
+    expect(producer.closes).toBe(0);
+    expect(
+      (await readdir(root)).some((name) => name.startsWith("rea-ida-")),
+    ).toBe(true);
+    inventoryFails = false;
+    expect((await client.close()).ok).toBe(true);
+    expect(
+      producer.calls.filter(({ name }) => name === "idb_close"),
+    ).toHaveLength(1);
+    expect(await readdir(root)).toEqual(["target.elf"]);
   });
   it("never closes an unrelated database when startup returns a different input identity", async () => {
     const { producer, client, root } = await fixture("headless");
@@ -414,7 +779,7 @@ describe("headless IDA session ownership and cleanup", () => {
           }
         : undefined;
     expect((await client.execute("health", {})).ok).toBe(false);
-    expect((await client.closeWithOutcome()).ok).toBe(true);
+    expect((await client.close()).ok).toBe(true);
     expect(producer.calls.some(({ name }) => name === "idb_close")).toBe(false);
     expect(await readdir(root)).toEqual(["target.elf"]);
   });
@@ -434,7 +799,7 @@ describe("headless IDA session ownership and cleanup", () => {
           })
         : undefined;
     expect((await client.execute("health", {})).ok).toBe(false);
-    expect((await client.closeWithOutcome()).ok).toBe(true);
+    expect((await client.close()).ok).toBe(true);
     expect(
       producer.calls.find(({ name }) => name === "idb_close")?.args.database,
     ).toMatch(/^rea-/u);

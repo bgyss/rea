@@ -1,4 +1,6 @@
-import { canonicalDigest } from "./comparisonSemantics.js";
+import { posix } from "node:path";
+
+import { digestCanonicalValue } from "./canonicalDigest.js";
 import type {
   ArtifactEdge,
   ArtifactNode,
@@ -6,9 +8,32 @@ import type {
   IntegrityContradiction,
 } from "./artifactGraph.js";
 
+/** NFC spelling of a logical archive path. Inventory and path joins share it. */
+export const logicalPathNfc = (value: string): string => value.normalize("NFC");
+
+/**
+ * Lexical join against an inventoried logical path. The result is NFC.
+ * `"."` is the archive root. A path that escapes the root, or that contains
+ * NUL, is left in a form the caller can report; `logicalPathEscapesRoot`
+ * is then true.
+ */
+export const normalizeJoinedLogicalPath = (value: string): string => {
+  if (value.includes("\0")) return value;
+  return logicalPathNfc(
+    posix.normalize(value.replaceAll("\\", "/")).replace(/^\.\//u, ""),
+  );
+};
+
+/** Whether a joined logical path leaves the archive root. */
+export const logicalPathEscapesRoot = (path: string): boolean =>
+  path.includes("\0") ||
+  path === ".." ||
+  path.startsWith("../") ||
+  path.startsWith("/");
+
 /** Content-address an artifact independently of where it was observed. */
 export const artifactIdForContent = (sha256: string): string =>
-  `art_${canonicalDigest({ sha256 }, "Artifact")}`;
+  `art_${digestCanonicalValue({ sha256 }, "Artifact")}`;
 
 /** Identify an occurrence by its root and exact logical location. */
 export const occurrenceIdForLocation = (input: {
@@ -17,8 +42,8 @@ export const occurrenceIdForLocation = (input: {
   readonly entryKind: ArtifactOccurrence["entry_kind"];
 }): string =>
   input.logicalPath === "."
-    ? `occ_${canonicalDigest({ root: input.rootArtifactId }, "Artifact")}`
-    : `occ_${canonicalDigest(
+    ? `occ_${digestCanonicalValue({ root: input.rootArtifactId }, "Artifact")}`
+    : `occ_${digestCanonicalValue(
         {
           root_artifact_id: input.rootArtifactId,
           logical_path: input.logicalPath,
@@ -34,7 +59,7 @@ export const artifactGraphDigest = (input: {
   readonly edges: readonly ArtifactEdge[];
   readonly contradictions: readonly IntegrityContradiction[];
 }): string =>
-  canonicalDigest(
+  digestCanonicalValue(
     {
       nodes: input.nodes,
       occurrences: input.occurrences,
@@ -49,7 +74,7 @@ export const artifactManifestId = (
   rootArtifactId: string,
   graphSha256: string,
 ): string =>
-  `agm_${canonicalDigest(
+  `agm_${digestCanonicalValue(
     { root_artifact_id: rootArtifactId, graph_sha256: graphSha256 },
     "Artifact",
   )}`;
@@ -61,7 +86,7 @@ export const artifactContradictionId = (input: {
   readonly declaredSha256: string;
   readonly observedSha256: string;
 }): string =>
-  `ic_${canonicalDigest(
+  `ic_${digestCanonicalValue(
     {
       root_artifact_id: input.rootArtifactId,
       logical_path: input.logicalPath,
@@ -71,14 +96,21 @@ export const artifactContradictionId = (input: {
     "Artifact",
   )}`;
 
-/** Identify an edge by its semantic relationship and exact occurrence. */
+/**
+ * Identify an edge by its semantic relationship and exact occurrence. The
+ * child artifact and logical path come from that occurrence.
+ */
 export const artifactEdgeId = (
-  semantic: Pick<
-    ArtifactEdge,
-    | "parent_artifact_id"
-    | "child_artifact_id"
-    | "relation"
-    | "occurrence_id"
-    | "logical_path"
-  >,
-): string => `edge_${canonicalDigest(semantic, "Artifact")}`;
+  edge: Pick<ArtifactEdge, "parent_artifact_id" | "relation" | "occurrence_id">,
+  occurrence: Pick<ArtifactOccurrence, "artifact_id" | "logical_path">,
+): string =>
+  `edge_${digestCanonicalValue(
+    {
+      parent_artifact_id: edge.parent_artifact_id,
+      child_artifact_id: occurrence.artifact_id,
+      relation: edge.relation,
+      occurrence_id: edge.occurrence_id,
+      logical_path: occurrence.logical_path,
+    },
+    "Artifact",
+  )}`;

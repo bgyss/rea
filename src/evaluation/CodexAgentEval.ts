@@ -1,4 +1,11 @@
+import {
+  deliveredCodexEvidence,
+  evaluateKnownAnswers,
+  type FixtureClaimExpectation,
+  type KnownAnswerAssessment,
+} from "./KnownAnswerEvaluation.js";
 import { compareUnicodeCodePoints } from "../domain/unicodeCodePointOrder.js";
+import { TOOL_CONTRACTS } from "../contracts/toolContracts.js";
 
 /** One REA MCP invocation observed in a Codex JSONL transcript. */
 interface CodexMcpCall {
@@ -11,7 +18,7 @@ interface CodexMcpCall {
   readonly errorCode: string | null;
 }
 
-/** Release-evaluation metrics derived from an actual Codex JSONL transcript. */
+/** Transcript measurements, text heuristics, and optional closed fixture-claim assessment. */
 export interface CodexAgentMetrics {
   readonly naturalUse: boolean;
   readonly correctFirstTool: boolean;
@@ -25,10 +32,17 @@ export interface CodexAgentMetrics {
   readonly outputTokens: number;
   readonly finalMessage: string;
   readonly evidenceIds: readonly string[];
+  /** Whether the answer contains a produced Evidence ID; claim support is not checked. */
   readonly finalCitesEvidence: boolean;
-  readonly contentCriteriaMet: boolean;
-  readonly completionQuality: boolean;
-  readonly authorityHonesty: boolean;
+  /** Case-insensitive substring coverage, including terms in negated claims. */
+  readonly answerTermCoverageMet: boolean;
+  /** Text length, term/cue coverage, and configured transcript checks only. */
+  readonly answerHeuristicsMet: boolean;
+  /** Whether an epistemic keyword occurs; this does not establish honest authority use. */
+  readonly epistemicCuePresent: boolean;
+  /** Limited to configured fixture claims; free-form factual correctness is not assessed. */
+  readonly factualCorrectness: KnownAnswerAssessment["status"];
+  readonly factualAssessment: KnownAnswerAssessment;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -54,13 +68,35 @@ const canonicalValue = (value: unknown): unknown => {
   );
 };
 
-const evidenceIdsFrom = (value: unknown): readonly string[] => {
-  const encoded = JSON.stringify(value);
-  if (encoded === undefined) return [];
-  return [...new Set(encoded.match(/ev_[a-f0-9]{64}/gu) ?? [])];
+const toolResultError = (
+  item: Record<string, unknown>,
+): Record<string, unknown> | undefined => {
+  const result = record(item.result ?? item.output);
+  const structured = record(
+    result?.structured_content ?? result?.structuredContent,
+  );
+  const direct = record(structured?.error ?? result?.error ?? item.error);
+  if (direct !== undefined || structured !== undefined) return direct;
+  // Codex preserves some REA failures only as one complete JSON text block.
+  // A client-truncated preview or SDK prose is not a structured error record.
+  const content = result?.content;
+  if (!Array.isArray(content) || content.length !== 1) return undefined;
+  const block = record(content[0]);
+  if (block?.type !== "text" || typeof block.text !== "string")
+    return undefined;
+  try {
+    return record(record(JSON.parse(block.text))?.error);
+  } catch (cause) {
+    if (cause instanceof SyntaxError || cause instanceof RangeError)
+      return undefined;
+    throw cause;
+  }
 };
 
-const toolResultFailed = (item: Record<string, unknown>): boolean => {
+const toolResultFailed = (
+  item: Record<string, unknown>,
+  error: Record<string, unknown> | undefined,
+): boolean => {
   if (
     item.status === "failed" ||
     (item.error !== undefined && item.error !== null)
@@ -70,31 +106,37 @@ const toolResultFailed = (item: Record<string, unknown>): boolean => {
   const structured = record(
     result?.structured_content ?? result?.structuredContent,
   );
-  return result?.isError === true || structured?.error !== undefined;
-};
-
-const toolResultErrorCode = (item: Record<string, unknown>): string | null => {
-  const result = record(item.result ?? item.output);
-  const structured = record(
-    result?.structured_content ?? result?.structuredContent,
+  return (
+    result?.isError === true ||
+    structured?.error !== undefined ||
+    error !== undefined
   );
-  const error = record(structured?.error ?? result?.error ?? item.error);
-  return textValue(error?.code) ?? null;
 };
 
-const callFromItem = (value: unknown): CodexMcpCall | undefined => {
-  const item = record(value);
+const callFromEvent = (
+  event: Record<string, unknown>,
+): CodexMcpCall | undefined => {
+  const item = record(
+    event.type === "item.completed"
+      ? event.item
+      : event.type === "mcp_tool_call"
+        ? event
+        : undefined,
+  );
   if (item?.type !== "mcp_tool_call") return undefined;
   const tool = textValue(item.tool) ?? textValue(item.name);
   if (tool === undefined) return undefined;
+  const error = toolResultError(item);
   return {
     id: textValue(item.id) ?? null,
     server: textValue(item.server) ?? textValue(item.server_name) ?? null,
     tool,
     arguments: item.arguments ?? item.input ?? {},
-    evidenceIds: evidenceIdsFrom(item.result ?? item.output),
-    error: toolResultFailed(item),
-    errorCode: toolResultErrorCode(item),
+    evidenceIds: deliveredCodexEvidence(event).map(
+      ({ evidence_id }) => evidence_id,
+    ),
+    error: toolResultFailed(item, error),
+    errorCode: textValue(error?.code) ?? null,
   };
 };
 
@@ -126,9 +168,7 @@ const consumeEvent = (state: EvaluationState, value: unknown): void => {
   if (event === undefined) return;
   const completedItem =
     event.type === "item.completed" ? event.item : undefined;
-  const call =
-    callFromItem(completedItem) ??
-    (event.type === "mcp_tool_call" ? callFromItem(event) : undefined);
+  const call = callFromEvent(event);
   if (call !== undefined) {
     const identity =
       call.id ??
@@ -156,15 +196,16 @@ const consumeEvent = (state: EvaluationState, value: unknown): void => {
   );
 };
 
-/** Score agent routing, repetition, model usage, and epistemic completion. */
+/** Measure agent routing, repetition, model usage, and explicitly limited answer heuristics. */
 export const evaluateCodexEvents = (
   events: readonly unknown[],
-  expectedFirstTool: string,
+  expectedFirstTool: string | null,
   options: {
     readonly requireEvidence?: boolean;
     readonly requiredAnswerTermGroups?: readonly (readonly string[])[];
     readonly requiredToolSubsequence?: readonly string[];
     readonly forbidInputValidationFailures?: boolean;
+    readonly fixtureClaims?: readonly FixtureClaimExpectation[];
   } = {},
 ): CodexAgentMetrics => {
   const state: EvaluationState = {
@@ -181,16 +222,31 @@ export const evaluateCodexEvents = (
     ({ server }) => server === null || server.toLowerCase() === "rea",
   );
   const signatures = new Map<string, number>();
+  let targetRevision = 0;
   for (const call of reaCalls) {
-    const signature = `${call.tool}:${JSON.stringify(canonicalValue(call.arguments))}`;
+    // A status read before and after a successful target lifecycle change is
+    // useful verification, not a duplicate analysis or unchanged failed retry.
+    const context =
+      call.tool === "binary_session" ? `${String(targetRevision)}:` : "";
+    const signature = `${context}${call.tool}:${JSON.stringify(canonicalValue(call.arguments))}`;
     signatures.set(signature, (signatures.get(signature) ?? 0) + 1);
+    if (
+      !call.error &&
+      (call.tool === "open_binary" || call.tool === "close_binary")
+    )
+      targetRevision += 1;
   }
   const repeatedCallCount = [...signatures.values()].reduce(
     (total, count) => total + Math.max(0, count - 1),
     0,
   );
   const inputValidationFailureCount = reaCalls.filter(
-    ({ errorCode }) => errorCode === "invalid_request",
+    (call) =>
+      call.errorCode === "invalid_request" ||
+      (call.error &&
+        TOOL_CONTRACTS.find(
+          ({ name }) => name === call.tool,
+        )?.inputSchema.safeParse(call.arguments).success === false),
   ).length;
   const requiredToolSubsequenceMet = containsOrderedSubsequence(
     reaCalls.filter(({ error }) => !error).map(({ tool }) => tool),
@@ -204,19 +260,24 @@ export const evaluateCodexEvents = (
     finalMessage.includes(evidenceId),
   );
   const normalizedFinalMessage = finalMessage.toLocaleLowerCase("en-US");
-  const contentCriteriaMet = (options.requiredAnswerTermGroups ?? []).every(
+  const answerTermCoverageMet = (options.requiredAnswerTermGroups ?? []).every(
     (terms) =>
       terms.some((term) =>
         normalizedFinalMessage.includes(term.toLocaleLowerCase("en-US")),
       ),
   );
-  const authorityHonesty =
+  const epistemicCuePresent =
     /\b(evidence|observed|inferred|unknown|unavailable|limitation|authority|not configured|could not|requires approval)\b/iu.test(
       finalMessage,
     );
+  const factualAssessment = evaluateKnownAnswers(
+    events,
+    finalMessage,
+    options.fixtureClaims,
+  );
   return {
     naturalUse: reaCalls.length > 0,
-    correctFirstTool: reaCalls[0]?.tool === expectedFirstTool,
+    correctFirstTool: (reaCalls[0]?.tool ?? null) === expectedFirstTool,
     firstTool: reaCalls[0]?.tool ?? null,
     reaCalls,
     repeatedCallCount,
@@ -228,16 +289,18 @@ export const evaluateCodexEvents = (
     finalMessage,
     evidenceIds,
     finalCitesEvidence,
-    contentCriteriaMet,
-    completionQuality:
+    answerTermCoverageMet,
+    answerHeuristicsMet:
       finalMessage.trim().length >= 80 &&
-      authorityHonesty &&
-      contentCriteriaMet &&
+      epistemicCuePresent &&
+      answerTermCoverageMet &&
       requiredToolSubsequenceMet &&
       (options.forbidInputValidationFailures !== true ||
         inputValidationFailureCount === 0) &&
       (options.requireEvidence !== true || finalCitesEvidence),
-    authorityHonesty,
+    epistemicCuePresent,
+    factualCorrectness: factualAssessment.status,
+    factualAssessment,
   };
 };
 

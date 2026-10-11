@@ -50,14 +50,32 @@ const artifactFormatSchema = z.enum([
   "pe",
   "dos-mz",
   "dos-com",
+  "raw-binary",
   "hopper",
   "analysis-database",
   "ipa",
   "apk",
   "msix",
   "appx",
+  "hap",
+  "hsp",
+  "app-pack",
   "plist",
   "entitlements",
+  "directory",
+  "file",
+  "unknown",
+]);
+
+/** Formats established from bytes or a virtual directory tree, independent of path roles. */
+const artifactContentFormatSchema = artifactFormatSchema.extract([
+  "zip",
+  "mach-o-universal",
+  "mach-o",
+  "elf",
+  "pe",
+  "dos-mz",
+  "plist",
   "directory",
   "file",
   "unknown",
@@ -85,13 +103,11 @@ export type ArtifactCommand = z.infer<typeof artifactCommandSchema>;
 /** One content-addressed application artifact in deterministic manifest order. */
 const artifactNodeSchema = z.object({
   artifact_id: artifactIdSchema,
-  kind: artifactKindSchema,
-  format: artifactFormatSchema,
+  format: artifactContentFormatSchema,
   sha256: sha256Schema,
   size: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
   media_type: z.string().min(1).nullable(),
   architecture: z.string().min(1).nullable(),
-  executable: z.boolean(),
   content_state: z.enum(["materialized", "embedded", "virtual"]),
   limitations: z.array(z.string()),
 });
@@ -103,6 +119,8 @@ const artifactOccurrenceSchema = z.object({
   parent_occurrence_id: occurrenceIdSchema.nullable(),
   logical_path: boundedRelativePathSchema,
   entry_kind: z.enum(["file", "directory", "symlink", "slice"]),
+  artifact_kind: artifactKindSchema,
+  artifact_format: artifactFormatSchema,
   declared_size: z
     .number()
     .int()
@@ -123,7 +141,7 @@ const artifactOccurrenceSchema = z.object({
 });
 
 /** Observed bytes that contradict a container's declared integrity identity. */
-const integrityContradictionSchema = z.object({
+export const integrityContradictionSchema = z.object({
   contradiction_id: contradictionIdSchema,
   occurrence_id: occurrenceIdSchema,
   parent_artifact_id: artifactIdSchema,
@@ -137,12 +155,14 @@ const integrityContradictionSchema = z.object({
   limitations: z.array(z.string()).min(1),
 });
 
-/** Parent-child derivation relation between two content-addressed artifacts. */
+/**
+ * Parent-child derivation relation between two content-addressed artifacts.
+ * The child artifact and its logical path are those of the edge's occurrence.
+ */
 const artifactEdgeSchema = z.object({
   edge_id: edgeIdSchema,
   ordinal: z.number().int().min(0),
   parent_artifact_id: artifactIdSchema,
-  child_artifact_id: artifactIdSchema,
   relation: z.enum([
     "contains",
     "extracts",
@@ -153,7 +173,6 @@ const artifactEdgeSchema = z.object({
     "derived-from",
   ]),
   occurrence_id: occurrenceIdSchema,
-  logical_path: boundedRelativePathSchema.nullable(),
   producer: artifactCommandSchema.nullable(),
 });
 
@@ -211,6 +230,7 @@ export const artifactExtractionResultSchema = z.object({
     residual_paths: z.array(boundedRelativePathSchema),
   }),
   provenance: z.array(artifactCommandSchema),
+  integrity_contradictions: z.array(integrityContradictionSchema),
   limitations: z.array(z.string()),
 });
 

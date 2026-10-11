@@ -9,7 +9,7 @@ import {
 } from "../../domain/propertyListKeys.js";
 import { decodeNibArchive, type NibArchiveDocument } from "./NibArchive.js";
 import {
-  estimatePropertyListDecodeBytes,
+  preflightPropertyListDecode,
   InterfaceBuilderDecodeBudget,
   InterfaceBuilderDecodeBudgetExceeded,
 } from "./InterfaceBuilderDecodeBudget.js";
@@ -25,8 +25,9 @@ import {
   type NibHierarchyNode,
 } from "./NibViewHierarchy.js";
 import { jsonValueSchema, type JsonValue } from "../../domain/jsonValue.js";
+import { compareUnicodeCodePoints } from "../../domain/unicodeCodePointOrder.js";
 
-import { decodeXmlPlistText } from "./XmlPropertyListText.js";
+import { decodeXmlPlistText } from "../../domain/propertyListXmlText.js";
 
 const MAX_AGGREGATE_INPUT_BYTES = 32 * 1024 * 1024;
 const MAX_AGGREGATE_DECODE_BYTES = 256 * 1024 * 1024;
@@ -46,10 +47,9 @@ export const analyzeInterfaceBuilderBundle = async (input: {
   const omittedArchives: Array<{ path: string; reason: string }> = [];
   let unreportedOmittedArchives = 0;
   const incompleteHierarchies = new Map<string, number>();
-  const prototypeKeyOmissions = new Map<string, number>();
+  const prototypeKeyOmissions = new Map<string, number | null>();
   let omitted = 0;
   let attempted = 0;
-  let candidates = 0;
   let aggregateInputBytes = 0;
   const decodeBudget = new InterfaceBuilderDecodeBudget(
     MAX_AGGREGATE_DECODE_BYTES,
@@ -60,15 +60,16 @@ export const analyzeInterfaceBuilderBundle = async (input: {
     else unreportedOmittedArchives += 1;
   };
   try {
-    for await (const entry of reader.entries(input.signal)) {
-      if (entry.kind !== "file" || !isInterfaceBuilderArchive(entry.path))
-        continue;
-      candidates += 1;
-      if (candidates > limits.max_documents) {
-        omitted += 1;
-        recordOmittedArchive(entry.path, "max_documents");
-        continue;
-      }
+    const selection = await selectInterfaceBuilderCandidates(
+      reader,
+      input.signal,
+      limits.max_documents,
+    );
+    omitted = selection.omitted;
+    for (const entry of selection.omittedSamples)
+      recordOmittedArchive(entry.path, "max_documents");
+    unreportedOmittedArchives += selection.unreportedOmitted;
+    for (const entry of selection.selected) {
       try {
         const remainingInputBytes =
           MAX_AGGREGATE_INPUT_BYTES - aggregateInputBytes;
@@ -92,6 +93,7 @@ export const analyzeInterfaceBuilderBundle = async (input: {
           bytes.subarray(0, 10).toString("ascii") === "NIBArchive";
         let nib: ReturnType<typeof projectNibArchive> | null = null;
         let xmlText: string | undefined;
+        let binaryPrototypeKeyObserved = false;
         if (isNibArchive) {
           const documentBudget = new InterfaceBuilderDecodeBudget(
             decodeBudget.remainingBytes,
@@ -108,23 +110,25 @@ export const analyzeInterfaceBuilderBundle = async (input: {
         } else {
           if (bytes.subarray(0, 8).toString("ascii") !== "bplist00")
             xmlText = decodeXmlPlistText(bytes);
-          const decodedReservation = estimatePropertyListDecodeBytes(
+          const decodedReservation = preflightPropertyListDecode(
             bytes,
             decodeBudget.remainingBytes,
             xmlText,
           );
           decodeBudget.reserve(
-            decodedReservation,
+            decodedReservation.estimatedBytes,
             "plist representation exceeds the aggregate Interface Builder decode budget",
           );
+          binaryPrototypeKeyObserved =
+            decodedReservation.binaryPrototypeKeyObserved;
         }
         const { value: raw, omittedPrototypeKeys } =
           nib === null
-            ? decodePlist(bytes, xmlText)
+            ? decodePlist(bytes, xmlText, binaryPrototypeKeyObserved)
             : { value: nib.raw, omittedPrototypeKeys: 0 };
         if (nib !== null && nib.omitted > 0)
           incompleteHierarchies.set(entry.path, nib.omitted);
-        if (omittedPrototypeKeys > 0)
+        if (omittedPrototypeKeys !== 0)
           prototypeKeyOmissions.set(entry.path, omittedPrototypeKeys);
         const documentHash = createHash("sha256").update(bytes).digest("hex");
         documents.push({
@@ -167,11 +171,65 @@ export const analyzeInterfaceBuilderBundle = async (input: {
   });
 };
 
+/** Select lexically earliest document paths independent of host traversal order. */
+const selectInterfaceBuilderCandidates = async (
+  reader: DirectoryArtifactReader,
+  signal: AbortSignal | undefined,
+  maximumDocuments: number,
+): Promise<{
+  readonly selected: readonly ArtifactEntry[];
+  readonly omittedSamples: readonly ArtifactEntry[];
+  readonly omitted: number;
+  readonly unreportedOmitted: number;
+}> => {
+  const capacity = maximumDocuments + MAX_REPORTED_OMITTED_ARCHIVES;
+  const candidates: ArtifactEntry[] = [];
+  let total = 0;
+  for await (const entry of reader.entries(signal)) {
+    if (entry.kind !== "file" || !isInterfaceBuilderArchive(entry.path))
+      continue;
+    total += 1;
+    retainCandidate(candidates, entry, capacity);
+  }
+  const omittedSamples = candidates.slice(maximumDocuments, capacity);
+  return {
+    selected: candidates.slice(0, maximumDocuments),
+    omittedSamples,
+    omitted: Math.max(0, total - maximumDocuments),
+    unreportedOmitted: Math.max(
+      0,
+      total - maximumDocuments - omittedSamples.length,
+    ),
+  };
+};
+
+/** Keep the earliest bounded path set; directory iteration order is host-defined. */
+const retainCandidate = (
+  candidates: ArtifactEntry[],
+  entry: ArtifactEntry,
+  maximum: number,
+): void => {
+  let low = 0;
+  let high = candidates.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    const existing = candidates[middle];
+    if (
+      existing !== undefined &&
+      compareUnicodeCodePoints(existing.path, entry.path) < 0
+    )
+      low = middle + 1;
+    else high = middle;
+  }
+  candidates.splice(low, 0, entry);
+  if (candidates.length > maximum) candidates.pop();
+};
+
 const finalizeHierarchyCoverage = (
   result: ReturnType<typeof buildInterfaceBuilderAnalysis>,
   counts: {
     incompleteHierarchies: ReadonlyMap<string, number>;
-    prototypeKeyOmissions: ReadonlyMap<string, number>;
+    prototypeKeyOmissions: ReadonlyMap<string, number | null>;
     invalid: readonly string[];
     omittedArchives: readonly { path: string; reason: string }[];
     unreportedOmittedArchives: number;
@@ -278,6 +336,14 @@ const projectNibArchive = (
   maxHierarchyNodes: number,
 ) => {
   const byId = new Map(archive.objects.map((object) => [object.id, object]));
+  const normalizedClassNames = new Map<string, string>();
+  const normalizeClassName = (value: string): string => {
+    const known = normalizedClassNames.get(value);
+    if (known !== undefined) return known;
+    const normalized = value.replace(/\0+$/u, "");
+    normalizedClassNames.set(value, normalized);
+    return normalized;
+  };
   const decodedStrings = new Map<number, string | null>();
   const decodedString = (
     objectId: number,
@@ -303,14 +369,6 @@ const projectNibArchive = (
     decodedStrings.set(objectId, value);
     return value;
   };
-  const reserveStringOccurrence = (value: string | null): string | null => {
-    if (value !== null)
-      budget.reserve(
-        64 + value.length * 6,
-        "NIBArchive repeated string projection exceeds the aggregate Interface Builder decode budget",
-      );
-    return value;
-  };
   let projectedFields = 0;
   for (const object of archive.objects)
     projectedFields += Object.keys(object.values).length;
@@ -325,13 +383,21 @@ const projectNibArchive = (
   const dereference = (value: JsonValue | undefined): JsonValue | undefined => {
     if (typeof value !== "object" || value === null || Array.isArray(value))
       return value;
+    const encodedData = value.$nib_data_base64;
+    if (typeof encodedData === "string") {
+      budget.reserveBase64JsonStringOccurrence(encodedData);
+      return value;
+    }
     const ref = value.$nib_object_ref;
     if (typeof ref !== "number") return value;
     const target = byId.get(ref);
     if (target === undefined) return undefined;
-    if (target.class_name.replace(/\0+$/u, "") === "NSString") {
+    if (normalizeClassName(target.class_name) === "NSString") {
       const string = decodedString(ref, target);
-      if (string !== null) return reserveStringOccurrence(string);
+      if (string !== null) {
+        budget.reserveJsonStringOccurrence(string);
+        return string;
+      }
     }
     return { objectID: String(ref) };
   };
@@ -341,18 +407,31 @@ const projectNibArchive = (
     const ref = value.$nib_object_ref;
     if (typeof ref !== "number") return null;
     const target = byId.get(ref);
-    if (target?.class_name.replace(/\0+$/u, "") !== "NSString") return null;
-    return reserveStringOccurrence(decodedString(ref, target));
+    if (
+      target === undefined ||
+      normalizeClassName(target.class_name) !== "NSString"
+    )
+      return null;
+    const string = decodedString(ref, target);
+    if (string === null) return null;
+    budget.reserveJsonStringOccurrence(string);
+    return string;
   };
+  const runtimeClasses = new Map<number, string | null>();
   const runtimeClass = (objectId: number): string | null => {
+    if (runtimeClasses.has(objectId))
+      return runtimeClasses.get(objectId) ?? null;
     const object = byId.get(objectId);
     if (object === undefined) return null;
-    const storedClass = object.class_name.replace(/\0+$/u, "");
-    if (storedClass === "NSClassSwapper")
-      return referencedString(object.values.NSClassName) ?? storedClass;
-    return storedClass === "UIClassSwapper"
-      ? (referencedString(object.values.UIClassName) ?? storedClass)
-      : storedClass;
+    const storedClass = normalizeClassName(object.class_name);
+    const resolvedClass =
+      storedClass === "NSClassSwapper"
+        ? (referencedString(object.values.NSClassName) ?? storedClass)
+        : storedClass === "UIClassSwapper"
+          ? (referencedString(object.values.UIClassName) ?? storedClass)
+          : storedClass;
+    runtimeClasses.set(objectId, resolvedClass);
+    return resolvedClass;
   };
   const objects = Object.fromEntries(
     archive.objects
@@ -364,19 +443,22 @@ const projectNibArchive = (
       })
       .map((object) => {
         const className =
-          runtimeClass(object.id) ?? object.class_name.replace(/\0+$/u, "");
-        const strings = Object.entries(object.values).flatMap(
-          ([key, value]) => {
-            const resolved = dereference(value);
-            return typeof resolved === "string" ? [[key, resolved]] : [];
-          },
-        );
-        const name =
-          strings.find(([key]) =>
-            /(?:title|label|identifier|accessibility|name|contents)/iu.test(
-              key ?? "",
-            ),
-          )?.[1] ?? className;
+          runtimeClass(object.id) ?? normalizeClassName(object.class_name);
+        budget.reserveJsonStringOccurrence(className);
+        let name = className;
+        for (const [key, value] of Object.entries(object.values)) {
+          if (
+            !/(?:title|label|identifier|accessibility|name|contents)/iu.test(
+              key,
+            )
+          )
+            continue;
+          const resolved = dereference(value);
+          if (typeof resolved !== "string") continue;
+          name = resolved;
+          break;
+        }
+        budget.reserveJsonStringOccurrence(name);
         return [
           String(object.id),
           {
@@ -384,10 +466,10 @@ const projectNibArchive = (
             label: name,
             objectID: String(object.id),
             nibValues: Object.fromEntries(
-              Object.entries(object.values).map(([key, value]) => [
-                key,
-                dereference(value) ?? null,
-              ]),
+              Object.entries(object.values).map(([key, value]) => {
+                budget.reserveJsonPropertyNameOccurrence(key);
+                return [key, dereference(value) ?? null];
+              }),
             ),
           },
         ];
@@ -403,7 +485,7 @@ const projectNibArchive = (
       : null;
   };
   for (const object of archive.objects) {
-    const className = object.class_name.replace(/\0+$/u, "");
+    const className = normalizeClassName(object.class_name);
     // AppKit connectors use NS-prefixed keys; UIKit's runtime outlet and
     // event connections use UI-prefixed keys with the same roles.
     const uiKit = /^UIRuntime\w*Connection$/u.test(className);
@@ -420,6 +502,7 @@ const projectNibArchive = (
       : className.includes("Control") || className.includes("Event")
         ? "action"
         : className;
+    budget.reserveJsonStringOccurrence(type);
     const eventMask = values.UIEventMask;
     // The source is the outlet owner or the sending control; the destination
     // is the outlet value or the action target, and a nil target is the
@@ -485,7 +568,7 @@ const projectNibArchive = (
     return { objectID: String(objectId), children };
   };
   const ibData = archive.objects.find(
-    ({ class_name }) => class_name.replace(/\0+$/u, "") === "NSIBObjectData",
+    ({ class_name }) => normalizeClassName(class_name) === "NSIBObjectData",
   );
   const rootId = reference(ibData?.values.NSRoot);
   const hierarchyRoots = rootId === null ? [] : [rootId];
@@ -512,7 +595,11 @@ const projectNibArchive = (
       "com.apple.ibtool.document.connections": connections,
       "com.apple.ibtool.document.hierarchy": merged.hierarchy,
       "com.apple.ibtool.document.classes": Object.fromEntries(
-        archive.classes.map((name) => [name.replace(/\0+$/u, ""), {}]),
+        archive.classes.map((name) => {
+          const className = normalizeClassName(name);
+          budget.reserveJsonPropertyNameOccurrence(className);
+          return [className, {}];
+        }),
       ),
     }),
   };
@@ -557,11 +644,18 @@ const readEntry = async (
 /** Project decoded plist data and dates while retaining omitted-key coverage. */
 const decodePlist = (
   bytes: Buffer,
-  xmlText?: string,
-): { readonly value: JsonValue; readonly omittedPrototypeKeys: number } => {
-  const { value, omittedPrototypeKeys } =
-    bytes.subarray(0, 8).toString("ascii") === "bplist00"
-      ? { value: parseBinary(bytes), omittedPrototypeKeys: 0 }
-      : parseXmlPropertyList(xmlText ?? decodeXmlPlistText(bytes));
+  xmlText: string | undefined,
+  binaryPrototypeKeyObserved: boolean,
+): {
+  readonly value: JsonValue;
+  readonly omittedPrototypeKeys: number | null;
+} => {
+  const binary = bytes.subarray(0, 8).toString("ascii") === "bplist00";
+  const { value, omittedPrototypeKeys } = binary
+    ? {
+        value: parseBinary(bytes),
+        omittedPrototypeKeys: binaryPrototypeKeyObserved ? null : 0,
+      }
+    : parseXmlPropertyList(xmlText ?? decodeXmlPlistText(bytes));
   return { value: projectPlistValue(value).value, omittedPrototypeKeys };
 };

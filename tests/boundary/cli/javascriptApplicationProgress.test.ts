@@ -6,7 +6,7 @@ import { z } from "zod";
 
 import { javascriptApplicationAnalysisResultSchema } from "../../../src/domain/javascript/javascriptApplicationAnalysis.js";
 import { parseEvidence } from "../../../src/domain/evidence.js";
-import { analyzeJavaScriptApplication } from "../../../src/application/javascript/JavaScriptApplicationService.js";
+import { analyzeJavaScriptApplication } from "../../support/javascriptApplicationScope.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 import { cliTest } from "../../support/cli/cliFixture.js";
 
@@ -62,7 +62,7 @@ cliTest(
         "--json",
       ],
     });
-    expect(output.json).toMatchObject({ code: "artifact_operation_failed" });
+    expect(output.json).toMatchObject({ code: "invalid_request" });
     const updates = output.stderr
       .trim()
       .split("\n")

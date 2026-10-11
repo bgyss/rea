@@ -1,20 +1,22 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { Client } from "@modelcontextprotocol/client";
+import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { access, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { CdpBrowserProvider } from "../dist/browser/CdpBrowserProvider.js";
 import { waitForBrowserDevtoolsPort } from "../dist/browser/BrowserProcessStartup.js";
-import { PlaywrightBrowserScenarioProvider } from "../dist/browser/PlaywrightBrowserScenarioProvider.js";
+import { createBrowserScenarioProvider } from "../dist/composition/browserScenario.js";
 import {
   inspectWebPageInputSchema,
   listBrowserTargetsInputSchema,
 } from "../dist/domain/browserObservation.js";
-import { analyzeWebBundleInputSchema } from "../dist/domain/webBundleAnalysis.js";
 import { observeWebSessionInputSchema } from "../dist/domain/browserSession.js";
-import { compareWebCapturesInputSchema } from "../dist/domain/webCaptureDiff.js";
+import { compareWebCapturesInputSchema } from "../dist/domain/webCaptureDiffSchemas.js";
 import {
   captureWebScreenshotInputSchema,
   compareWebScreenshotsInputSchema,
@@ -31,6 +33,7 @@ import {
   browserScenario,
   runScenarioCli,
   scenarioProfiles,
+  verifyScenarioFailureEvidence,
 } from "./lib/browser-scenario-verifier.mjs";
 import { completeVerifierRun, createVerifierRun } from "./lib/verifier-run.mjs";
 import { verifyLargeScreenshotE2e } from "./lib/browser-screenshot-e2e.mjs";
@@ -39,6 +42,10 @@ import { verifyBrowserNetworkEvidence } from "./lib/browser-network-e2e.mjs";
 import { verifyBrowserScriptExport } from "./lib/browser-script-export-e2e.mjs";
 import { verifyBrowserModules } from "./lib/browser-module-e2e.mjs";
 import { verifyBrowserDomDestinations } from "./lib/browser-dom-destinations-e2e.mjs";
+import { verifyBrowserCaptureMetadataBudget } from "./lib/browser-capture-metadata-budget-e2e.mjs";
+import { artifactCliEvidence, artifactMcpResult } from "./lib/artifact-e2e.mjs";
+import { verifyScenarioEnvironment } from "./lib/browser-scenario-environment-e2e.mjs";
+import { verifyScenarioStorage } from "./lib/browser-scenario-storage-e2e.mjs";
 
 const REAL_BROWSER_STARTUP_TIMEOUT_MS = 60_000;
 const SCENARIO_SECRET_VALUE = "rea-browser-verifier-secret";
@@ -58,6 +65,7 @@ try {
     executable,
     [
       "--headless=new",
+      "--password-store=basic",
       ...(process.env.REA_BROWSER_NO_SANDBOX === "true"
         ? ["--no-sandbox"]
         : []),
@@ -160,17 +168,7 @@ try {
     );
   assertSensitiveShapes(withSource.value);
 
-  const bundle = await provider.analyzeBundle(
-    analyzeWebBundleInputSchema.parse({
-      cdp_endpoint: endpoint,
-      allowed_origins: [site.origin],
-      target_id: target,
-      observation_ms: 200,
-      fetch_source_maps: true,
-    }),
-  );
-  if (!bundle.ok) throw bundle.error;
-  assertBundleAnalysis(bundle.value);
+  const bundle = await verifyPublicBundle(endpoint, target, site.origin);
 
   const captureDiff = await provider.compareCaptures(
     compareWebCapturesInputSchema.parse({
@@ -246,10 +244,9 @@ try {
   try {
     attachedScenario = await runScenarioCli(attachedScenarioInput);
   } catch (cliError) {
-    const direct =
-      await new PlaywrightBrowserScenarioProvider().captureScenario(
-        attachedScenarioInput,
-      );
+    const direct = await createBrowserScenarioProvider(
+      process.env,
+    ).captureScenario(attachedScenarioInput);
     if (!direct.ok) {
       const underlying = direct.error.cause;
       const details =
@@ -280,16 +277,29 @@ try {
     throw new Error("Scenario attachment terminated its external browser");
 
   const profilesBefore = await scenarioProfiles();
-  const launchedScenario =
-    await new PlaywrightBrowserScenarioProvider().captureScenario(
-      browserScenario(
-        {
-          mode: "launch",
-          executable_path: executable,
-        },
-        site.origin,
-      ),
-    );
+  process.stderr.write("Browser verifier: scenario environment\n");
+  const scenarioEnvironment = await verifyScenarioEnvironment(
+    endpoint,
+    target,
+    site.origin,
+  );
+  process.stderr.write("Browser verifier: scenario storage\n");
+  const scenarioStorage = await verifyScenarioStorage({
+    executable,
+    endpoint,
+    targetId: target,
+  });
+  const launchedScenario = await createBrowserScenarioProvider(
+    process.env,
+  ).captureScenario(
+    browserScenario(
+      {
+        mode: "launch",
+        executable_path: executable,
+      },
+      site.origin,
+    ),
+  );
   if (!launchedScenario.ok) throw launchedScenario.error;
   if (
     launchedScenario.value.browser.cleanup !== "terminated-owned-process" ||
@@ -300,6 +310,10 @@ try {
   if ([...profilesAfter].some((entry) => !profilesBefore.has(entry)))
     throw new Error("Scenario launch retained a temporary browser profile");
   assertScenarioCapture(launchedScenario.value);
+  const scenarioFailure = await verifyScenarioFailureEvidence(
+    executable,
+    site.origin,
+  );
   const scenarioResults = JSON.stringify([
     attachedScenario,
     launchedScenario.value,
@@ -327,7 +341,9 @@ try {
         `Browser scenario included unselected structured value: ${unselectedValue}`,
       );
 
+  process.stderr.write("Browser verifier: large screenshot\n");
   const largeScreenshot = await verifyLargeScreenshotE2e(endpoint, site.origin);
+  process.stderr.write("Browser verifier: popup coverage\n");
   const popupEvents = await verifyPopupEventCoverage(executable);
   const networkEvidence = await verifyBrowserNetworkEvidence(
     executable,
@@ -339,6 +355,7 @@ try {
     target_id: target,
   });
   const moduleTrace = await verifyBrowserModules(executable);
+  const captureMetadata = await verifyBrowserCaptureMetadataBudget(endpoint);
   report = {
     browser: observed.value.browser.product,
     endpoint,
@@ -348,9 +365,14 @@ try {
     scripts: observed.value.scripts.items.length,
     networkRequests: observed.value.network.requests.length,
     consoleEvents: observed.value.console.events.length,
-    websocketEvents: observed.value.network.websocket_events.length,
-    bundleScripts: bundle.value.capture.scripts_analyzed,
-    sourceMaps: bundle.value.observations.source_maps.processed,
+    websocketConnections: observed.value.network.websocket_connections.length,
+    websocketFrames: observed.value.network.websocket_connections.reduce(
+      (total, connection) => total + connection.events.length,
+      0,
+    ),
+    bundleScripts: bundle.capture.scripts_analyzed,
+    sourceMaps: bundle.observations.source_maps.processed,
+    bundle_cli_and_stdio_mcp: true,
     sessionEvents: session.value.timeline.length,
     pageScopedTransport: true,
     screenshotBytes: screenshot.value.artifact.bytes,
@@ -359,15 +381,22 @@ try {
     networkEvidence,
     scriptExport,
     moduleTrace,
+    captureMetadata,
     domDestinations,
     browserScenarioCli: true,
     browserScenarioAttachCleanup: "disconnected-external",
     browserScenarioLaunchCleanup: "terminated-owned-process",
+    scenarioFailure,
+    scenarioEnvironment,
+    scenarioStorage,
     verified: true,
   };
 } finally {
+  process.stderr.write("Browser verifier cleanup: closing page proxy\n");
   if (pageProxy !== undefined) await pageProxy.close();
+  process.stderr.write("Browser verifier cleanup: stopping owned Chrome\n");
   if (browser !== undefined) await stopProcess(browser);
+  process.stderr.write("Browser verifier cleanup: closing fixture site\n");
   await site.close();
   await rm(profile, {
     recursive: true,
@@ -382,6 +411,43 @@ process.stdout.write(
     ...report,
   })}\n`,
 );
+
+async function verifyPublicBundle(endpoint, target, origin) {
+  const evidence = await artifactCliEvidence("analyze-web-bundle", endpoint, [
+    target,
+    "--allowed-origins",
+    origin,
+    "--fetch-source-maps",
+    "--observation-ms",
+    "200",
+  ]);
+  assertBundleAnalysis(evidence.normalized_result);
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [fileURLToPath(new URL("./rea.mjs", import.meta.url)), "mcp"],
+    env: { PATH: process.env.PATH ?? "", REA_LOG_LEVEL: "silent" },
+    stderr: "pipe",
+  });
+  const client = new Client({ name: "browser-bundle-e2e", version: "1" });
+  try {
+    await client.connect(transport);
+    const result = await artifactMcpResult(client, "analyze_web_bundle", {
+      cdp_endpoint: endpoint,
+      target_id: target,
+      allowed_origins: [origin],
+      fetch_source_maps: true,
+      observation_ms: 200,
+    });
+    assertBundleAnalysis(result);
+  } finally {
+    try {
+      await client.close();
+    } finally {
+      await transport.close();
+    }
+  }
+  return evidence.normalized_result;
+}
 
 async function verifyPageScopedTransport(provider, proxy, origin) {
   const target = await pageTarget(provider, proxy.endpoint);

@@ -6,17 +6,15 @@ import type {
   ProviderIdentity,
 } from "../application/AnalysisProvider.js";
 import { createAnalysisProfile } from "../domain/analysisProfile.js";
-import type {
-  BinaryArchitecture,
-  BinaryTarget,
-} from "../domain/binaryTarget.js";
+import type { BinaryTarget } from "../domain/binaryTargetTypes.js";
+import type { BinaryArchitecture } from "../domain/binaryTargetTypes.js";
 import {
   AnalysisCancelledError,
   AnalysisCapabilityUnavailableError,
 } from "../domain/analysisErrorCore.js";
 import { BinaryTargetError } from "../domain/configurationErrors.js";
 import { ProviderAdapterError } from "../domain/providerAdapterError.js";
-import { type AnalysisError } from "../domain/analysisErrorBase.js";
+import type { AnalysisError } from "../domain/analysisErrorBase.js";
 import { err, ok, type Result } from "../domain/result.js";
 
 import {
@@ -37,7 +35,7 @@ export const resolveHopperAnalysisProfile = async (
   options: HopperProfileOptions,
 ): Promise<Result<AnalysisProfileResolution, AnalysisError>> => {
   if (target.kind !== "executable" && target.kind !== "database")
-    return ok({ profile: null, compatibility: {} });
+    return ok({ profile: null });
   let machoContainer: "thin" | "fat32" | "fat64" | undefined;
   if (target.kind === "executable" && target.format === "mach-o") {
     const header = await readMachoMagic(target.path, options.signal);
@@ -67,11 +65,9 @@ export const resolveHopperAnalysisProfile = async (
     options.loaderArgsOverride.length === 0
       ? derived.value
       : [...options.loaderArgsOverride];
-  const compatibility = { loaderArgs: [...loaderArgs] };
   const launcherDigest = await sha256File(options.launcherPath, options.signal);
   if (!launcherDigest.ok) return launcherDigest;
-  if (launcherDigest.value === undefined)
-    return ok({ profile: null, compatibility });
+  if (launcherDigest.value === undefined) return ok({ profile: null });
   const provider = {
     id: options.provider.id,
     name: options.provider.name,
@@ -96,13 +92,9 @@ export const resolveHopperAnalysisProfile = async (
           options.loaderArgsOverride.length === 0
             ? "derived"
             : "configured_override",
-        argument_count: loaderArgs.length,
-        arguments_sha256: createHash("sha256")
-          .update(JSON.stringify(loaderArgs))
-          .digest("hex"),
+        arguments: [...loaderArgs],
       },
     }),
-    compatibility,
   });
 };
 
@@ -118,6 +110,14 @@ export const hopperLoaderArgsForTarget = (
   if (target.kind !== "executable" || target.format === "raw-image")
     return err(new ProviderAdapterError("hopper", "resolve_analysis_profile"));
   const architecture = target.architecture;
+  if (architecture === "mips")
+    return err(
+      new AnalysisCapabilityUnavailableError(
+        "hopper",
+        "resolve_analysis_profile",
+        "REA's Hopper adapter does not admit MIPS targets. Select a verified Ghidra MIPS profile instead.",
+      ),
+    );
   const flag = hopperArchitectureFlag(architecture);
   switch (target.format) {
     case "mach-o":
@@ -140,13 +140,16 @@ export const hopperLoaderArgsForTarget = (
       return ok(["-l", "WinPE", flag]);
     case "dos-mz":
     case "dos-com":
+    case "raw-binary":
       return err(
         new ProviderAdapterError("hopper", "resolve_analysis_profile"),
       );
   }
 };
 
-const hopperArchitectureFlag = (architecture: BinaryArchitecture): string => {
+const hopperArchitectureFlag = (
+  architecture: Exclude<BinaryArchitecture, "mips">,
+): string => {
   switch (architecture) {
     case "x86":
       return "--intel-32";

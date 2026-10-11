@@ -1,3 +1,4 @@
+import { requireMcpToolError } from "./mcp-verifier-results.mjs";
 import assert from "node:assert/strict";
 
 /** Exercise segmented-address truncation through real CLI/MCP reads and edits. */
@@ -8,7 +9,7 @@ export async function verifyGhidraAddressBoundaries(client, entry, cli) {
       { timeout: 240000 },
     );
     assert.notEqual(reply.isError, true, JSON.stringify(reply));
-    return reply.structuredContent.result;
+    return reply.structuredContent.normalized_result;
   };
   const before = await query("analyze_function", { procedure: entry });
   // The segmented parser used to discard the high 32 bits and alias this entry.
@@ -40,13 +41,14 @@ export async function verifyGhidraAddressBoundaries(client, entry, cli) {
         { timeout: 240000 },
       );
       assert.equal(reply.isError, true, `${name} accepted ${address}`);
-      const error = reply.structuredContent?.error;
+      const error = requireMcpToolError(reply);
       assert.equal(error?.code, "invalid_request", JSON.stringify(reply));
       assert.equal(error.details.operation, name);
       const issues = JSON.stringify(error.details.issues);
       assert.match(issues, /cannot be represented without truncation/u);
       assert.ok(issues.includes(address), issues);
-      assert.equal(reply.structuredContent.evidence, undefined);
+      // A rejected request produces no Evidence; errors carry text only.
+      assert.equal(reply.structuredContent, undefined);
     }
   }
   assert.deepEqual(
@@ -59,6 +61,36 @@ export async function verifyGhidraAddressBoundaries(client, entry, cli) {
   assert.deepEqual(
     await query("read_bytes", { address: padded, length: 1 }),
     await query("read_bytes", { address: entry, length: 1 }),
+  );
+  const aliasKeys = [entry, padded];
+  assert.deepEqual(
+    await query("set_addresses_names", {
+      names: {
+        [entry]: "rea_same_address_alias",
+        [padded]: "rea_same_address_alias",
+      },
+    }),
+    Object.fromEntries(aliasKeys.map((address) => [address, true])),
+    "Equivalent address spellings with one requested name share one edit",
+  );
+  const nameBeforeAliasedBatch = await query("address_name", {
+    address: entry,
+  });
+  assert.equal(nameBeforeAliasedBatch, "rea_same_address_alias");
+  assert.deepEqual(
+    await query("set_addresses_names", {
+      names: {
+        [entry]: "rea_first_address_alias",
+        [padded]: "rea_second_address_alias",
+      },
+    }),
+    Object.fromEntries(aliasKeys.map((address) => [address, false])),
+    "Conflicting spellings of one Ghidra address must be rejected together",
+  );
+  assert.equal(
+    await query("address_name", { address: entry }),
+    nameBeforeAliasedBatch,
+    "A rejected alias collision must leave the preexisting target name unchanged",
   );
   for (const [command, flags, operation] of [
     ["read-bytes", ["--length", "1"], "read_bytes"],

@@ -1,5 +1,7 @@
 # Raw memory images with Ghidra
 
+> REA has two headerless formats. `raw-binary` takes an architecture and an entry address for a flat firmware image ([raw binary analysis](raw-binary.md)). `raw-image` takes a full declared profile: any Ghidra processor, memory-map blocks, overlay banks and register context. Use this page for consoles and other targets that need more than a CPU family and a load address.
+
 REA can analyze headerless memory images, such as console ROM banks, PRG data, or extracted RAM segments. The caller declares the processor, base address, and entry point. Ghidra imports the bytes with `BinaryLoader`, using the declared language and compiler specification, seeds the entry as a function, and then runs default auto-analysis. Linux x64 and macOS hosts are supported; the Windows P0 boundary admits PE only.
 
 The declaration uses the `dcomp.ghidra-profile.v1` JSON shape, so one profile file and its digest can serve both REA and dcomp:

@@ -1,6 +1,7 @@
+import { snapshotEnvironment } from "../process/snapshotEnvironment.js";
 import { createAnalysisProfile } from "../domain/analysisProfile.js";
 import type { AnalysisProfileCommitment } from "../domain/analysisProfile.js";
-import type { BinaryTarget } from "../domain/binaryTarget.js";
+import type { BinaryTarget } from "../domain/binaryTargetTypes.js";
 import { err, ok } from "../domain/result.js";
 import { AnalysisCancelledError } from "../domain/analysisErrorCore.js";
 import type {
@@ -10,14 +11,15 @@ import type {
   ProviderAvailability,
   ProviderTargetSupport,
 } from "../application/AnalysisProvider.js";
-import type { AppConfig } from "../config.js";
-import { ConfigurationError } from "../domain/configurationErrors.js";
+import type { AppConfig } from "../config/types.js";
+import type { ConfigurationError } from "../domain/configurationErrors.js";
 import { createHash } from "node:crypto";
 import canonicalize from "canonicalize";
 import type { Result } from "../domain/result.js";
 import {
   readIdaConfiguration,
   type IdaConfiguration,
+  idaConfigurationError,
 } from "./IdaConfiguration.js";
 import {
   createIdaMcpConnection,
@@ -30,17 +32,20 @@ import {
 import { IdaSessionClient } from "./IdaSessionClient.js";
 import { privateRuntimeRootCapability } from "../process/PrivateRuntimeRoot.js";
 
-export { IDA_PROVIDER_IDENTITY } from "./IdaProviderCapabilities.js";
-
 /** Bring-your-own IDA MCP candidate; discovery performs no provider startup. */
 export class IdaProvider implements AnalysisProviderCandidate {
   #registration: Result<IdaConfiguration, ConfigurationError> | undefined;
+  private readonly environment: NodeJS.ProcessEnv;
   constructor(
     private readonly config: AppConfig,
+    environment: Readonly<NodeJS.ProcessEnv>,
     private readonly connectionFactory: (
       config: IdaConfiguration,
+      environment: Readonly<NodeJS.ProcessEnv>,
     ) => IdaMcpConnection = createIdaMcpConnection,
-  ) {}
+  ) {
+    this.environment = snapshotEnvironment(environment);
+  }
 
   identity() {
     return IDA_PROVIDER_IDENTITY;
@@ -96,6 +101,22 @@ export class IdaProvider implements AnalysisProviderCandidate {
       target_kind: target.kind,
       target_format: target.format,
     };
+    if (target.kind === "executable" && target.architecture === "mips")
+      return {
+        status: "unsupported",
+        code: "architecture_unsupported",
+        reason:
+          "REA's IDA adapter has no verified MIPS lane. Select a supported Ghidra profile instead.",
+        diagnostics,
+      };
+    if (target.kind !== "executable")
+      return {
+        status: "unsupported",
+        code: "target_kind_unsupported",
+        reason:
+          "IDA MCP integration admits executable inputs, not analysis databases. Select the original input binary.",
+        diagnostics,
+      };
     if (target.format === "raw-image")
       return {
         status: "unsupported",
@@ -104,15 +125,15 @@ export class IdaProvider implements AnalysisProviderCandidate {
           "The IDA adapter cannot apply a caller-declared raw-image processor profile; use the Ghidra provider.",
         diagnostics,
       };
-    return target.kind === "executable"
-      ? { status: "supported", code: null, reason: null, diagnostics }
-      : {
-          status: "unsupported",
-          code: "target_kind_unsupported",
-          reason:
-            "IDA MCP integration admits executable inputs, not analysis databases. Select the original input binary.",
-          diagnostics,
-        };
+    if (target.format === "raw-binary")
+      return {
+        status: "unsupported",
+        code: "target_format_unsupported",
+        reason:
+          "IDA does not admit headerless raw binaries. Open the target with Ghidra and supply architecture and entry_point.",
+        diagnostics,
+      };
+    return { status: "supported", code: null, reason: null, diagnostics };
   }
   async resolveAnalysisProfile(
     _target: BinaryTarget,
@@ -138,11 +159,6 @@ export class IdaProvider implements AnalysisProviderCandidate {
           .update(canonicalize(config.value) ?? "")
           .digest("hex"),
       }),
-      compatibility: {
-        mode: config.value.mode,
-        engine_version: null,
-        upstream_distribution_version: null,
-      },
     });
   }
   createClient(
@@ -153,12 +169,12 @@ export class IdaProvider implements AnalysisProviderCandidate {
     if (!config.ok)
       return {
         execute: async () => err(config.error),
-        close: async () => undefined,
+        close: async () => ok(null),
       };
     return new IdaSessionClient(
       config.value,
       target,
-      this.connectionFactory(config.value),
+      this.connectionFactory(config.value, this.environment),
       profile,
     );
   }
@@ -173,7 +189,7 @@ export class IdaProvider implements AnalysisProviderCandidate {
 
 const readIdaConfigurationNotConfigured = () =>
   err(
-    new ConfigurationError(
+    idaConfigurationError(
       "Set REA_IDA_MCP_CONFIG to an upstream IDA MCP JSON registration; see docs/ida-provider.md.",
     ),
   );

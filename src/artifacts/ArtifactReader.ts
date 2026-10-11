@@ -1,6 +1,15 @@
 import type { Readable } from "node:stream";
 import type { ArtifactCommand } from "../domain/artifactGraph.js";
 import type { ZipPackageFormat } from "../domain/zipPackageFormat.js";
+import type {
+  AnalysisCleanupObservation,
+  AnalysisPartialObservation,
+} from "../domain/analysisErrorBase.js";
+
+export interface ArtifactReaderFailureOptions extends ErrorOptions {
+  readonly cleanup?: AnalysisCleanupObservation;
+  readonly partialObservation?: AnalysisPartialObservation;
+}
 
 /** Archive-neutral entry metadata. Reader adapters never choose output paths. */
 export interface ArtifactEntry {
@@ -22,6 +31,37 @@ export interface ArtifactEntry {
   };
 }
 
+/** Snapshot mutable entry metadata before the producer later validates open(). */
+export const copyArtifactEntry = (entry: ArtifactEntry): ArtifactEntry => ({
+  ...entry,
+  limitations: [...entry.limitations],
+  ...(entry.sourceIdentity === undefined
+    ? {}
+    : { sourceIdentity: { ...entry.sourceIdentity } }),
+});
+
+/** Compare every portable and adapter-owned fact supplied with an entry. */
+export const sameArtifactEntry = (
+  entry: ArtifactEntry,
+  produced: ArtifactEntry,
+): boolean =>
+  entry.path === produced.path &&
+  entry.kind === produced.kind &&
+  entry.declaredSize === produced.declaredSize &&
+  entry.compressedSize === produced.compressedSize &&
+  entry.executable === produced.executable &&
+  entry.encrypted === produced.encrypted &&
+  entry.byteOffset === produced.byteOffset &&
+  entry.declaredSha256 === produced.declaredSha256 &&
+  entry.unpacked === produced.unpacked &&
+  entry.adapterKey === produced.adapterKey &&
+  entry.limitations.length === produced.limitations.length &&
+  entry.limitations.every(
+    (limitation, index) => limitation === produced.limitations[index],
+  ) &&
+  entry.sourceIdentity?.device === produced.sourceIdentity?.device &&
+  entry.sourceIdentity?.inode === produced.sourceIdentity?.inode;
+
 /** Read-only adapter over one directory, archive, or virtual container. */
 export interface ArtifactReader {
   readonly format: "directory" | ZipPackageFormat | "asar" | "file";
@@ -33,6 +73,9 @@ export interface ArtifactReader {
 
 /** Typed adapter failure translated at provider boundary. */
 export class ArtifactReaderFailure extends Error {
+  readonly cleanup: AnalysisCleanupObservation | undefined;
+  readonly partialObservation: AnalysisPartialObservation | undefined;
+
   constructor(
     readonly reason:
       | "cancelled"
@@ -43,7 +86,7 @@ export class ArtifactReaderFailure extends Error {
       | "path"
       | "unavailable",
     message: string,
-    options?: ErrorOptions,
+    options?: ArtifactReaderFailureOptions,
     readonly details?: Readonly<{
       logicalPath: string;
       declaredSha256: string | null;
@@ -53,5 +96,56 @@ export class ArtifactReaderFailure extends Error {
   ) {
     super(message, options);
     this.name = "ArtifactReaderFailure";
+    this.cleanup = options?.cleanup;
+    this.partialObservation = options?.partialObservation;
+  }
+
+  /** Preserve the primary failure while attaching cleanup and any complete observation. */
+  static withCleanup(
+    cause: unknown,
+    cleanup: AnalysisCleanupObservation,
+    partialObservation?: AnalysisPartialObservation,
+  ): ArtifactReaderFailure {
+    const primary =
+      cause instanceof ArtifactReaderFailure
+        ? cause
+        : new ArtifactReaderFailure("io", errorMessage(cause), { cause });
+    const mergedObservation = partialObservation ?? primary.partialObservation;
+    return new ArtifactReaderFailure(
+      primary.reason,
+      primary.message,
+      {
+        cause: primary,
+        cleanup: combineCleanup(primary.cleanup, cleanup),
+        ...(mergedObservation === undefined
+          ? {}
+          : { partialObservation: mergedObservation }),
+      },
+      primary.details,
+    );
+  }
+
+  /** Give otherwise opaque cleanup failures a concrete owned resource. */
+  static cleanupObservation(
+    cause: unknown,
+    resource: string,
+  ): AnalysisCleanupObservation {
+    if (cause instanceof ArtifactReaderFailure && cause.cleanup !== undefined)
+      return cause.cleanup;
+    return { reason: errorMessage(cause), resources: [resource] };
   }
 }
+
+const combineCleanup = (
+  primary: AnalysisCleanupObservation | undefined,
+  cleanup: AnalysisCleanupObservation,
+): AnalysisCleanupObservation =>
+  primary === undefined || primary === cleanup
+    ? cleanup
+    : {
+        reason: `${primary.reason}; ${cleanup.reason}`,
+        resources: [...new Set([...primary.resources, ...cleanup.resources])],
+      };
+
+const errorMessage = (cause: unknown): string =>
+  cause instanceof Error ? cause.message : String(cause);

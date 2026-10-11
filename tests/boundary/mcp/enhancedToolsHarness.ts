@@ -1,3 +1,5 @@
+import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
+import { parseEvidence } from "../../../src/domain/evidence.js";
 import type { CallToolResult } from "@modelcontextprotocol/server";
 import {
   jsonValueSchema,
@@ -22,7 +24,7 @@ export const inventory = (values: Readonly<Record<string, string>>) =>
 export const resources: Array<{ close(): Promise<void> }> = [];
 
 export const connect = async (analysis: AnalysisOperationPort) => {
-  const server = createServer(analysis);
+  const server = createServer({ kind: "fixed", analysis });
   const client = new Client({ name: "enhanced-test", version: "1.0.0" });
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
@@ -39,33 +41,7 @@ export const closeEnhancedToolResources = async (): Promise<void> => {
   );
 };
 
-export const jsonResult = (result: CallToolResult): JsonValue => {
-  if (result.structuredContent === undefined)
-    throw new Error("Tool result omitted structured content");
-  const structured = jsonValueSchema.safeParse(result.structuredContent);
-  if (!structured.success)
-    throw new Error("Tool structured result was not JSON");
-  if (
-    typeof structured.data === "object" &&
-    structured.data !== null &&
-    !Array.isArray(structured.data) &&
-    "normalized_result" in structured.data
-  ) {
-    return structured.data.normalized_result ?? null;
-  }
-  if (
-    typeof structured.data === "object" &&
-    structured.data !== null &&
-    !Array.isArray(structured.data) &&
-    "evidence_id" in structured.data &&
-    "result" in structured.data
-  )
-    return structured.data.result ?? null;
-  const text = result.content.find((item) => item.type === "text");
-  if (text?.type !== "text")
-    throw new Error("Tool result omitted text content");
-  const decoded: unknown = JSON.parse(text.text);
-  const parsed = jsonValueSchema.safeParse(decoded);
-  if (!parsed.success) throw new Error("Tool result was not JSON");
-  return parsed.data;
-};
+export const jsonResult = (result: CallToolResult): JsonValue =>
+  result.isError === true
+    ? jsonValueSchema.parse(parseMcpToolError(result))
+    : parseEvidence(result.structuredContent).normalized_result;

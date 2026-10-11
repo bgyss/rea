@@ -2,8 +2,13 @@ import { z } from "zod";
 
 import { artifactComparisonResultSchema } from "./artifactComparison.js";
 import { uniqueSorted } from "./canonicalOrdering.js";
+import {
+  compositeKey,
+  compareUnicodeCodePoints,
+} from "./unicodeCodePointOrder.js";
+import { comparisonSourceEvidenceIds } from "./comparisonSourceEvidence.js";
 import { evidenceSchema, parseEvidence, type Evidence } from "./evidence.js";
-import { functionComparisonResultSchema } from "./functionComparison.js";
+import { functionComparisonResultSchema } from "./functionComparisonSchemas.js";
 import {
   PROCESS_PROVIDER,
   isProcessEvidenceProvider,
@@ -13,14 +18,14 @@ import {
   deriveProcessComparisonStatus,
   PROCESS_COMPARISON_DIMENSIONS,
   processCaptureComparisonSchema,
-} from "./process/processCapture.js";
+} from "./process/processComparison.js";
 import { prefixedDigestSchema } from "./../domain/digests.js";
 
 const evidenceIdSchema = prefixedDigestSchema("ev");
 
 /** Input for aggregating existing comparison Evidence. */
 export const changedBehaviorInputSchema = z.strictObject({
-  comparisons: z.array(evidenceSchema).default([]),
+  comparisons: z.array(evidenceSchema).min(1),
 });
 
 const findingSchema = z.object({
@@ -34,7 +39,7 @@ const findingSchema = z.object({
   ]),
   status: comparisonStatusSchema,
   source_comparison_id: evidenceIdSchema,
-  evidence_links: z.array(evidenceIdSchema).min(3),
+  evidence_links: z.array(evidenceIdSchema).min(2),
   limitations: z.array(z.string()),
 });
 
@@ -56,7 +61,7 @@ export const changedBehaviorResultSchema = z
     findings: z.object({
       items: z.array(findingSchema),
     }),
-    evidence_links: z.array(evidenceIdSchema).min(3),
+    evidence_links: z.array(evidenceIdSchema).min(2),
     limitations: z.array(z.string()),
   })
   .superRefine((result, context) => {
@@ -185,11 +190,14 @@ const parseComparisonEvidence = (input: unknown): Evidence => {
     throw new TypeError(
       "Comparison Evidence operation, predicate, and provider disagree",
     );
-  if (evidence.evidence_links.length < 2)
+  if (
+    !comparisonSourceEvidenceIds(evidence).every((id) =>
+      evidence.evidence_links.includes(id),
+    )
+  )
     throw new TypeError(
-      "Comparison Evidence must cite both source observations",
+      "Comparison Evidence must cite both selected source observations",
     );
-  assertUnique(evidence.evidence_links, "source Evidence links");
   parseResult(evidence);
   return evidence;
 };
@@ -289,7 +297,7 @@ const functionFindings = (evidence: Evidence): Finding[] => {
             scope: "static_candidate",
             status: dimension.status,
             classification:
-              dimension.status === "unknown" || dimension.status === "truncated"
+              dimension.status === "unknown"
                 ? "unresolved_branch"
                 : dimension.conclusion_kind,
             limitations: dimension.limitations,
@@ -384,12 +392,10 @@ const count = (
     .length;
 
 const compareFindings = (left: Finding, right: Finding): number =>
-  [left.scope, left.dimension, left.source_comparison_id]
-    .join("\0")
-    .localeCompare(
-      [right.scope, right.dimension, right.source_comparison_id].join("\0"),
-      "en",
-    );
+  compareUnicodeCodePoints(
+    compositeKey([left.scope, left.dimension, left.source_comparison_id]),
+    compositeKey([right.scope, right.dimension, right.source_comparison_id]),
+  );
 
 const assertUnique = (values: readonly string[], label: string): void => {
   if (new Set(values).size !== values.length)

@@ -1,8 +1,68 @@
+import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { expect, it } from "vitest";
 import { jsonValueSchema } from "../../../src/domain/jsonValue.js";
 import { ok } from "../../../src/domain/result.js";
 import { ghidraFunctionIdentity } from "../../../src/domain/ghidraValues.fixture.js";
-import { connectGhidraMcp } from "./ghidraMcpHarness.js";
+import { connectGhidraMcp, sessionEvidence } from "./ghidraMcpHarness.js";
+
+it("retains defined-string coverage in empty and matching search Evidence", async () => {
+  let output = jsonValueSchema.parse([]);
+  const harness = await connectGhidraMcp("ghidra-string-coverage", () =>
+    Promise.resolve(ok(output)),
+  );
+  try {
+    for (const request of [
+      { name: "list_strings", arguments: {} },
+      { name: "search_strings", arguments: { pattern: "projection" } },
+      {
+        name: "search_strings",
+        arguments: { pattern: "projection.*", mode: "regex" },
+      },
+    ]) {
+      const reply = await harness.mcp.callTool(request);
+      expect(reply.isError).not.toBe(true);
+      const evidence = sessionEvidence(
+        harness.session,
+        reply.structuredContent,
+      );
+      expect(evidence.normalized_result).toEqual([]);
+      expect(evidence.analysis_profile?.parameters).toMatchObject({
+        string_inventory_evidence: "defined-data-coverage-v1",
+      });
+      expect(evidence.limitations).toContainEqual(
+        expect.stringMatching(
+          /Only Ghidra-defined string Data.*empty search does not establish/u,
+        ),
+      );
+    }
+    output = jsonValueSchema.parse([
+      { address: "0x401000", value: "projection cache ignored" },
+    ]);
+    const matched = await harness.mcp.callTool({
+      name: "search_strings",
+      arguments: { pattern: "projection" },
+    });
+    const evidence = sessionEvidence(
+      harness.session,
+      matched.structuredContent,
+    );
+    expect(evidence.normalized_result).toEqual(output);
+    expect(evidence.limitations).toContainEqual(
+      expect.stringContaining("Completeness applies to that inventory"),
+    );
+    output = jsonValueSchema.parse([]);
+    const procedures = await harness.mcp.callTool({
+      name: "search_procedures",
+      arguments: { pattern: "projection" },
+    });
+    expect(
+      sessionEvidence(harness.session, procedures.structuredContent)
+        .limitations,
+    ).not.toContainEqual(expect.stringContaining("Ghidra-defined string Data"));
+  } finally {
+    await harness.close();
+  }
+});
 
 it("rejects contradictory provider output before emitting MCP Evidence", async () => {
   const bytes = {
@@ -22,7 +82,9 @@ it("rejects contradictory provider output before emitting MCP Evidence", async (
       arguments: { address: bytes.address, length: 4 },
     });
     expect(accepted.isError).not.toBe(true);
-    expect(accepted.structuredContent).toMatchObject({ result: bytes });
+    expect(accepted.structuredContent).toMatchObject({
+      normalized_result: bytes,
+    });
     const cases = [
       ...[
         { complete: true },
@@ -98,11 +160,11 @@ it("rejects contradictory provider output before emitting MCP Evidence", async (
         arguments: probe.arguments,
       });
       expect(rejected.isError, probe.name).toBe(true);
-      expect(rejected.structuredContent).toMatchObject({
+      expect(parseMcpToolError(rejected)).toMatchObject({
         error: { code: "unreadable_output" },
       });
-      expect(rejected.structuredContent).not.toHaveProperty("evidence_id");
-      expect(rejected.structuredContent).not.toHaveProperty("result");
+      expect(parseMcpToolError(rejected)).not.toHaveProperty("evidence_id");
+      expect(parseMcpToolError(rejected)).not.toHaveProperty("result");
     }
   } finally {
     await harness.close();

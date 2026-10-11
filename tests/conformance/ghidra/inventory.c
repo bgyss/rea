@@ -1,6 +1,23 @@
 #include <stdio.h>
+#include <stdlib.h>
 
 volatile int rea_ghidra_inventory_global = 7;
+
+#if defined(__x86_64__) && defined(__ELF__)
+// Static decoder controls: these functions are retained but never executed.
+__attribute__((naked, noinline, used)) void rea_ghidra_flow_return(void) {
+  __asm__("ret");
+}
+__attribute__((naked, noinline, used)) void rea_ghidra_flow_cleanup_return(void) {
+  __asm__("ret $16");
+}
+__attribute__((naked, noinline, used)) void rea_ghidra_flow_shared_tail(void) {
+  __asm__("jmp rea_ghidra_flow_return");
+}
+__attribute__((naked, noinline, used)) void rea_ghidra_flow_trap(void) {
+  __asm__("ud2");
+}
+#endif
 
 // This literal reproduces stack exhaustion in Java's recursive regex matcher.
 #define REA_REPEAT_4(value) value value value value
@@ -25,6 +42,15 @@ volatile struct ReaFixtureLayout rea_ghidra_inventory_layout = {
 __attribute__((noinline, used)) int rea_ghidra_inventory_leaf(int value) {
   puts("REA_GHIDRA_LEAF_VALUE");
   return value + rea_ghidra_inventory_global;
+}
+
+// Ghidra's no-return analysis recognizes abort; this function provides a real
+// terminal-call boundary while retaining a returning path.
+__attribute__((noinline, used)) int rea_ghidra_inventory_terminal_call(
+    int should_abort) {
+  if (should_abort) abort();
+  puts("REA_GHIDRA_TERMINAL_CALL_RETURNED");
+  return should_abort;
 }
 
 // A reference into the function body can land inside an instruction.

@@ -4,8 +4,187 @@ import { projectAnalysisError } from "../../domain/analysisErrorProjection.js";
 import { analysisErrorProjectionSchema } from "../../contracts/errorSchemas.js";
 import { inspectWebNetworkCaptureInputSchema } from "../../domain/webNetworkCapture.js";
 import { historicalCaptureFailure } from "./CaptureFailures.js";
+import { HAR_CAPTURE_PROCESS_MEMORY_LIMIT_BYTES } from "./CaptureRelease.js";
 import { redactExplicitFailure } from "../../domain/explicitSensitiveFailure.js";
 import { OwnedCommandFailure } from "../../process/OwnedCommand.js";
+
+it.each([
+  { label: "POSIX SIGABRT", exitCode: null, signal: "SIGABRT" },
+  { label: "Windows exit 134", exitCode: 134, signal: null },
+] as const)(
+  "reports HAR heap exhaustion for $label",
+  ({ exitCode, signal }) => {
+    const input = inspectWebNetworkCaptureInputSchema.parse({
+      capture_path: "/selected/input.har",
+      format: "har",
+    });
+    const stderr =
+      "FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory\r\n";
+    const cause = new OwnedCommandFailure("process", "Decoder failed", {
+      stdout: { text: "", bytes: 0, observedBytes: 0 },
+      stderr: {
+        text: stderr,
+        bytes: Buffer.byteLength(stderr),
+        observedBytes: Buffer.byteLength(stderr),
+      },
+      exitCode,
+      signal,
+    });
+    const projected = analysisErrorProjectionSchema.parse(
+      projectAnalysisError(historicalCaptureFailure(input, cause, "decoder")),
+    );
+    expect(projected).toMatchObject({
+      code: "resource_constraint",
+      retryable: false,
+      message: expect.stringContaining("fixed V8 heap"),
+      remediation: {
+        action: expect.stringContaining(
+          "smaller capture exported by its producer",
+        ),
+      },
+      details: {
+        resource: "memory",
+        reported_limits: {
+          observed_exit_code: exitCode,
+          observed_signal: signal,
+        },
+        captured_output: { stdout: "", stderr },
+      },
+    });
+    expect(JSON.stringify(projected)).not.toContain("rea doctor");
+    // Bun ignores the decoder's V8 heap flags, so no fixed heap is reported.
+    const heapLimits = { old_generation_heap_mib: 192, semi_space_heap_mib: 8 };
+    if (process.versions.bun === undefined)
+      expect(projected).toMatchObject({
+        details: { reported_limits: heapLimits },
+      });
+    else
+      expect(projected).not.toMatchObject({
+        details: { reported_limits: { old_generation_heap_mib: 192 } },
+      });
+  },
+);
+
+// Measured Bun 1.4.2 outcomes at a Job Object commit limit: a 512 MiB limit
+// panicked with exit 3 and a 256 MiB limit threw a JavaScript out-of-memory
+// exception with exit 1. Only the job notification identifies both.
+it.each([
+  { label: "a runtime panic", exitCode: 3, stderr: "panic: out of memory" },
+  {
+    label: "a JavaScript exception",
+    exitCode: 1,
+    stderr: "RangeError: Out of memory",
+  },
+])(
+  "reports a reached Job Object memory limit after $label",
+  ({ exitCode, stderr }) => {
+    const input = inspectWebNetworkCaptureInputSchema.parse({
+      capture_path: "/selected/input.har",
+      format: "har",
+    });
+    const snapshot = {
+      stdout: { text: "", bytes: 0, observedBytes: 0 },
+      stderr: {
+        text: stderr,
+        bytes: Buffer.byteLength(stderr),
+        observedBytes: Buffer.byteLength(stderr),
+      },
+      exitCode,
+      signal: null,
+    };
+    const projected = analysisErrorProjectionSchema.parse(
+      projectAnalysisError(
+        historicalCaptureFailure(
+          input,
+          new OwnedCommandFailure("process", "Decoder failed", {
+            ...snapshot,
+            memoryLimitReached: true,
+          }),
+          "decoder",
+        ),
+      ),
+    );
+    expect(projected).toMatchObject({
+      code: "resource_constraint",
+      message: expect.stringContaining("Windows Job Object memory limit"),
+      details: {
+        resource: "memory",
+        reported_limits: {
+          format: "har",
+          observed_exit_code: exitCode,
+          observed_signal: null,
+        },
+        captured_output: { stderr },
+      },
+    });
+    // The enforced limit is reported only where Bun runs on Windows.
+    if (HAR_CAPTURE_PROCESS_MEMORY_LIMIT_BYTES === null)
+      expect(JSON.stringify(projected)).not.toContain(
+        "process_memory_limit_bytes",
+      );
+    else
+      expect(projected).toMatchObject({
+        details: {
+          reported_limits: {
+            process_memory_limit_bytes: HAR_CAPTURE_PROCESS_MEMORY_LIMIT_BYTES,
+          },
+        },
+        remediation: {
+          action: expect.stringContaining(
+            `${String(HAR_CAPTURE_PROCESS_MEMORY_LIMIT_BYTES)} bytes`,
+          ),
+        },
+      });
+    // The same exit without the job notification remains an ordinary failure.
+    expect(
+      projectAnalysisError(
+        historicalCaptureFailure(
+          input,
+          new OwnedCommandFailure("process", "Decoder failed", snapshot),
+          "decoder",
+        ),
+      ),
+    ).toMatchObject({ code: "execution_failure" });
+  },
+);
+
+it.each([
+  { exitCode: 134, signal: null, stderr: "Fatal decoder crash" },
+  {
+    exitCode: 2,
+    signal: null,
+    stderr: "FATAL ERROR: JavaScript heap out of memory",
+  },
+  {
+    exitCode: null,
+    signal: "SIGTERM",
+    stderr: "FATAL ERROR: JavaScript heap out of memory",
+  },
+] as const)(
+  "preserves unrelated decoder failures %#",
+  ({ exitCode, signal, stderr }) => {
+    const input = inspectWebNetworkCaptureInputSchema.parse({
+      capture_path: "/selected/input.har",
+      format: "har",
+    });
+    const cause = new OwnedCommandFailure("process", "Decoder failed", {
+      stdout: { text: "", bytes: 0, observedBytes: 0 },
+      stderr: {
+        text: stderr,
+        bytes: Buffer.byteLength(stderr),
+        observedBytes: Buffer.byteLength(stderr),
+      },
+      exitCode,
+      signal,
+    });
+    expect(
+      projectAnalysisError(historicalCaptureFailure(input, cause, "decoder")),
+    ).toMatchObject({
+      code: "execution_failure",
+      details: { diagnostics: { exit_code: exitCode, signal, stderr } },
+    });
+  },
+);
 
 it.each(["before open", "during read"])(
   "preserves observed capture changes %s as retryable acquisition integrity failures",
@@ -51,8 +230,16 @@ it("retains actual command status and both diagnostic streams when cleanup also 
     "process",
     "Observed command failure",
     {
-      stdout: { text: "original provider output", bytes: 24 },
-      stderr: { text: "private-marker provider reason", bytes: 30 },
+      stdout: {
+        text: "original provider output",
+        bytes: 24,
+        observedBytes: 24,
+      },
+      stderr: {
+        text: "private-marker provider reason",
+        bytes: 30,
+        observedBytes: 30,
+      },
       exitCode: 2,
       signal: null,
     },

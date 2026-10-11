@@ -1,18 +1,19 @@
-import type { McpServer } from "@modelcontextprotocol/server";
+import type { EvidenceMcpServer } from "./EvidenceMcpServer.js";
 
-import type { BinarySessionPort } from "../application/binary/BinarySession.js";
+import type { BinarySessionPort } from "../application/binary/BinarySessionPort.js";
 import {
-  readEvidenceBundle,
+  readImmutableEvidenceBundle,
   writeEvidenceBundle,
 } from "../application/EvidenceBundleFiles.js";
 import { toolContract } from "../contracts/toolContracts.js";
 import type { EvidenceBundle } from "../domain/evidenceBundle.js";
-import { ok } from "../domain/result.js";
+import { err, ok } from "../domain/result.js";
+import { AnalysisCancelledError } from "../domain/analysisErrorCore.js";
+import { inspectEvidenceBundle } from "../application/investigation/InspectEvidenceBundle.js";
 import { toolRegistrationOptions } from "./toolRegistrationOptions.js";
-import { toCallToolResult } from "./toolResult.js";
 
 interface EvidenceToolRegistration {
-  readonly server: McpServer;
+  readonly server: EvidenceMcpServer;
   readonly session: BinarySessionPort;
   readonly exportContract: ReturnType<
     typeof toolContract<"export_evidence_bundle">
@@ -42,15 +43,16 @@ const registerExportEvidenceTool = ({
   server.registerTool(
     exportContract.name,
     toolRegistrationOptions(exportContract),
-    async (input) => {
+    async (input, context) => {
       const bundle = bundleForSerialization(session);
       const written = await writeEvidenceBundle(
         bundle,
         input.path,
         input.overwrite,
+        context.mcpReq.signal,
       );
       return written.ok
-        ? toCallToolResult(
+        ? server.delivery.toCallToolResult(
             ok({
               path: written.value.path,
               bytes: written.value.bytes,
@@ -59,7 +61,7 @@ const registerExportEvidenceTool = ({
             }),
             exportContract,
           )
-        : toCallToolResult(written, exportContract);
+        : server.delivery.toCallToolResult(written, exportContract);
     },
   );
 };
@@ -72,8 +74,11 @@ const registerSnapshotEvidenceTool = ({
   server.registerTool(
     snapshotContract.name,
     toolRegistrationOptions(snapshotContract),
-    () =>
-      toCallToolResult(ok(bundleForSerialization(session)), snapshotContract),
+    (input) =>
+      server.delivery.toCallToolResult(
+        inspectEvidenceBundle(bundleForSerialization(session), input),
+        snapshotContract,
+      ),
   );
 };
 
@@ -85,18 +90,25 @@ const registerImportEvidenceTool = ({
   server.registerTool(
     importContract.name,
     toolRegistrationOptions(importContract),
-    async (input) => {
+    async (input, context) => {
       const path = input.path;
-      const loaded = await readEvidenceBundle(path);
-      if (!loaded.ok) return toCallToolResult(loaded, importContract);
+      const signal = context.mcpReq.signal;
+      const loaded = await readImmutableEvidenceBundle(path, signal);
+      if (!loaded.ok)
+        return server.delivery.toCallToolResult(loaded, importContract);
       const retainedUnknownRevisions = new Set(
         bundleForSerialization(session).unknowns.map((unknown) =>
           unknownRevisionKey(unknown),
         ),
       );
+      if (signal.aborted)
+        return server.delivery.toCallToolResult(
+          err(new AnalysisCancelledError("import_evidence_bundle")),
+          importContract,
+        );
       const imported = session.importEvidenceBundle(loaded.value);
       return imported.ok
-        ? toCallToolResult(
+        ? server.delivery.toCallToolResult(
             ok({
               imported: imported.value,
               unknowns_added: loaded.value.unknowns.filter(
@@ -107,7 +119,7 @@ const registerImportEvidenceTool = ({
             }),
             importContract,
           )
-        : toCallToolResult(imported, importContract);
+        : server.delivery.toCallToolResult(imported, importContract);
     },
   );
 };
@@ -120,7 +132,7 @@ const unknownRevisionKey = (
 ): string => `${unknown.unknown_id}:${String(unknown.revision)}`;
 
 interface UnknownToolRegistration {
-  readonly server: McpServer;
+  readonly server: EvidenceMcpServer;
   readonly session: BinarySessionPort;
 }
 
@@ -134,15 +146,12 @@ const registerListUnknownsTool = ({
     listContract.name,
     toolRegistrationOptions(listContract),
     (input) => {
-      const filters = input;
       const all = session.listUnknowns({
-        ...(filters.status === undefined ? {} : { status: filters.status }),
-        ...(filters.severity === undefined
-          ? {}
-          : { severity: filters.severity }),
-        ...(filters.domain === undefined ? {} : { domain: filters.domain }),
+        ...(input.status === undefined ? {} : { status: input.status }),
+        ...(input.severity === undefined ? {} : { severity: input.severity }),
+        ...(input.domain === undefined ? {} : { domain: input.domain }),
       });
-      return toCallToolResult(
+      return server.delivery.toCallToolResult(
         ok({
           items: all,
           total: all.length,
@@ -163,7 +172,7 @@ const registerRecordUnknownTool = ({
     toolRegistrationOptions(recordContract),
     (input) => {
       const result = session.recordUnknown(input);
-      return toCallToolResult(result, recordContract);
+      return server.delivery.toCallToolResult(result, recordContract);
     },
   );
 };
@@ -178,7 +187,7 @@ const registerUpdateUnknownTool = ({
     toolRegistrationOptions(updateContract),
     (input) => {
       const result = session.updateUnknown(input);
-      return toCallToolResult(result, updateContract);
+      return server.delivery.toCallToolResult(result, updateContract);
     },
   );
 };
@@ -192,7 +201,7 @@ const registerVerifyUnknownTool = ({
     verifyContract.name,
     toolRegistrationOptions(verifyContract),
     (input) =>
-      toCallToolResult(
+      server.delivery.toCallToolResult(
         session.verifyUnknownResolution(input.unknown_id),
         verifyContract,
       ),

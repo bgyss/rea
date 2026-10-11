@@ -202,9 +202,11 @@ describe("provider process output and cleanup primitives", () => {
     expect(snapshot).toMatchObject({
       stdout: {
         bytes: outputBytes,
+        observedBytes: outputBytes,
       },
       stderr: {
         bytes: outputBytes,
+        observedBytes: outputBytes,
       },
       exitCode: 23,
       signal: null,
@@ -356,6 +358,57 @@ describe("provider process output and cleanup primitives", () => {
   });
 });
 
+it("retains member failures and sweep uncertainty from a failed cleanup recheck", async () => {
+  const child = spawnProviderProcessFixture("stubborn");
+  await waitForProviderProcessReady(child);
+  const pid = child.pid;
+  if (pid === undefined) {
+    await stopProviderProcessFixture(child);
+    throw new Error("The acquired ready fixture must have a process ID");
+  }
+  const failed = {
+    cleaned: false as const,
+    reason: "fixture identity unavailable during recheck",
+    failures: [
+      {
+        pid,
+        reason: "process-identity-unavailable" as const,
+        diagnostic: "fixture identity reader unavailable",
+      },
+    ],
+    unverified: [
+      { pid: 777, diagnostic: "fixture foreign process token unavailable" },
+    ],
+  };
+  let attempts = 0;
+  let release = false;
+  const supervisor = new ProviderProcessSupervisor({
+    process: child,
+    ownsProcessLifetime: true,
+    cleanup: async () => {
+      if (release) child.kill("SIGKILL");
+      attempts += 1;
+      return release || attempts === 1
+        ? { cleaned: true as const, signaled: release }
+        : failed;
+    },
+  });
+  try {
+    await expect(supervisor.stop({ killGraceMs: 20 })).resolves.toEqual({
+      status: "incomplete",
+      reason: failed.reason,
+      cleanupResult: failed,
+    });
+    expect(child.exitCode).toBeNull();
+    release = true;
+    await expect(supervisor.stop()).resolves.toEqual({
+      status: "verified-cleanup",
+    });
+  } finally {
+    await stopProviderProcessFixture(child);
+  }
+});
+
 describe("provider process host injection", () => {
   it("uses injected host platform and environment when spawning", async () => {
     const spawned = await spawnOwnedProviderProcess({
@@ -379,6 +432,20 @@ describe("provider process host injection", () => {
           spawned.process.once("close", () => resolve()),
         );
     }
+  });
+});
+
+describe("provider process memory limits", () => {
+  it("refuses a memory limit that the selected launcher cannot enforce", async () => {
+    await expect(
+      spawnOwnedProviderProcess({
+        command: `${tmpdir()}/rea-provider-must-not-spawn-without-limit`,
+        arguments: [],
+        runId: "provider-process-unenforceable-limit-run",
+        platform: "linux",
+        memoryLimitBytes: 704 * 1024 * 1024,
+      }),
+    ).rejects.toThrow("require the Windows Job Object launcher");
   });
 });
 

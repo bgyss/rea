@@ -1,18 +1,15 @@
 import canonicalize from "canonicalize";
 import { z } from "zod";
 
+import { IDENTIFIER_PATTERN } from "../stringPatterns.js";
+
 import { jsonValueSchema } from "../jsonValue.js";
 import {
   comparableProcessObservationPayload,
   processObservationSourceSchema,
-  type ProcessObservationSource,
 } from "./processObservation.js";
 
-const identifierSchema = z.string().regex(/^[A-Za-z][A-Za-z0-9._-]*$/u);
-
-/** Process observation families admitted by a declared trace specification. */
-export const processTraceSourceSchema = processObservationSourceSchema;
-export type ProcessTraceSource = ProcessObservationSource;
+const identifierSchema = z.string().regex(IDENTIFIER_PATTERN);
 
 const cardinalitySchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("required") }),
@@ -35,7 +32,7 @@ const cardinalitySchema = z.discriminatedUnion("kind", [
 
 const eventDeclarationSchema = z.strictObject({
   id: identifierSchema,
-  source: processTraceSourceSchema,
+  source: processObservationSourceSchema,
   exact: jsonValueSchema,
   ignore_fields: z
     .array(
@@ -116,12 +113,6 @@ export const canonicalTraceJson = (value: unknown): string => {
   return serialized;
 };
 
-/** Remove only explicitly declared schedule metadata before exact matching. */
-export const comparableTracePayload = (
-  value: unknown,
-  ignoredFields: readonly string[] = [],
-): unknown => comparableProcessObservationPayload(value, ignoredFields);
-
 export const processTraceCardinalityBounds = (
   cardinality: ProcessTraceSpecification["events"][number]["cardinality"],
 ): readonly [number, number] => {
@@ -152,7 +143,7 @@ const addReferenceIssue = (
 };
 
 const pairKey = (left: string, right: string): string =>
-  [left, right].sort().join("\0");
+  left <= right ? `${left}\0${right}` : `${right}\0${left}`;
 
 const buildAdjacency = (
   language: PartialOrderLanguage,
@@ -278,7 +269,13 @@ const validateUnorderedGroups = (
     for (const [eventIndex, id] of group.events.entries())
       addReferenceIssue(context, known, id, [...path, "events", eventIndex]);
     for (const [leftIndex, leftId] of group.events.entries()) {
-      for (const rightId of group.events.slice(leftIndex + 1)) {
+      for (
+        let rightIndex = leftIndex + 1;
+        rightIndex < group.events.length;
+        rightIndex++
+      ) {
+        const rightId = group.events[rightIndex];
+        if (rightId === undefined) continue;
         const key = pairKey(leftId, rightId);
         if (pairs.has(key))
           context.addIssue({
@@ -308,18 +305,33 @@ const validateCompletePairDeclarations = (
   unorderedPairs: ReadonlySet<string>,
   context: z.RefinementCtx,
 ): void => {
-  for (const [leftIndex, leftId] of ids.entries())
-    for (const rightId of ids.slice(leftIndex + 1))
-      if (
-        !isOrdered(relations.reachable, leftId, rightId) &&
-        !relations.notBeforePairs.has(pairKey(leftId, rightId)) &&
-        !unorderedPairs.has(pairKey(leftId, rightId))
-      )
-        context.addIssue({
-          code: "custom",
-          message: `event pair ${leftId}/${rightId} must be explicitly ordered or unordered`,
-          path: ["language"],
-        });
+  let missingPairCount = 0;
+  let firstMissingPair = "";
+  for (const [leftIndex, leftId] of ids.entries()) {
+    for (
+      let rightIndex = leftIndex + 1;
+      rightIndex < ids.length;
+      rightIndex++
+    ) {
+      const rightId = ids[rightIndex];
+      if (rightId === undefined) continue;
+      if (isOrdered(relations.reachable, leftId, rightId)) continue;
+      const key = pairKey(leftId, rightId);
+      if (!relations.notBeforePairs.has(key) && !unorderedPairs.has(key)) {
+        if (missingPairCount === 0) firstMissingPair = `${leftId}/${rightId}`;
+        missingPairCount++;
+      }
+    }
+  }
+  if (missingPairCount > 0)
+    context.addIssue({
+      code: "custom",
+      message:
+        missingPairCount === 1
+          ? `event pair ${firstMissingPair} must be explicitly ordered or unordered`
+          : `${String(missingPairCount)} event pairs must be explicitly ordered or unordered; first undeclared pair: ${firstMissingPair}`,
+      path: ["language"],
+    });
 };
 
 const validatePartialOrder = (
@@ -474,7 +486,7 @@ export const processTraceSpecificationSchema =
           path: ["events", index, "exact"],
         });
       const predicate = `${event.source}\0${canonicalTraceJson(
-        comparableTracePayload(event.exact, ignoredFields),
+        comparableProcessObservationPayload(event.exact, ignoredFields),
       )}`;
       if (predicates.has(predicate))
         context.addIssue({

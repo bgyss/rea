@@ -13,13 +13,15 @@ import {
 } from "../domain/javascript/javascriptRuntimeObservation.js";
 import { AnalysisError } from "../domain/analysisErrorBase.js";
 import { BrowserObservationError } from "../domain/browserObservationError.js";
+import type { AnalysisPartialObservation } from "../domain/analysisErrorBase.js";
 import { ProviderAdapterError } from "../domain/providerAdapterError.js";
-import { type BrowserObservationOperation } from "../domain/browserObservationErrors.js";
+import type { BrowserObservationOperation } from "../domain/browserObservationErrors.js";
 import { err, ok, type Result } from "../domain/result.js";
 import {
   numberValue,
   recordValue,
   cdpStringValue,
+  scriptMetadataValues,
   delayWithCancellation,
 } from "../browser/CdpCaptureValues.js";
 import { CdpConnection, type CdpEvent } from "../browser/CdpConnection.js";
@@ -38,8 +40,6 @@ import {
   type V8InspectorTarget,
 } from "./V8InspectorEndpoint.js";
 
-/** Public identity committed by passive V8 Inspector observations. */
-export { V8_INSPECTOR_PROVIDER_IDENTITY } from "./providerIdentity.js";
 import { V8_INSPECTOR_PROVIDER_IDENTITY } from "./providerIdentity.js";
 
 /** Maximum decoded CDP message accepted while observing one Inspector target. */
@@ -52,13 +52,14 @@ export interface ScriptDraft {
   readonly rawUrl: string;
   readonly executionContextKey: string | null;
   readonly cdpHash: string | null;
-  readonly length: number;
-  readonly isModule: boolean;
+  readonly length: number | null;
+  readonly isModule: boolean | null;
 }
 
 export interface ContextDraft {
   readonly contextKey: string;
   state: "created" | "destroyed" | "cleared";
+  readonly name: string | null;
   readonly origin: string | null;
 }
 
@@ -129,20 +130,32 @@ export class V8InspectorProvider implements JavaScriptRuntimeObservationPort {
     options: ExecutionOptions = {},
   ): Promise<Result<JavaScriptRuntimeObservation, AnalysisError>> {
     let connection: CdpConnection | undefined;
+    let discovery: Awaited<ReturnType<typeof discoverV8Inspector>> | undefined;
+    let target: AuthorizedV8InspectorTarget | undefined;
+    let state: CaptureState | undefined;
     let primaryFailure: unknown;
     let failed = false;
     let cleanupFailure: unknown;
     let cleanupFailed = false;
+    let connectionClosePromise: Promise<void> | undefined;
     let outcome:
       | Result<JavaScriptRuntimeObservation, AnalysisError>
       | undefined;
+    const closeConnection = (): Promise<void> => {
+      if (connection === undefined) return Promise.resolve();
+      connectionClosePromise ??= closeInspectorConnection(
+        connection,
+        options.signal,
+      );
+      return connectionClosePromise;
+    };
     try {
-      const discovery = await discoverV8Inspector(
+      discovery = await discoverV8Inspector(
         input.inspector_endpoint,
         "observe_javascript_runtime",
         options.signal,
       );
-      const target = await authorizedTarget(
+      target = await authorizedTarget(
         discovery.targets,
         input,
         discovery.runtime.product,
@@ -155,9 +168,10 @@ export class V8InspectorProvider implements JavaScriptRuntimeObservationPort {
         options.signal,
         { maxPayloadBytes: INSPECTOR_MAX_PAYLOAD_BYTES },
       );
-      const state = emptyCaptureState();
+      const captureState = emptyCaptureState();
+      state = captureState;
       const removeListener = connection.onEvent((event) =>
-        ingestEvent(event, input, state),
+        ingestEvent(event, captureState),
       );
       try {
         await connection.send("Runtime.enable", {}, undefined, options.signal);
@@ -170,25 +184,89 @@ export class V8InspectorProvider implements JavaScriptRuntimeObservationPort {
         input,
         runtime: discovery.runtime,
         target,
-        state,
+        state: captureState,
         ...(options.signal === undefined ? {} : { signal: options.signal }),
       });
       outcome = ok(javascriptRuntimeObservationSchema.parse(result));
     } catch (cause: unknown) {
       failed = true;
       primaryFailure = cause;
-      outcome = err(providerError(cause, "observe_javascript_runtime"));
+      let error = providerError(cause, "observe_javascript_runtime");
+      if (
+        state !== undefined &&
+        discovery !== undefined &&
+        target !== undefined &&
+        (cause instanceof BrowserObservationError ||
+          options.signal?.aborted === true)
+      ) {
+        const reason =
+          options.signal?.aborted === true
+            ? "cancelled"
+            : cause instanceof BrowserObservationError
+              ? cause.reason
+              : "protocol_error";
+        try {
+          await closeConnection();
+        } catch (cause: unknown) {
+          cleanupFailed = true;
+          cleanupFailure = cause;
+        }
+        try {
+          const partialObservation = await finalizeInspectorCapture({
+            input,
+            runtime: discovery.runtime,
+            target,
+            state,
+            locationMode: "reported",
+          });
+          error = new BrowserObservationError(
+            "observe_javascript_runtime",
+            reason,
+            {
+              cause: error,
+              ...(error.userMessage === undefined
+                ? {}
+                : { detail: error.userMessage }),
+              partialObservation,
+            },
+          );
+        } catch (projectionFailure: unknown) {
+          error = new BrowserObservationError(
+            "observe_javascript_runtime",
+            reason,
+            {
+              cause: new AggregateError(
+                [error, projectionFailure],
+                "Inspector failure and partial-observation projection both failed",
+              ),
+              detail: `${error.message} Partial observations could not be projected.`,
+            },
+          );
+        }
+      }
+      outcome = err(error);
     } finally {
       if (connection !== undefined)
         try {
-          await closeInspectorConnection(connection, options.signal);
+          await closeConnection();
         } catch (cause: unknown) {
           cleanupFailed = true;
           cleanupFailure = cause;
         }
     }
     if (cleanupFailed) {
-      return err(inspectorCleanupError(primaryFailure, cleanupFailure, failed));
+      return err(
+        inspectorCleanupError(
+          primaryFailure,
+          cleanupFailure,
+          failed,
+          outcome?.ok === true
+            ? outcome.value
+            : outcome?.ok === false
+              ? outcome.error.partialObservation
+              : undefined,
+        ),
+      );
     }
     return (
       outcome ??
@@ -230,6 +308,7 @@ export const inspectorCleanupError = (
   primaryFailure: unknown,
   cleanupFailure: unknown,
   hasPrimaryFailure: boolean,
+  partialObservation?: AnalysisPartialObservation,
 ): BrowserObservationError => {
   const cause = hasPrimaryFailure
     ? new AggregateError(
@@ -237,10 +316,21 @@ export const inspectorCleanupError = (
         "Inspector observation and cleanup both failed",
       )
     : cleanupFailure;
+  const cleanupReason =
+    cleanupFailure instanceof Error
+      ? cleanupFailure.message
+      : String(cleanupFailure);
   return new BrowserObservationError(
     "observe_javascript_runtime",
     "cleanup_failed",
-    { cause },
+    {
+      cause,
+      cleanup: {
+        reason: cleanupReason,
+        resources: ["browser_transport"],
+      },
+      ...(partialObservation === undefined ? {} : { partialObservation }),
+    },
   );
 };
 
@@ -306,11 +396,7 @@ const emptyCaptureState = (): CaptureState => ({
   truncationReasons: new Set(),
 });
 
-const ingestEvent = (
-  event: CdpEvent,
-  input: ObserveJavaScriptRuntimeInput,
-  state: CaptureState,
-): void => {
+const ingestEvent = (event: CdpEvent, state: CaptureState): void => {
   if (
     event.method !== "Debugger.scriptParsed" &&
     event.method !== "Debugger.scriptFailedToParse" &&
@@ -321,7 +407,7 @@ const ingestEvent = (
     return;
   state.eventsObserved += 1;
   if (event.method === "Debugger.scriptParsed") {
-    ingestScript(event, input, state);
+    ingestScript(event, state);
     return;
   }
   if (event.method === "Debugger.scriptFailedToParse") {
@@ -329,39 +415,32 @@ const ingestEvent = (
     retainEvent(state, 0);
     return;
   }
-  ingestContext(event, input, state);
+  ingestContext(event, state);
 };
 
-const ingestScript = (
-  event: CdpEvent,
-  input: ObserveJavaScriptRuntimeInput,
-  state: CaptureState,
-): void => {
+const ingestScript = (event: CdpEvent, state: CaptureState): void => {
   state.scriptsObserved += 1;
   const value = recordValue(event.params);
   const rawUrl = cdpStringValue(value?.url);
-  if (rawUrl === undefined || rawUrl === "") {
+  if (rawUrl === undefined) {
     state.invalidScripts += 1;
     retainEvent(state, 0);
     return;
   }
+  const metadata = scriptMetadataValues(value);
   const draft: ScriptDraft = {
     rawUrl,
     executionContextKey: contextKey(value?.executionContextId),
-    cdpHash: cdpStringValue(value?.hash) ?? null,
-    length: nonnegativeInteger(value?.length),
-    isModule: value?.isModule === true,
+    cdpHash: metadata.hash,
+    length: metadata.length,
+    isModule: metadata.isModule,
   };
   const bytes = retainedMetadataBytes(draft);
   if (!retainEvent(state, bytes)) return;
   state.scripts.push(draft);
 };
 
-const ingestContext = (
-  event: CdpEvent,
-  input: ObserveJavaScriptRuntimeInput,
-  state: CaptureState,
-): void => {
+const ingestContext = (event: CdpEvent, state: CaptureState): void => {
   if (event.method === "Runtime.executionContextsCleared") {
     let byteDelta = 0;
     for (const context of state.contexts.values()) {
@@ -389,19 +468,18 @@ const ingestContext = (
     retainEvent(state, 0);
     return;
   }
-  const origin =
-    event.method === "Runtime.executionContextCreated"
-      ? (cdpStringValue(runtimeContext?.origin) ?? null)
-      : null;
+  const previous = state.contexts.get(key);
+  const created = event.method === "Runtime.executionContextCreated";
   const draft: ContextDraft = {
     contextKey: key,
-    state:
-      event.method === "Runtime.executionContextCreated"
-        ? "created"
-        : "destroyed",
-    origin: origin === "" ? null : origin,
+    state: created ? "created" : "destroyed",
+    name: created
+      ? (cdpStringValue(runtimeContext?.name) ?? null)
+      : (previous?.name ?? null),
+    origin: created
+      ? (cdpStringValue(runtimeContext?.origin) ?? null)
+      : (previous?.origin ?? null),
   };
-  const previous = state.contexts.get(key);
   const bytes =
     retainedMetadataBytes(draft) -
     (previous === undefined ? 0 : retainedMetadataBytes(previous));
@@ -456,16 +534,11 @@ const retainedMetadataBytes = (value: ScriptDraft | ContextDraft): number => {
   const strings =
     "rawUrl" in value
       ? [value.rawUrl, value.rawUrl, value.executionContextKey, value.cdpHash]
-      : [value.contextKey, value.origin];
+      : [value.contextKey, value.name, value.origin];
   return (
     RETAINED_OBJECT_OVERHEAD_BYTES +
     strings.reduce((total, text) => total + (text?.length ?? 0) * 2, 0)
   );
-};
-
-const nonnegativeInteger = (value: unknown): number => {
-  const parsed = numberValue(value);
-  return parsed === undefined ? 0 : Math.max(0, Math.trunc(parsed));
 };
 
 const contextKey = (value: unknown): string | null => {

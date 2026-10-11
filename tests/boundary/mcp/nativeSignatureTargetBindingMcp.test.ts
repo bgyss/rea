@@ -1,3 +1,4 @@
+import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
@@ -19,9 +20,9 @@ it("rejects changed signature targets through MCP and accepts reopening the new 
   );
   await writeFile(path, machoImage({}));
   const session = createTestBinarySession(
-    new NativeMacOSProvider(new NativeFixtureRunner(), "darwin"),
+    new NativeMacOSProvider({}, new NativeFixtureRunner(), "darwin"),
   );
-  const server = createServer(session, session);
+  const server = createServer({ kind: "session", session });
   const client = new Client({ name: "signature-binding-test", version: "1" });
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
@@ -40,7 +41,7 @@ it("rejects changed signature targets through MCP and accepts reopening the new 
       arguments: {},
     });
     expect(changed.isError).toBe(true);
-    expect(changed.structuredContent).toMatchObject({
+    expect(parseMcpToolError(changed)).toMatchObject({
       error: { code: "artifact_changed", details: { path } },
     });
     expect((await open()).isError).not.toBe(true);
@@ -53,7 +54,7 @@ it("rejects changed signature targets through MCP and accepts reopening the new 
       JSON.stringify(inspected.structuredContent),
     ).not.toBe(true);
     expect(inspected.structuredContent).toMatchObject({
-      result: { signed: true, identifier: "com.example.fixture" },
+      normalized_result: { signed: true, identifier: "com.example.fixture" },
     });
   } finally {
     await client.close();

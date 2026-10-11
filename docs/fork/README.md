@@ -27,6 +27,7 @@ Written 2026-10-08 for `bgyss/rea`, the personal fork of `morluto/rea`. It evalu
 
 ## Documents
 
+- [Upstream sync](upstream-sync.md): how to merge `morluto/rea`, and the decisions kept from each sync.
 - [Measured baseline](measurements.md): latencies, output sizes, and what was rejected or misreported.
 - [UI/UX observation and validation](ui-evidence.md): gaps U1–U10, the design, and validation loops for revit-bim and dcomp.
 - [dcomp integration](dcomp.md)

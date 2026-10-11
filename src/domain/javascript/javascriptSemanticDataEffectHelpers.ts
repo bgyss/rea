@@ -14,6 +14,7 @@ import {
   readExactJavaScriptLiteral,
   semanticStaticPropertyKey,
   semanticStaticPropertyName,
+  unwrapJavaScriptExpression,
 } from "./javascriptAstValues.js";
 
 export interface SemanticProjectedBinding {
@@ -56,15 +57,11 @@ const assignedSourceIs = (node: t.Node, source: t.Node): boolean => {
   let value = source;
   while (true) {
     if (t.isAwaitExpression(value)) value = value.argument;
-    else if (
-      t.isParenthesizedExpression(value) ||
-      t.isTSAsExpression(value) ||
-      t.isTSTypeAssertion(value) ||
-      t.isTypeCastExpression(value) ||
-      t.isTSSatisfiesExpression(value)
-    )
-      value = value.expression;
-    else break;
+    else {
+      const unwrapped = unwrapJavaScriptExpression(value).node;
+      if (unwrapped === value) break;
+      value = unwrapped;
+    }
   }
   return value === node;
 };
@@ -287,16 +284,3 @@ export const dataEffectMemberObject = (
   (t.isMemberExpression(node) || t.isOptionalMemberExpression(node))
     ? node.object
     : null;
-
-/** Compare Babel source offsets for exact containment. */
-export const containsSemanticNode = (outer: t.Node, inner: t.Node): boolean =>
-  outer.start !== null &&
-  outer.start !== undefined &&
-  outer.end !== null &&
-  outer.end !== undefined &&
-  inner.start !== null &&
-  inner.start !== undefined &&
-  inner.end !== null &&
-  inner.end !== undefined &&
-  outer.start <= inner.start &&
-  outer.end >= inner.end;

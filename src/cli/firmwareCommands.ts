@@ -6,7 +6,7 @@ import { CLI_COMMANDS } from "../cliCommandNames.js";
 import { logCliCommand } from "../cliLogging.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import type { FirmwareOperation } from "../domain/firmware/firmwareAnalysis.js";
-import type { Logger } from "../logger.js";
+import type { Logger } from "pino";
 import type { CliInstance } from "./types.js";
 import { withCommandCancellation } from "./commandCancellation.js";
 
@@ -26,8 +26,12 @@ export const registerFirmwareCommands = (
   ) =>
     withCommandCancellation((signal) =>
       logCliCommand(logger, name, async () => {
-        const result = await service.execute(operation, input, { signal });
-        return result.ok ? result.value : projectAnalysisError(result.error);
+        try {
+          const result = await service.execute(operation, input, { signal });
+          return result.ok ? result.value : projectAnalysisError(result.error);
+        } finally {
+          await service.close();
+        }
       }),
     );
   const path = z.string().describe("Local firmware path; never executed");

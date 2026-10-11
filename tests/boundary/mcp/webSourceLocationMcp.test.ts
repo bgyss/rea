@@ -26,7 +26,10 @@ it("publishes valid SDK schemas and records the named module trace without a bin
   const session = createTestBinarySession(() => {
     throw new Error("binary provider must not start");
   });
-  const server = createServer(session, session, { webSourceLocation: service });
+  const server = createServer(
+    { kind: "session", session },
+    { webSourceLocation: service },
+  );
   const client = new Client({ name: "module-contract", version: "1" });
   onTestFinished(async () => {
     await client.close();
@@ -58,8 +61,21 @@ it("publishes valid SDK schemas and records the named module trace without a bin
   const parsed = toolContract("trace_web_source_location").outputSchema.parse(
     response.structuredContent,
   );
-  const evidence = parseEvidence(parsed.evidence);
-  expect(parsed.result).toEqual(evidence.normalized_result);
+  const evidence = parseEvidence(parsed);
+  const data = webSourceLocationFixture();
+  expect(evidence).toMatchObject({
+    normalized_result: {
+      source: { sha256: data.sourceFile.sha256 },
+      source_map: {
+        association: "caller-selected",
+        sha256: data.sourceMap.file.sha256,
+      },
+      matches: [{ state: "mapped", content: { text: "original" } }],
+      execution: "unknown",
+      source_authenticity: "unknown",
+    },
+    raw_result: { source_map_text: data.sourceMap.text },
+  });
   expect(session.evidenceById(evidence.evidence_id)).toEqual(evidence);
   const invalid = await client.callTool({
     name: "trace_web_source_location",

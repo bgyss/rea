@@ -108,6 +108,10 @@ class FixtureTracer implements NativeCallTracer {
     this.requests.push(request);
     return Promise.resolve(this.outcome);
   }
+
+  close() {
+    return Promise.resolve(ok(null));
+  }
 }
 
 const BREAKPOINTS = [
@@ -131,7 +135,7 @@ const observe = async (
   target?: Awaited<ReturnType<typeof fixtureTarget>>,
   signal?: AbortSignal,
 ) =>
-  new NativeMacOSProvider(new NativeFixtureRunner(), "darwin", tracer)
+  new NativeMacOSProvider({}, new NativeFixtureRunner(), "darwin", () => tracer)
     .createClient(target ?? (await fixtureTarget()))
     .execute(
       "observe_native_calls",
@@ -418,9 +422,10 @@ describe("observe_native_calls failures", () => {
     );
     expect(!changed.ok && changed.error).toBeInstanceOf(EvidenceIntegrityError);
     const database = await new NativeMacOSProvider(
+      {},
       new NativeFixtureRunner(),
       "darwin",
-      tracer,
+      () => tracer,
     )
       .createClient({
         path: target.path,
