@@ -142,7 +142,7 @@ Add `compare_compiled_function` (left: original target function evidence; right:
 
 Run Ghidra FID or BSim against operator-supplied databases (pinned by digest). Matches are reported as `inferred`, with the database identity attached.
 
-**Status: Function ID implemented on `feat/fid-signature-match`; BSim not started.** `match_native_function_signatures` takes `databases: [{path, sha256}]` and an optional `procedure`. The bridge reads each database once, checks the digest, and queries that copy with every bundled database deactivated. Candidates carry the library, version and variant, hash identities, match mode and scores, and the result lists each database with its libraries.
+**Status: Function ID implemented in [PR #15](https://github.com/bgyss/rea/pull/15); BSim not started.** `match_native_function_signatures` takes `databases: [{path, sha256}]` and an optional `procedure`. The bridge reads each database once, checks the digest, and queries that copy with every bundled database deactivated. Candidates carry the library, version and variant, hash identities, match mode and scores, and the result lists each database with its libraries.
 
 - **Verified.** `verify:ghidra:signatures` (real Ghidra 12.1.4, Apple clang, arm64) builds a database with `PopulateFixtureFid.java` and matches an application's two library functions under other names; a wrong digest is refused, and CLI and MCP agree.
 - **Not yet.** BSim (needs a database server or file-backed H2 and similarity scoring). Only AArch64 macOS is exercised; the bundled x86 Windows databases, ELF and COFF are not. Function ID hashes mask operands, so a candidate does not establish equal constants or call targets. There is no tool to build a database; the operator uses Ghidra's own.
