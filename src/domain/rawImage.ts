@@ -20,13 +20,13 @@ const profileFields = {
     .string()
     .min(1)
     .max(128)
-    .regex(/^[A-Za-z0-9_.-]+$/u)
+    .regex(/^[A-Za-z0-9_.\x2D]+$/u)
     .describe("Caller-assigned profile identity, recorded in Evidence"),
   platform: z
     .string()
     .min(1)
     .max(64)
-    .regex(/^[a-z0-9][a-z0-9_.-]*$/u)
+    .regex(/^[a-z0-9][a-z0-9_.\x2D]*$/u)
     .describe("Caller-assigned platform label, for example nes or ps1"),
   processor_language_id: languageIdSchema,
   compiler_spec_id: z.string().min(1).max(64),
