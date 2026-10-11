@@ -30,6 +30,9 @@ export const TOOL_EXAMPLE_OVERRIDES: Readonly<
   },
   search_native_encoded_text: { pattern: "ゲーム", encoding: "shift_jis" },
   scan_native_pointer_tables: { entry_size: 2, endianness: "little" },
+  query_native_function_similarity: {
+    database: { path: "/opt/bsim/libs.mv.db", sha256: "0".repeat(64) },
+  },
   resolve_native_call_targets: { address: "0x1000" },
   read_function_instructions: { procedure: "main" },
   read_bytes: { address: "0x1000", length: 16 },

@@ -269,6 +269,34 @@ offset to each value, `target_start`/`target_end` restrict valid targets, and
 file offset and every target. A candidate is a structural hypothesis; confirm
 targets with `search_native_encoded_text` or `read_bytes`.
 
+## Finding functions that resemble known ones
+
+`query_native_function_similarity` (CLI `query-native-function-similarity <path>
+--database SHA256=PATH`) compares the open binary's functions with a BSim
+database you supply: a file-backed H2 `.mv.db`, pinned by SHA-256. The bridge
+reads the file once, refuses a different digest, and opens a private copy, so
+the pinned file is never modified. Where Function ID matches exact code hashes,
+BSim compares Ghidra decompiler data-flow features, so it still pairs code that
+was recompiled, renamed or relinked.
+
+Each function with matches lists candidates, all `inferred`: the candidate's
+name and address, `similarity` (0 to 1) and `significance`, and its executable
+(name, MD5, architecture, compiler). The result also reports the database
+(name, owner, signature version, executable count) and how many functions BSim
+could not sign. `min_similarity` (default 0.7), `min_significance` (default 0)
+and `max_matches` (candidates per function, default 10) set the query bounds;
+`procedure` queries one function.
+
+A score says two functions look alike to BSim, not that their constants, names
+or call targets match. Functions the decompiler cannot process, or that are too
+small to sign, are counted but not compared, and a database built for another
+processor or signature settings may return nothing. Build a database with
+Ghidra's own `bsim` tool or `CreateH2BSimDatabaseScript`; the verifier script
+`scripts/verify/ghidra/PopulateFixtureBsim.java` is a minimal headless example.
+Only file-backed H2 databases are supported; a PostgreSQL or Elasticsearch
+server is not contacted. Nothing is applied to the program: rename functions
+with `annotate_native_function` once you accept a candidate.
+
 ## Naming statically linked library functions
 
 `match_native_function_signatures` (CLI `match-native-function-signatures <path>

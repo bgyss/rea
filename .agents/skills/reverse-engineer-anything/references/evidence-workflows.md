@@ -28,6 +28,9 @@ or absence:
 - `search_native_encoded_text` finds text in Shift-JIS, EUC-JP, UTF-16 or a
   pinned `.tbl` table as exact byte matches; `scan_native_pointer_tables` finds
   candidate pointer tables. Both are hypotheses to confirm with `read_bytes`.
+- `query_native_function_similarity` finds functions in a BSim database you
+  pin by SHA-256 that resemble the open binary's, including recompiled or
+  renamed code; candidates are inferred and scored.
 - `match_native_function_signatures` proposes names for statically linked
   library functions from Function ID databases you pin by SHA-256. Candidates
   are inferred; accept one with `annotate_native_function`.

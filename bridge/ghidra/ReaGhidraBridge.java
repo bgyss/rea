@@ -52,6 +52,21 @@ import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.decompiler.DecompiledFunction;
 import ghidra.app.decompiler.ClangCaseToken;
 import ghidra.app.decompiler.ClangNode;
+import ghidra.features.bsim.query.BSimClientFactory;
+import ghidra.features.bsim.query.BSimServerInfo;
+import ghidra.features.bsim.query.FunctionDatabase;
+import ghidra.features.bsim.query.GenSignatures;
+import ghidra.features.bsim.query.description.DatabaseInformation;
+import ghidra.features.bsim.query.description.DescriptionManager;
+import ghidra.features.bsim.query.description.ExecutableRecord;
+import ghidra.features.bsim.query.description.FunctionDescription;
+import ghidra.features.bsim.query.protocol.SimilarityNote;
+import ghidra.features.bsim.query.protocol.SimilarityResult;
+import ghidra.features.bsim.query.file.BSimH2FileDBConnectionManager;
+import ghidra.features.bsim.query.protocol.QueryExeCount;
+import ghidra.features.bsim.query.protocol.QueryNearest;
+import ghidra.features.bsim.query.protocol.ResponseExe;
+import ghidra.features.bsim.query.protocol.ResponseNearest;
 import ghidra.feature.fid.db.FidDB;
 import ghidra.feature.fid.db.FidFile;
 import ghidra.feature.fid.db.FidFileManager;
@@ -180,6 +195,7 @@ public final class ReaGhidraBridge extends HeadlessScript {
         "match_native_function_signatures",
         "search_native_encoded_text",
         "scan_native_pointer_tables",
+        "query_native_function_similarity",
         "inspect_native_data_type",
         "resolve_native_call_targets",
         "procedure_references",
@@ -420,6 +436,7 @@ public final class ReaGhidraBridge extends HeadlessScript {
             case "match_native_function_signatures" -> matchNativeFunctionSignatures(request.params);
             case "search_native_encoded_text" -> searchNativeEncodedText(request.params);
             case "scan_native_pointer_tables" -> scanNativePointerTables(request.params);
+            case "query_native_function_similarity" -> queryNativeFunctionSimilarity(request.params);
             case "resolve_native_call_targets" -> resolveNativeCallTargets(request.params);
             case "xrefs" -> xrefs(request.params);
             case "analyze_function" -> {
@@ -911,6 +928,171 @@ public final class ReaGhidraBridge extends HeadlessScript {
         limitations.add("A match is not checked against character boundaries: a multi-byte encoding can match starting on a trail byte, so read bytes_before_hex and text_from_match before trusting it.");
         if (table != null) limitations.add("The pattern is encoded greedily with the longest table entry at each position; the first entry in file order wins for repeated text, and text the table could encode another way is not searched.");
         else limitations.add("The pattern is encoded with the Java " + charset.name() + " charset, which chooses one byte sequence per character; other byte sequences for the same character are not searched.");
+        result.add("limitations", limitations);
+        return result;
+    }
+
+    private static double requireNumber(JsonObject object, String name) {
+        JsonElement value = object.get(name);
+        if (value == null || !value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber())
+            throw new RequestFailure("invalid_request", name + " must be a number");
+        return value.getAsDouble();
+    }
+
+    private JsonObject queryNativeFunctionSimilarity(JsonObject params) throws Exception {
+        requireKeys(params, Set.of("document", "database", "procedure", "min_similarity", "min_significance", "max_matches"));
+        requireDocument(params);
+        JsonObject requested = params.getAsJsonObject("database");
+        if (requested == null) throw new RequestFailure("invalid_request", "Supply a BSim database");
+        requireKeys(requested, Set.of("path", "sha256"));
+        String source = requireString(requested, "path");
+        String pinned = requireString(requested, "sha256");
+        String selected = optionalString(params, "procedure");
+        double minSimilarity = requireNumber(params, "min_similarity");
+        double minSignificance = requireNumber(params, "min_significance");
+        int maxMatches = requireInteger(params, "max_matches");
+        if (minSimilarity < 0 || minSimilarity > 1) throw new RequestFailure("invalid_request", "min_similarity must be between 0 and 1");
+        if (minSignificance < 0) throw new RequestFailure("invalid_request", "min_significance cannot be negative");
+        if (maxMatches < 1) throw new RequestFailure("invalid_request", "max_matches must be positive");
+        Function only = selected == null ? null : resolveProcedure(selected);
+        // The database is read once, checked against its pinned digest, and opened from that exact copy.
+        byte[] bytes;
+        try {
+            bytes = Files.readAllBytes(Path.of(source));
+        } catch (IOException failure) {
+            throw new RequestFailure("similarity_database_unreadable",
+                "Cannot read BSim database " + source + ": " + safeMessage(failure));
+        }
+        String actual = bytesHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+        if (!actual.equals(pinned))
+            throw new RequestFailure("similarity_database_digest_mismatch",
+                "BSim database " + source + " has SHA-256 " + actual + ", not the pinned " + pinned);
+        Path scratch = Files.createTempDirectory("rea-bsim-");
+        Path copy = scratch.resolve("database" + BSimServerInfo.H2_FILE_EXTENSION);
+        BSimServerInfo info = new BSimServerInfo(copy.toAbsolutePath().toString());
+        Files.write(copy, bytes);
+        JsonObject database = new JsonObject();
+        JsonArray found = new JsonArray();
+        int examined = 0;
+        int unsigned = 0;
+        try {
+            try (FunctionDatabase client = BSimClientFactory.buildClient(info, false)) {
+                if (!client.initialize())
+                    throw new RequestFailure("similarity_database_invalid",
+                        "Not a usable BSim database for this Ghidra version: " + source + ": " + client.getLastError().message);
+                DatabaseInformation dbInfo = client.getInfo();
+                database.addProperty("path", source);
+                database.addProperty("sha256", pinned);
+                database.addProperty("name", String.valueOf(dbInfo.databasename));
+                database.addProperty("owner", String.valueOf(dbInfo.owner));
+                database.addProperty("description", String.valueOf(dbInfo.description));
+                database.addProperty("signature_version", dbInfo.major + "." + dbInfo.minor);
+                database.addProperty("layout_version", dbInfo.layout_version);
+                database.addProperty("tracks_callgraph", dbInfo.trackcallgraph);
+                ResponseExe count = new QueryExeCount().execute(client);
+                if (count == null) database.add("executable_count", JsonNull.INSTANCE);
+                else database.addProperty("executable_count", count.recordCount);
+                List<Function> targets = new ArrayList<>();
+                if (only != null) targets.add(only);
+                else for (Function function : currentProgram.getFunctionManager().getFunctions(true))
+                    if (!function.isExternal()) targets.add(function);
+                GenSignatures signatures = new GenSignatures(false);
+                try {
+                    signatures.setVectorFactory(client.getLSHVectorFactory());
+                    signatures.openProgram(currentProgram, null, null, null, null, null);
+                    signatures.scanFunctions(targets.iterator(), targets.size(), monitor);
+                    DescriptionManager manager = signatures.getDescriptionManager();
+                    Map<Long, Function> byAddress = new HashMap<>();
+                    for (Function function : targets) byAddress.put(function.getEntryPoint().getOffset(), function);
+                    examined = targets.size();
+                    int signed = 0;
+                    Iterator<FunctionDescription> described = manager.listAllFunctions();
+                    while (described.hasNext()) if (described.next().getSignatureRecord() != null) signed++;
+                    unsigned = examined - signed;
+                    if (signed > 0) {
+                        QueryNearest query = new QueryNearest();
+                        query.manage = manager;
+                        query.max = maxMatches;
+                        query.thresh = minSimilarity;
+                        query.signifthresh = minSignificance;
+                        ResponseNearest response = query.execute(client);
+                        if (response == null)
+                            throw new RequestFailure("similarity_query_failed", "BSim query failed: " + client.getLastError().message);
+                        // BSim returns results in hash order; report them in a stable order.
+                        List<Object[]> ordered = new ArrayList<>();
+                        for (SimilarityResult result : response.result) {
+                            monitor.checkCancelled();
+                            Function function = byAddress.get(result.getBase().getAddress());
+                            JsonObject row = new JsonObject();
+                            JsonObject identity = new JsonObject();
+                            identity.addProperty("address", function == null
+                                ? "0x" + Long.toHexString(result.getBase().getAddress())
+                                : canonicalAddress(function.getEntryPoint()));
+                            identity.addProperty("name", function == null ? result.getBase().getFunctionName() : procedureName(function));
+                            row.add("function", identity);
+                            JsonArray candidates = new JsonArray();
+                            List<SimilarityNote> sortedNotes = new ArrayList<>();
+                            result.iterator().forEachRemaining(sortedNotes::add);
+                            sortedNotes.sort(Comparator
+                                .comparingDouble(SimilarityNote::getSimilarity).reversed()
+                                .thenComparing(Comparator.comparingDouble(SimilarityNote::getSignificance).reversed())
+                                .thenComparing(note -> note.getFunctionDescription().getExecutableRecord().getMd5())
+                                .thenComparing((left, right) -> Long.compareUnsigned(left.getFunctionDescription().getAddress(), right.getFunctionDescription().getAddress()))
+                                .thenComparing(note -> note.getFunctionDescription().getFunctionName()));
+                            for (SimilarityNote note : sortedNotes) {
+                                FunctionDescription match = note.getFunctionDescription();
+                                ExecutableRecord executable = match.getExecutableRecord();
+                                JsonObject candidate = new JsonObject();
+                                candidate.addProperty("evidence_kind", "inferred");
+                                candidate.addProperty("name", match.getFunctionName());
+                                candidate.addProperty("address", "0x" + Long.toHexString(match.getAddress()));
+                                candidate.addProperty("similarity", note.getSimilarity());
+                                candidate.addProperty("significance", note.getSignificance());
+                                JsonObject exe = new JsonObject();
+                                exe.addProperty("name", executable.getNameExec());
+                                exe.addProperty("md5", executable.getMd5());
+                                exe.addProperty("architecture", executable.getArchitecture());
+                                exe.addProperty("compiler", executable.getNameCompiler());
+                                exe.addProperty("is_library", executable.isLibrary());
+                                String path = executable.getPath();
+                                String repository = executable.getRepository();
+                                if (path == null) exe.add("path", JsonNull.INSTANCE); else exe.addProperty("path", path);
+                                if (repository == null) exe.add("repository", JsonNull.INSTANCE); else exe.addProperty("repository", repository);
+                                candidate.add("executable", exe);
+                                candidates.add(candidate);
+                            }
+                            if (candidates.size() == 0) continue;
+                            row.add("candidates", candidates);
+                            ordered.add(new Object[] {result.getBase().getAddress(), row});
+                        }
+                        ordered.sort((left, right) -> Long.compareUnsigned((Long) left[0], (Long) right[0]));
+                        for (Object[] entry : ordered) found.add((JsonObject) entry[1]);
+                    }
+                } finally {
+                    signatures.dispose();
+                }
+            }
+        } finally {
+            BSimH2FileDBConnectionManager.BSimH2FileDataSource source2 =
+                BSimH2FileDBConnectionManager.getDataSourceIfExists(info);
+            if (source2 != null) source2.dispose();
+            try (var entries = Files.list(scratch)) {
+                for (Path entry : (Iterable<Path>) entries::iterator) Files.deleteIfExists(entry);
+            }
+            Files.deleteIfExists(scratch);
+        }
+        JsonArray limitations = new JsonArray();
+        limitations.add("Candidates are BSim similarity matches against the caller's pinned database: inferences about what a function resembles, not observations of this binary. Similarity compares decompiler data-flow features, so it does not establish identical constants, names or call targets.");
+        limitations.add("Each function is limited to max_matches candidates above min_similarity and min_significance; the result cannot say whether more were available. Functions BSim could not sign (functions_without_signature), such as those the decompiler cannot process or that are too small, are not compared.");
+        limitations.add("The database is opened from a private copy; the pinned file is never modified. BSim signatures depend on the processor and the database's signature version, so a database built for another architecture or settings may return nothing.");
+        JsonObject result = new JsonObject();
+        result.add("database", database);
+        result.addProperty("functions_examined", examined);
+        result.addProperty("functions_without_signature", unsigned);
+        result.addProperty("min_similarity", minSimilarity);
+        result.addProperty("min_significance", minSignificance);
+        result.addProperty("max_matches", maxMatches);
+        result.add("matches", found);
         result.add("limitations", limitations);
         return result;
     }

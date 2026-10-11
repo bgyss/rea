@@ -362,6 +362,7 @@ export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
   match_native_function_signatures: evidence,
   search_native_encoded_text: evidence,
   scan_native_pointer_tables: evidence,
+  query_native_function_similarity: evidence,
   inspect_native_data_type: evidence,
   resolve_native_call_targets: evidence,
   read_bytes: evidence,

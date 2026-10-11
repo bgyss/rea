@@ -866,6 +866,17 @@ authored table with every target (and respects `min_entries`, byte order,
 `target_base` and a target window). The CLI results equal the MCP results and the
 image is unchanged. It needs no compiler. Only a 6502 image is exercised.
 
+`npm run verify:ghidra:bsim` builds a library object with the host `cc`, links
+it into a reference executable and, under other names, into an application,
+builds a file-backed H2 BSim database from the reference with
+`scripts/verify/ghidra/PopulateFixtureBsim.java`, and checks through MCP that
+`query_native_function_similarity` pairs the application's two renamed library
+functions with their originals at near-1.0 similarity, leaves unrelated
+application code unmatched, narrows to one procedure, returns nothing under an
+unreachable bound, refuses a wrong digest, and reports the same result through
+the CLI. Only the host architecture is exercised, and only the
+`medium_nosize` template.
+
 ## Apple Interface Builder archives
 
 `npm run verify:interface-builder` compiles the source-owned AppKit XIB into a

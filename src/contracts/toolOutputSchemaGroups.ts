@@ -18,6 +18,7 @@ import { nativeCallObservationResultSchema } from "../domain/native/nativeCallOb
 import { nativeSignatureMatchesSchema } from "../domain/native/nativeSignatureMatches.js";
 import { nativeEncodedTextSearchSchema } from "../domain/native/nativeEncodedText.js";
 import { nativePointerTableScanSchema } from "../domain/native/nativePointerTables.js";
+import { nativeFunctionSimilaritySchema } from "../domain/native/nativeFunctionSimilarity.js";
 import { nativeFunctionInstructionsSchema } from "../domain/native/nativeFunctionInstructions.js";
 import {
   nativeInstructionSchema,
@@ -126,6 +127,9 @@ export const officialOutputSchemas: Readonly<Record<string, z.ZodObject>> = {
   ),
   search_native_encoded_text: evidenceResultOf(nativeEncodedTextSearchSchema),
   scan_native_pointer_tables: evidenceResultOf(nativePointerTableScanSchema),
+  query_native_function_similarity: evidenceResultOf(
+    nativeFunctionSimilaritySchema,
+  ),
   resolve_native_call_targets: evidenceResultOf(nativeCallTargetsSchema),
   address_name: evidenceResultOf(nullableText),
   comment: evidenceResultOf(nullableText),

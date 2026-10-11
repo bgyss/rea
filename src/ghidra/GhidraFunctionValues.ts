@@ -22,6 +22,10 @@ import {
   nativeEncodedTextSearchSchema,
 } from "../domain/native/nativeEncodedText.js";
 import {
+  nativeFunctionSimilarityInputSchema,
+  nativeFunctionSimilaritySchema,
+} from "../domain/native/nativeFunctionSimilarity.js";
+import {
   nativePointerTableScanInputSchema,
   nativePointerTableScanSchema,
 } from "../domain/native/nativePointerTables.js";
@@ -75,6 +79,7 @@ export const GHIDRA_FUNCTION_OPERATIONS = [
   "match_native_function_signatures",
   "search_native_encoded_text",
   "scan_native_pointer_tables",
+  "query_native_function_similarity",
   "resolve_native_call_targets",
   "analyze_function",
   "procedure_assembly",
@@ -131,6 +136,9 @@ const inputSchemas = {
     .extend({ document })
     .strict(),
   scan_native_pointer_tables: nativePointerTableScanInputSchema
+    .extend({ document })
+    .strict(),
+  query_native_function_similarity: nativeFunctionSimilarityInputSchema
     .extend({ document })
     .strict(),
   resolve_native_call_targets: z
@@ -438,6 +446,7 @@ const resultSchemas = {
   match_native_function_signatures: nativeSignatureMatchesSchema,
   search_native_encoded_text: nativeEncodedTextSearchSchema,
   scan_native_pointer_tables: nativePointerTableScanSchema,
+  query_native_function_similarity: nativeFunctionSimilaritySchema,
   inspect_native_data_type: nativeDataTypeSchema,
   resolve_native_call_targets: nativeCallTargetsSchema,
   procedure_references: procedureReferences,
