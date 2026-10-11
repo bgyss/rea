@@ -19,42 +19,85 @@ public:
   }
 };
 
-static Handle createJob() {
+// A nonzero memory limit is a commit limit for the whole job; zero keeps only
+// kill-on-owner-close. The policy read back must match exactly.
+static Handle createJob(ULONGLONG memoryLimit = 0) {
   Handle job(CreateJobObjectW(nullptr, nullptr));
   require(job.valid(), "Create owned Job Object failed");
+  const DWORD flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | (memoryLimit != 0 ? JOB_OBJECT_LIMIT_JOB_MEMORY : 0);
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION policy{};
-  policy.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+  policy.BasicLimitInformation.LimitFlags = flags;
+  policy.JobMemoryLimit = static_cast<SIZE_T>(memoryLimit);
   require(SetInformationJobObject(job.get(), JobObjectExtendedLimitInformation, &policy, sizeof(policy)),
           "Apply kill-on-owner-close Job Object policy failed");
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION actual{};
   require(QueryInformationJobObject(job.get(), JobObjectExtendedLimitInformation, &actual, sizeof(actual), nullptr),
           "Read Job Object policy failed");
-  require(actual.BasicLimitInformation.LimitFlags == JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+  require(actual.BasicLimitInformation.LimitFlags == flags,
           "Job Object policy permits unexpected breakaway", L"", ERROR_ACCESS_DENIED);
+  require(memoryLimit == 0 || static_cast<ULONGLONG>(actual.JobMemoryLimit) == memoryLimit,
+          "Job Object memory limit was not applied exactly", L"", ERROR_INVALID_PARAMETER);
   return job;
 }
 
-static void pipe(Handle& read, Handle& write) {
+// Associate a private completion port before any process joins the job, so
+// the job's commit-limit notification cannot be missed.
+static Handle createNotifications(HANDLE job) {
+  Handle port(CreateIoCompletionPort(INVALID_HANDLE_VALUE, nullptr, 0, 1));
+  require(port.valid(), "Create owned Job Object notification port failed");
+  JOBOBJECT_ASSOCIATE_COMPLETION_PORT association{};
+  association.CompletionKey = job;
+  association.CompletionPort = port.get();
+  require(SetInformationJobObject(job, JobObjectAssociateCompletionPortInformation, &association, sizeof(association)),
+          "Associate owned Job Object notification port failed");
+  return port;
+}
+
+// JavaScript numbers cross the boundary as doubles; accept only an exact
+// positive safe integer that is a whole number of pages, so read-back is exact.
+static ULONGLONG jobMemoryLimit(napi_env env, napi_value value) {
+  const double requested = numeric(env, value);
+  require(requested >= 1 && requested <= 9007199254740991.0 &&
+              static_cast<double>(static_cast<ULONGLONG>(requested)) == requested,
+          "Job memory limit must be a positive safe integer", L"", ERROR_INVALID_PARAMETER);
+  SYSTEM_INFO system{};
+  GetSystemInfo(&system);
+  const auto limit = static_cast<ULONGLONG>(requested);
+  require(system.dwPageSize != 0 && limit % system.dwPageSize == 0,
+          "Job memory limit must be a whole number of pages", L"", ERROR_INVALID_PARAMETER);
+  return limit;
+}
+
+static void pipe(Handle& read, Handle& write, bool parentReads = true) {
   SECURITY_ATTRIBUTES attributes{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
   HANDLE rawRead, rawWrite;
   require(CreatePipe(&rawRead, &rawWrite, &attributes, 0), "Create owned process output pipe failed");
   read.reset(rawRead); write.reset(rawWrite);
-  require(SetHandleInformation(read.get(), HANDLE_FLAG_INHERIT, 0), "Protect process output handle inheritance failed");
+  require(SetHandleInformation(parentReads ? read.get() : write.get(), HANDLE_FLAG_INHERIT, 0), "Protect parent process pipe handle inheritance failed");
 }
 
 std::unique_ptr<Process> spawnProcess(const std::wstring& command, const std::wstring& commandLine,
-                                    const std::wstring& cwd, const std::vector<std::wstring>& environment) {
+                                    const std::wstring& cwd, const std::vector<std::wstring>& environment,
+                                    bool protocolStdin, ULONGLONG memoryLimit) {
   const auto executable = ordinaryDriveSeparators(command);
   require(executable.size() >= 3 && executable[1] == L':' && executable[2] == L'\\',
           "Owned Windows process requires an absolute executable path", command, ERROR_INVALID_PARAMETER);
   auto result = std::make_unique<Process>();
-  result->job = createJob();
+  result->job = createJob(memoryLimit);
+  if (memoryLimit != 0) {
+    result->notifications = createNotifications(result->job.get());
+    result->memoryLimit = memoryLimit;
+  }
   Handle stdoutWrite, stderrWrite;
   pipe(result->stdoutRead, stdoutWrite); pipe(result->stderrRead, stderrWrite);
   SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
-  Handle input(CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                          &security, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
-  require(input.valid(), "Open owned process null input failed");
+  Handle input;
+  if (protocolStdin) pipe(input, result->stdinWrite, false);
+  else {
+    input.reset(CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           &security, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    require(input.valid(), "Open owned process null input failed");
+  }
   Attributes attributes(2);
   HANDLE job = result->job.get();
   attributes.add(PROC_THREAD_ATTRIBUTE_JOB_LIST, &job, sizeof(job));
@@ -165,6 +208,29 @@ static DWORD activeProcesses(Process& process) {
   return state.ActiveProcesses;
 }
 
+// Drain queued job notifications without waiting. The commit-limit message is
+// posted when an allocation fails, before the process can exit. An observed
+// exit must be followed by another drain before its diagnostics are published.
+static void observeNotifications(Process& process) {
+  if (!process.notifications.valid()) return;
+  DWORD message = 0;
+  ULONG_PTR key = 0;
+  LPOVERLAPPED detail = nullptr;
+  while (GetQueuedCompletionStatus(process.notifications.get(), &message, &key, &detail, 0)) {
+    if (key == reinterpret_cast<ULONG_PTR>(process.job.get()) && message == JOB_OBJECT_MSG_JOB_MEMORY_LIMIT)
+      process.memoryLimitReached = true;
+  }
+  const auto error = GetLastError();
+  require(detail == nullptr && error == WAIT_TIMEOUT, "Observe owned Job Object notifications failed", L"", error);
+}
+
+static ULONGLONG peakJobMemory(Process& process) {
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION state{};
+  require(QueryInformationJobObject(process.job.get(), JobObjectExtendedLimitInformation, &state, sizeof(state), nullptr),
+          "Observe owned Job Object memory failed");
+  return static_cast<ULONGLONG>(state.PeakJobMemoryUsed);
+}
+
 static napi_value callerToken(napi_env env) {
   HANDLE raw;
   require(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, &raw), "Read caller token failed");
@@ -198,25 +264,114 @@ static napi_value callerToken(napi_env env) {
   return result;
 }
 
+struct InputWork {
+  napi_async_work work = nullptr;
+  napi_deferred deferred = nullptr;
+  napi_ref processReference = nullptr;
+  Process* process;
+  Handle pipe;
+  std::vector<unsigned char> bytes;
+  size_t written = 0;
+  std::unique_ptr<Failure> failure;
+  explicit InputWork(Process& process) : process(&process) {}
+};
+
+static void writeInput(napi_env, void* pointer) {
+  auto& work = *static_cast<InputWork*>(pointer);
+  try {
+    // Anonymous pipe writes may block. Keep them off the JS thread so output
+    // polling and job termination remain live while a child stops reading.
+    while (work.written < work.bytes.size()) {
+      DWORD written = 0;
+      const auto count = static_cast<DWORD>(std::min<size_t>(65536, work.bytes.size() - work.written));
+      require(WriteFile(work.pipe.get(), work.bytes.data() + work.written, count, &written, nullptr),
+              "Write owned process input failed");
+      require(written > 0, "Owned process input write made no progress", L"", ERROR_WRITE_FAULT);
+      work.written += written;
+    }
+  } catch (const Failure& failure) {
+    work.failure = std::make_unique<Failure>(failure);
+  } catch (const std::exception& failure) {
+    work.failure = std::make_unique<Failure>(failure.what(), L"", ERROR_GEN_FAILURE);
+  }
+}
+
+static void completeInput(napi_env env, napi_status status, void* pointer) {
+  std::unique_ptr<InputWork> work(static_cast<InputWork*>(pointer));
+  work->process->inputPending = false;
+  if (work->failure) napi_reject_deferred(env, work->deferred, failureValue(env, *work->failure));
+  else if (status != napi_ok)
+    napi_reject_deferred(env, work->deferred, failureValue(env, Failure("Owned process input worker was cancelled", L"", ERROR_OPERATION_ABORTED)));
+  else napi_resolve_deferred(env, work->deferred, number(env, work->written));
+  napi_delete_reference(env, work->processReference);
+  napi_delete_async_work(env, work->work);
+}
+
+static napi_value inputWrite(napi_env env, napi_value owner, Process& process, napi_value input) {
+  require(process.stdinWrite.valid(), "Owned process has no writable input", L"", ERROR_BROKEN_PIPE);
+  require(!process.inputPending, "Owned process input already has a pending write", L"", ERROR_BUSY);
+  auto work = std::make_unique<InputWork>(process);
+  void* bytes = nullptr;
+  size_t size = 0;
+  bool buffer = false;
+  check(napi_is_buffer(env, input, &buffer));
+  require(buffer, "Owned process input must be a Buffer", L"", ERROR_INVALID_PARAMETER);
+  check(napi_get_buffer_info(env, input, &bytes, &size));
+  if (size > 0) work->bytes.assign(static_cast<unsigned char*>(bytes), static_cast<unsigned char*>(bytes) + size);
+  HANDLE pipe;
+  require(DuplicateHandle(GetCurrentProcess(), process.stdinWrite.get(), GetCurrentProcess(), &pipe,
+                          0, FALSE, DUPLICATE_SAME_ACCESS), "Retain owned process input handle failed");
+  work->pipe.reset(pipe);
+  napi_value promise;
+  check(napi_create_promise(env, &work->deferred, &promise));
+  check(napi_create_reference(env, owner, 1, &work->processReference));
+  try {
+    check(napi_create_async_work(env, nullptr, string(env, std::string("REA owned process input")),
+                               writeInput, completeInput, work.get(), &work->work));
+    check(napi_queue_async_work(env, work->work));
+    process.inputPending = true;
+  } catch (...) {
+    if (work->work) napi_delete_async_work(env, work->work);
+    napi_delete_reference(env, work->processReference);
+    throw;
+  }
+  work.release();
+  return promise;
+}
+
 napi_value processCall(napi_env env, const std::wstring& operation, const std::vector<napi_value>& args) {
   if (operation == L"process_caller_token") {
     require(args.empty(), "Caller token observation takes no arguments", L"", ERROR_INVALID_PARAMETER);
     return callerToken(env);
   }
   if (operation == L"process_spawn") {
-    require(args.size() == 4, "Wrong native process launch argument count", L"", ERROR_INVALID_PARAMETER);
+    require(args.size() >= 4 && args.size() <= 6, "Wrong native process launch argument count", L"", ERROR_INVALID_PARAMETER);
+    bool protocolStdin = false;
+    if (args.size() >= 5) check(napi_get_value_bool(env, args[4], &protocolStdin));
+    const ULONGLONG memoryLimit = args.size() == 6 ? jobMemoryLimit(env, args[5]) : 0;
     std::vector<std::wstring> environment;
     for (const auto& entry : array(env, args[3])) environment.push_back(wide(env, entry));
-    auto process = spawnProcess(wide(env, args[0]), wide(env, args[1]), wide(env, args[2]), environment);
+    auto process = spawnProcess(wide(env, args[0]), wide(env, args[1]), wide(env, args[2]), environment, protocolStdin,
+                                memoryLimit);
     auto result = object(env);
     set(env, result, "pid", number(env, process->pid));
     set(env, result, "jobAssigned", boolean(env, true));
     set(env, result, "killOnOwnerClose", boolean(env, true));
+    if (process->memoryLimit != 0)
+      set(env, result, "jobMemoryLimitBytes", number(env, static_cast<double>(process->memoryLimit)));
     set(env, result, "handle", wrap(env, std::move(process)));
     return result;
   }
+  if (operation == L"process_stdin_write") {
+    require(args.size() == 2, "Wrong native process input argument count", L"", ERROR_INVALID_PARAMETER);
+    return inputWrite(env, args[0], static_cast<Process&>(resource(env, args[0], Kind::Process)), args[1]);
+  }
   require(args.size() == 1, "Wrong native process handle argument count", L"", ERROR_INVALID_PARAMETER);
   auto& process = static_cast<Process&>(resource(env, args[0], Kind::Process));
+  if (operation == L"process_stdin_close") {
+    process.stdinWrite.reset();
+    return null(env);
+  }
   if (operation == L"process_poll") {
     auto result = object(env);
     bool stdoutEnded = false, stderrEnded = false;
@@ -224,12 +379,21 @@ napi_value processCall(napi_env env, const std::wstring& operation, const std::v
     set(env, result, "stderr", readOutput(env, process.stderrRead, stderrEnded));
     set(env, result, "stdoutEnded", boolean(env, stdoutEnded));
     set(env, result, "stderrEnded", boolean(env, stderrEnded));
+    observeNotifications(process);
     const auto exited = WaitForSingleObject(process.process.get(), 0);
     require(exited == WAIT_OBJECT_0 || exited == WAIT_TIMEOUT, "Observe owned process exit failed");
     DWORD code = 0;
-    if (exited == WAIT_OBJECT_0) require(GetExitCodeProcess(process.process.get(), &code), "Read owned process exit code failed");
+    if (exited == WAIT_OBJECT_0) {
+      // The child may have reached its limit and exited after the first drain.
+      observeNotifications(process);
+      require(GetExitCodeProcess(process.process.get(), &code), "Read owned process exit code failed");
+    }
     set(env, result, "exitCode", exited == WAIT_OBJECT_0 ? number(env, code) : null(env));
     set(env, result, "activeProcesses", number(env, activeProcesses(process)));
+    if (process.memoryLimit != 0) {
+      set(env, result, "memoryLimitReached", boolean(env, process.memoryLimitReached));
+      set(env, result, "peakJobMemoryBytes", number(env, static_cast<double>(peakJobMemory(process))));
+    }
     return result;
   }
   if (operation == L"process_alive") return number(env, activeProcesses(process));
@@ -240,24 +404,32 @@ napi_value processCall(napi_env env, const std::wstring& operation, const std::v
   }
   if (operation == L"process_close") {
     // Closing the job is the crash-safe authority; no PID enumeration is used.
-    process.job.reset(); process.process.reset(); process.stdoutRead.reset(); process.stderrRead.reset();
+    process.job.reset(); process.process.reset(); process.stdoutRead.reset(); process.stderrRead.reset(); process.stdinWrite.reset();
+    process.notifications.reset();
     process.closed = true;
     return null(env);
   }
   throw Failure("Unknown native process operation", L"", ERROR_INVALID_PARAMETER);
 }
 
-napi_value inspect(napi_env env) {
+napi_value inspect(napi_env env, std::unique_ptr<Runtime>& probe) {
+  // Settle the previous owner before admitting another probe. Failed cleanup
+  // retains its handles, including when identity construction itself failed.
+  if (probe) { closeRuntime(*probe); probe.reset(); }
   wchar_t temp[32768];
   const auto length = GetTempPathW(32768, temp);
   require(length > 0 && length < 32768, "Read temporary directory coordinate failed");
-  auto root = createRuntime(std::wstring(temp, length), L"rea-native-probe-");
-  auto filesystem = identity(env, root->directory.get(), root->path);
-  closeRuntime(*root);
+  probe = createRuntime(std::wstring(temp, length), L"rea-native-probe-");
+  auto filesystem = identity(env, probe->directory.get(), probe->path);
+  closeRuntime(*probe);
+  probe.reset();
   auto job = createJob();
   Attributes attributes(1);
   HANDLE raw = job.get();
   attributes.add(PROC_THREAD_ATTRIBUTE_JOB_LIST, &raw, sizeof(raw));
+  // Establish the commit-limit policy and its notification port on this host.
+  auto limited = createJob(64ULL * 1024 * 1024);
+  auto notifications = createNotifications(limited.get());
   auto result = object(env);
   set(env, result, "abiVersion", number(env, 1));
   set(env, result, "nodeApiVersion", number(env, 8));
@@ -266,6 +438,8 @@ napi_value inspect(napi_env env) {
   set(env, result, "privateDacl", boolean(env, true));
   set(env, result, "atomicJobAssignment", boolean(env, true));
   set(env, result, "killOnOwnerClose", boolean(env, true));
+  set(env, result, "protocolStdin", boolean(env, true));
+  set(env, result, "jobMemoryLimit", boolean(env, true));
   return result;
 }
 

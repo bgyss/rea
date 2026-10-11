@@ -37,6 +37,7 @@ const inspection = (
 ): GhidraInstallationInspection =>
   inspectGhidraInstallation(
     {
+      environment: {},
       platform: options.platform ?? "linux",
       architecture: options.architecture ?? "x64",
       ...(options.installDir === undefined
@@ -53,7 +54,6 @@ const doctorHost = (
   createDoctorHostFixture({
     platform: "linux",
     architecture: "x64",
-    nodeVersion: "24.18.0",
     macosVersion: () => Promise.resolve(undefined),
     linuxDistribution: () =>
       Promise.resolve({
@@ -138,7 +138,7 @@ describe("Ghidra doctor integration", () => {
     ],
     [
       "unsupported architecture",
-      inspection({ installDir: INSTALL, architecture: "arm64" }),
+      inspection({ installDir: INSTALL, architecture: "arm" }),
       "ghidra-architecture",
     ],
   ] as const)("distinguishes %s", async (_label, ghidra, checkName) => {

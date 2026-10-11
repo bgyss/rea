@@ -1,5 +1,5 @@
 import type { JsonValue } from "../jsonValue.js";
-import { digestProcessCommitment } from "./processCapture.js";
+import { digestProcessCommitment } from "./processScenario.js";
 
 const normalization = {
   paths: true,
@@ -54,14 +54,86 @@ export const EMPTY_PROCESS_CAPTURE_EXAMPLE = {
       truncated: false,
     },
   ],
+  event_journal: [],
   files_before: [],
   files_after: [],
   filesystem_effects: [],
   truncated: false,
+  truncation_details: {
+    raw_terminal: {
+      budget_bytes: 1_000_000,
+      observed_bytes: 0,
+      retained_bytes: 0,
+      observed_frames: 0,
+      retained_frames: 0,
+    },
+    rendered_terminal: {
+      budget_bytes: 1_000_000,
+      observed_bytes: 0,
+      retained_bytes: 0,
+      observed_frames: 0,
+      retained_frames: 0,
+    },
+    filesystem_before: {
+      files_limit: 10_000,
+      depth_limit: 16,
+      enumeration_truncated: false,
+      enumeration_reasons: [],
+      hash_budget_bytes: 10_000_000,
+      hashed_bytes: 0,
+      hash_omissions: [],
+    },
+    filesystem_after: {
+      files_limit: 10_000,
+      depth_limit: 16,
+      enumeration_truncated: false,
+      enumeration_reasons: [],
+      hash_budget_bytes: 10_000_000,
+      hashed_bytes: 0,
+      hash_omissions: [],
+    },
+    process: {
+      sample_limit: 1_000,
+      sampling_partial: false,
+      retained_samples: 0,
+      sample_limit_reached: false,
+      sampling_failures: 0,
+      first_sampling_failure: null,
+      coverage: "sampled",
+    },
+  },
   limitations: [],
   residual_unknowns: [],
   cleanup: {
     owned_process_group: "verified",
     temporary_root: "removed",
+  },
+} satisfies JsonValue;
+
+const finalizedScenario = { ...scenario, finalization_ms: 1_500 };
+const finalizedComparisonContract = { finalization_ms: 1_500 };
+
+/** Valid capture of a timeout that finalized: SIGTERM delivered, exit observed. */
+export const FINALIZED_PROCESS_CAPTURE_EXAMPLE = {
+  ...EMPTY_PROCESS_CAPTURE_EXAMPLE,
+  manifest: {
+    ...EMPTY_PROCESS_CAPTURE_EXAMPLE.manifest,
+    scenario: finalizedScenario,
+    comparison_contract: finalizedComparisonContract,
+    full_scenario_sha256: digestProcessCommitment(finalizedScenario),
+    comparison_contract_sha256: digestProcessCommitment(
+      finalizedComparisonContract,
+    ),
+  },
+  exit: {
+    code: null,
+    signal: 0,
+    reason: "timeout",
+    finalization: {
+      requested_ms: 1_500,
+      elapsed_ms: 12,
+      exit_code: 0,
+      signals: [{ signal: "SIGTERM", sent_at_ms: 0, delivery: "signaled" }],
+    },
   },
 } satisfies JsonValue;

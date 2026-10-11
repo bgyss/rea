@@ -4,7 +4,7 @@ import { dirname, join, relative, sep } from "node:path";
 
 import { expect, it } from "vitest";
 
-import { reconstructJavaScriptArtifact } from "../../../src/application/javascript/JavaScriptArtifactReconstruction.js";
+import { reconstructJavaScriptArtifact } from "../../support/javascriptApplicationScope.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 
 const cases: readonly {
@@ -54,6 +54,24 @@ const cases: readonly {
     html: '<script src="./app.js?cache=1#v2"></script>',
     files: { "app.js": "globalThis.owned = true;" },
     expected: ["app.js"],
+  },
+  {
+    name: "percent-encoded script letters",
+    html: '<script src="%61pp.js"></script>',
+    files: { "app.js": "globalThis.owned = true;" },
+    expected: ["app.js"],
+  },
+  {
+    name: "script URL surrounded by whitespace",
+    html: '<script src=" app.js "></script>',
+    files: { "app.js": "globalThis.owned = true;" },
+    expected: ["app.js"],
+  },
+  {
+    name: "percent-encoded base directory",
+    html: '<base href="%61ssets/"><script src="app.js"></script>',
+    files: { "assets/app.js": "globalThis.owned = true;" },
+    expected: ["assets/app.js"],
   },
 ];
 

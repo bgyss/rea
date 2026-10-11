@@ -178,9 +178,9 @@ try {
   const reply = await call("match_native_function_signatures", {
     databases: [{ path: database, sha256: pinned }],
   });
-  const evidence = parseEvidence(reply.evidence);
+  const { result: _unused, ...envelope } = reply;
+  const evidence = parseEvidence(envelope);
   assert.equal(evidence.operation, "match_native_function_signatures");
-  assert.deepEqual(evidence.normalized_result, reply.result);
   const result = reply.result;
 
   assert.equal(result.databases.length, 1);
@@ -239,7 +239,7 @@ try {
     { timeout: 240000 },
   );
   assert.equal(refused.isError, true);
-  assert.match(JSON.stringify(refused.structuredContent), new RegExp(pinned));
+  assert.match(JSON.stringify(refused.content), new RegExp(pinned));
 
   // The CLI reports the same matches the MCP tool returned.
   await call("close_binary");
@@ -282,13 +282,19 @@ process.stdout.write(
 async function compile(args) {
   await promisify(execFile)(compiler, args, { cwd: workspace });
 }
+/** Evidence carries its operation result as normalized_result. */
+function withResult(content) {
+  return "normalized_result" in content
+    ? { ...content, result: content.normalized_result }
+    : content;
+}
 async function call(name, args = {}) {
   const value = await client.callTool(
     { name, arguments: args },
     { timeout: 240000 },
   );
   assert.notEqual(value.isError, true, JSON.stringify(value));
-  return value.structuredContent;
+  return withResult(value.structuredContent);
 }
 async function cliEvidence(path, database, sha256) {
   const { stdout } = await promisify(execFile)(

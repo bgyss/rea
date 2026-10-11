@@ -218,18 +218,12 @@ export const compareManagedMembers = (
   left: ManagedMemberComparisonSide,
   right: ManagedMemberComparisonSide,
 ): ManagedMemberComparisonResult => {
-  const leftCoverage = {
-    sourceComplete: left.result.coverage.state === "complete",
-  };
-  const rightCoverage = {
-    sourceComplete: right.result.coverage.state === "complete",
-  };
   const { methodMatches, fieldMatches } = keyMembers(left, right);
   const itemContext = {
     leftEvidenceId: left.evidenceId,
     rightEvidenceId: right.evidenceId,
-    leftComplete: leftCoverage.sourceComplete,
-    rightComplete: rightCoverage.sourceComplete,
+    leftComplete: left.result.metadata.status === "complete",
+    rightComplete: right.result.metadata.status === "complete",
   };
   const methodItems = buildMethodItems(methodMatches, itemContext);
   const fieldItems = buildFieldItems(fieldMatches, itemContext);
@@ -265,5 +259,3 @@ export const compareManagedMembers = (
   } satisfies ManagedMemberComparisonResult;
   return managedMemberComparisonResultSchema.parse(result);
 };
-
-export { parseManagedMemberEvidence } from "./managedMemberComparisonMatch.js";

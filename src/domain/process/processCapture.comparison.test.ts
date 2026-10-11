@@ -1,13 +1,47 @@
 import { expect, it } from "vitest";
 
 import {
+  accountFullyObservedProcessCapture,
   compareUnverifiedProcessCaptures as compareProcessCaptures,
   emptyProcessCapture as emptyCapture,
 } from "./processCapture.fixture.js";
 
+const compareFullyObserved = (
+  left: Parameters<typeof compareProcessCaptures>[0],
+  right: Parameters<typeof compareProcessCaptures>[1],
+  options?: Parameters<typeof compareProcessCaptures>[2],
+) =>
+  compareProcessCaptures(
+    accountFullyObservedProcessCapture(left),
+    accountFullyObservedProcessCapture(right),
+    options,
+  );
+
+it("compares normalized terminal facts while retaining different source text for audit", () => {
+  const capture = emptyCapture();
+  const frame = { sequence: 0, at_ms: 0, data: "listen:<port> score=20" };
+  const left = {
+    ...capture,
+    frames: [{ ...frame, raw_data: "listen:8080 score=20" }],
+  };
+  const right = {
+    ...capture,
+    frames: [{ ...frame, raw_data: "listen:9090 score=20" }],
+  };
+  expect(compareFullyObserved(left, right)).toMatchObject({
+    terminal: "unchanged",
+  });
+  expect(
+    compareFullyObserved(left, {
+      ...right,
+      frames: [{ ...frame, data: "listen:<port> score=21" }],
+    }),
+  ).toMatchObject({ terminal: "changed" });
+});
+
 it("distinguishes added evidence from unknown observations", () => {
   const capture = emptyCapture();
-  const added = compareProcessCaptures(capture, {
+  const added = compareFullyObserved(capture, {
     ...capture,
     frames: [{ sequence: 0, at_ms: 0, data: "new" }],
     rendered_frames: [
@@ -31,7 +65,7 @@ it("distinguishes added evidence from unknown observations", () => {
     ["interaction", "interaction"],
   ] as const) {
     expect(
-      compareProcessCaptures(
+      compareFullyObserved(
         {
           ...capture,
           residual_unknowns: [{ scope, reason: "observation was partial" }],
@@ -49,7 +83,7 @@ it("distinguishes added evidence from unknown observations", () => {
 it("compares raw terminal and process observations while honoring normalization shape", () => {
   const capture = emptyCapture();
   expect(
-    compareProcessCaptures(capture, {
+    compareFullyObserved(capture, {
       ...capture,
       normalization: {
         patterns: [],
@@ -64,7 +98,7 @@ it("compares raw terminal and process observations while honoring normalization 
     first_divergence: { status: "none" },
   });
 
-  const terminal = compareProcessCaptures(
+  const terminal = compareFullyObserved(
     { ...capture, frames: [{ sequence: 0, at_ms: 0, data: "bar" }] },
     { ...capture, frames: [{ sequence: 0, at_ms: 0, data: "foo\rbar" }] },
   );
@@ -74,7 +108,7 @@ it("compares raw terminal and process observations while honoring normalization 
   });
 
   expect(
-    compareProcessCaptures(
+    compareFullyObserved(
       {
         ...capture,
         process_samples: [
@@ -113,7 +147,7 @@ it("keeps filesystem comparison unknown without coverage and reports observed ch
       { scope: "filesystem" as const, reason: "watcher unavailable" },
     ],
   };
-  expect(compareProcessCaptures(incomplete, incomplete)).toMatchObject({
+  expect(compareFullyObserved(incomplete, incomplete)).toMatchObject({
     filesystem: "unknown",
     status: "unknown",
   });
@@ -127,7 +161,7 @@ it("keeps filesystem comparison unknown without coverage and reports observed ch
     symlink_target: null,
   };
   expect(
-    compareProcessCaptures(capture, {
+    compareFullyObserved(capture, {
       ...capture,
       filesystem_checkpoints: [
         { name: "before", at_ms: 0, files: [], effects: [], truncated: false },

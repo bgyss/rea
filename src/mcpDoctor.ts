@@ -1,16 +1,53 @@
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
-import { Formatter } from "incur";
+import { Formatter, Help, z } from "incur";
 import { resolve } from "node:path";
 
 import { CATALOG_IDENTITY } from "./catalogIdentity.js";
 import { PROMPT_CONTRACTS } from "./contracts/promptContracts.js";
 import { TOOL_CONTRACTS } from "./contracts/toolContracts.js";
+import { err, ok } from "./domain/result.js";
 import { PRODUCT_IDENTITY } from "./identity.js";
 import { MCP_STARTUP_POLICY } from "./mcpStartupPolicy.js";
 
 const OUTPUT_FORMATS = ["toon", "json", "yaml", "md", "jsonl"] as const;
 type OutputFormat = (typeof OUTPUT_FORMATS)[number];
+
+/**
+ * Canonical `rea mcp doctor` options. This schema is the single source of
+ * truth: the argument parser accepts exactly these options (plus the `-h`
+ * alias below) and the help renderer lists them. Keep them in sync by
+ * changing this schema, not either consumer.
+ */
+const MCP_DOCTOR_OPTIONS = z.object({
+  format: z.enum(OUTPUT_FORMATS).optional().describe("Output format"),
+  json: z.boolean().optional().describe("Emit the report as JSON"),
+  fullOutput: z.boolean().optional().describe("Show the full output envelope"),
+  help: z.boolean().optional().describe("Show help"),
+});
+
+const MCP_DOCTOR_ALIAS = { help: "h" } as const;
+
+const MCP_DOCTOR_COMMAND = "rea mcp doctor";
+const MCP_DOCTOR_DESCRIPTION = "Validate MCP server startup and tool listing";
+
+/** Help flags derived from `MCP_DOCTOR_OPTIONS` plus its alias. */
+const HELP_FLAGS: ReadonlySet<string> = new Set(["--help", "-h"]);
+
+/**
+ * Answer an advertised help request without starting a diagnostic session.
+ * Global options are hidden because this dispatcher entry accepts only the
+ * options above; the hint says so explicitly instead of implying full
+ * Incur parity.
+ */
+const renderMcpDoctorHelp = (): string =>
+  Help.formatCommand(MCP_DOCTOR_COMMAND, {
+    description: MCP_DOCTOR_DESCRIPTION,
+    hideGlobalOptions: true,
+    options: MCP_DOCTOR_OPTIONS,
+    alias: MCP_DOCTOR_ALIAS,
+    hint: "This entry accepts only the options above.",
+  });
 
 interface McpDoctorOptions {
   readonly command: string;
@@ -95,11 +132,22 @@ const inspectProductionMcpSession = async (
   signal: AbortSignal,
 ) => {
   const request = requestOptions(deadline, signal);
-  const [tools, prompts, requestFlow] = await Promise.all([
+  const [tools, prompts] = await Promise.all([
     client.listTools(undefined, request),
     client.listPrompts(undefined, request),
-    client.callTool({ name: "binary_session", arguments: {} }, request),
   ]);
+  const sessionTool = tools.tools.find(({ name }) => name === "binary_session");
+  const requestFlow = await client
+    .callTool(
+      { name: "binary_session", arguments: {} },
+      {
+        ...requestOptions(deadline, signal),
+        ...(sessionTool === undefined ? {} : { toolDefinition: sessionTool }),
+      },
+    )
+    .then(ok, (cause: unknown) =>
+      err({ kind: "request-flow" as const, detail: errorMessage(cause) }),
+    );
   const inventory = {
     tools: compareInventory(
       TOOL_CONTRACTS.map(({ name }) => name),
@@ -111,7 +159,7 @@ const inspectProductionMcpSession = async (
     ),
   };
   const observedIdentity = parseIdentityToolResult(
-    requestFlow.structuredContent,
+    requestFlow.ok ? requestFlow.value.structuredContent : undefined,
   );
   const serverVersion = client.getServerVersion();
   const protocolVersion = client.getNegotiatedProtocolVersion();
@@ -137,8 +185,10 @@ const inspectProductionMcpSession = async (
     },
     {
       name: "request-flow",
-      ok: requestFlow.isError !== true,
-      detail: "binary_session target-free request",
+      ok: requestFlow.ok && requestFlow.value.isError !== true,
+      detail: requestFlow.ok
+        ? "binary_session target-free request"
+        : requestFlow.error.detail,
     },
   ];
   return {
@@ -158,7 +208,7 @@ const inspectProductionMcpSession = async (
     },
     request_flow: {
       tool: "binary_session",
-      ok: requestFlow.isError !== true,
+      ok: requestFlow.ok && requestFlow.value.isError !== true,
     },
     checks,
   };
@@ -173,7 +223,9 @@ export const runProductionMcpDoctorCli = async (
   input: { readonly dispatcherPath: string; readonly packageRoot: string },
 ): Promise<{ readonly output: string; readonly exitCode: number }> => {
   const parsed = parseOutputArguments(arguments_);
-  if (!parsed.ok)
+  if (!parsed.ok) {
+    if (parsed.help)
+      return { output: `${renderMcpDoctorHelp()}\n`, exitCode: 0 };
     return {
       output: `${Formatter.format(
         { code: "VALIDATION_ERROR", message: parsed.message },
@@ -181,6 +233,7 @@ export const runProductionMcpDoctorCli = async (
       )}\n`,
       exitCode: 1,
     };
+  }
   const result = await runProductionMcpDoctor({
     command: process.execPath,
     args: [resolve(input.dispatcherPath), "mcp"],
@@ -252,15 +305,29 @@ const parseIdentityToolResult = (
   };
 };
 
-const parseOutputArguments = (
-  arguments_: readonly string[],
-):
+/**
+ * Parsed `rea mcp doctor` arguments, including a help request. The `help`
+ * variant is the only success-independent early return; every other accepted
+ * flag is an output selector declared in `MCP_DOCTOR_OPTIONS`.
+ */
+type McpDoctorArguments =
   | { readonly ok: true; readonly format: OutputFormat }
+  | { readonly ok: false; readonly help: true }
   | {
       readonly ok: false;
+      readonly help: false;
       readonly format: OutputFormat;
       readonly message: string;
-    } => {
+    };
+
+const parseOutputArguments = (
+  arguments_: readonly string[],
+): McpDoctorArguments => {
+  // Help wins over output selection and validation errors, but only when it
+  // appears in option position. A token consumed as `--format`'s value is
+  // not a flag, so `--format --help` reports an invalid format instead of
+  // masking the typo with usage.
+  if (hasHelpInOptionPosition(arguments_)) return { ok: false, help: true };
   let format: OutputFormat = "toon";
   for (let index = 0; index < arguments_.length; index += 1) {
     const argument = arguments_[index];
@@ -277,6 +344,7 @@ const parseOutputArguments = (
       if (!isOutputFormat(candidate))
         return {
           ok: false,
+          help: false,
           format,
           message: `Invalid output format: ${candidate ?? "missing"}`,
         };
@@ -284,13 +352,32 @@ const parseOutputArguments = (
       continue;
     }
     if (argument === "--full-output") continue;
+    if (HELP_FLAGS.has(argument ?? "")) return { ok: false, help: true };
     return {
       ok: false,
+      help: false,
       format,
       message: `Unknown mcp doctor option: ${argument ?? "missing"}`,
     };
   }
   return { ok: true, format };
+};
+
+/**
+ * Report whether `--help`/`-h` appears in option position. Tokens consumed
+ * as `--format`'s value are skipped so `--format --help` stays an invalid
+ * format error instead of silently becoming a help request.
+ */
+const hasHelpInOptionPosition = (arguments_: readonly string[]): boolean => {
+  for (let index = 0; index < arguments_.length; index += 1) {
+    const argument = arguments_[index];
+    if (argument === "--format") {
+      index += 1;
+      continue;
+    }
+    if (HELP_FLAGS.has(argument ?? "")) return true;
+  }
+  return false;
 };
 
 const isOutputFormat = (value: string | undefined): value is OutputFormat =>

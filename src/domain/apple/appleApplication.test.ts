@@ -3,7 +3,8 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import { projectAppleApplication } from "./appleApplication.js";
-import { canonicalDigest } from "../comparisonSemantics.js";
+import { compareUnicodeCodePoints } from "../unicodeCodePointOrder.js";
+import { digestCanonicalValue } from "../canonicalDigest.js";
 import { createEvidence, type Evidence } from "../evidence.js";
 import { jsonValueSchema } from "../jsonValue.js";
 
@@ -19,7 +20,7 @@ interface FixtureEntry {
 const sha = (text: string): string =>
   createHash("sha256").update(text).digest("hex");
 const artifactId = (sha256: string): string =>
-  `art_${canonicalDigest({ sha256 }, "Artifact inventory")}`;
+  `art_${digestCanonicalValue({ sha256 }, "Artifact inventory")}`;
 
 /** Build one complete, content-addressed inventory page for pure projection tests. */
 const inventoryEvidence = (
@@ -31,21 +32,33 @@ const inventoryEvidence = (
   const rootId = artifactId(rootSha);
   const node = (sha256: string, format: string) => ({
     artifact_id: artifactId(sha256),
-    kind: "resource",
-    format,
+    format: [
+      "directory",
+      "mach-o",
+      "mach-o-universal",
+      "elf",
+      "pe",
+      "plist",
+    ].includes(format)
+      ? format
+      : "file",
     sha256,
     size: 1,
     media_type: null,
     architecture: null,
-    executable: false,
     content_state: "materialized",
     limitations: [],
   });
-  const occurrence = (path: string, kind: EntryKind, id: string | null) => ({
+  const occurrence = (
+    path: string,
+    kind: EntryKind,
+    id: string | null,
+    format = "file",
+  ) => ({
     occurrence_id:
       path === "."
-        ? `occ_${canonicalDigest({ root: rootId }, "Artifact inventory")}`
-        : `occ_${canonicalDigest(
+        ? `occ_${digestCanonicalValue({ root: rootId }, "Artifact inventory")}`
+        : `occ_${digestCanonicalValue(
             { root_artifact_id: rootId, logical_path: path, entry_kind: kind },
             "Artifact inventory",
           )}`,
@@ -53,6 +66,8 @@ const inventoryEvidence = (
     parent_occurrence_id: null,
     logical_path: path,
     entry_kind: kind,
+    artifact_kind: "resource",
+    artifact_format: format,
     declared_size: null,
     compressed_size: null,
     executable: false,
@@ -62,7 +77,7 @@ const inventoryEvidence = (
     limitations: [],
   });
   const nodes = new Map([[rootId, node(rootSha, rootFormat)]]);
-  const occurrences = [occurrence(".", "file", rootId)];
+  const occurrences = [occurrence(".", "file", rootId, rootFormat)];
   for (const { path, kind = "file", format = "file" } of entries) {
     if (kind === "symlink") {
       occurrences.push(occurrence(path, kind, null));
@@ -74,15 +89,17 @@ const inventoryEvidence = (
       id,
       node(contentSha, kind === "directory" ? "directory" : format),
     );
-    occurrences.push(occurrence(path, kind, id));
+    occurrences.push(
+      occurrence(path, kind, id, kind === "directory" ? "directory" : format),
+    );
   }
   const sortedNodes = [...nodes.values()].sort((left, right) =>
     left.artifact_id.localeCompare(right.artifact_id),
   );
   const sortedOccurrences = occurrences.sort((left, right) =>
-    left.logical_path.localeCompare(right.logical_path, "en"),
+    compareUnicodeCodePoints(left.logical_path, right.logical_path),
   );
-  const graphSha256 = canonicalDigest(
+  const graphSha256 = digestCanonicalValue(
     {
       nodes: sortedNodes,
       occurrences: sortedOccurrences,
@@ -105,7 +122,7 @@ const inventoryEvidence = (
       authority: "shipped-artifact",
       result: jsonValueSchema.parse({
         manifest: {
-          manifest_id: `agm_${canonicalDigest(
+          manifest_id: `agm_${digestCanonicalValue(
             { root_artifact_id: rootId, graph_sha256: graphSha256 },
             "Artifact inventory",
           )}`,
@@ -553,5 +570,82 @@ describe("Apple application bridge candidates", () => {
     expect(result.bridge_candidate_coverage).toMatchObject({
       status: "complete",
     });
+  });
+});
+
+describe("Apple path conventions", () => {
+  it("recognizes anatomy names by English case and reports the archive spelling", () => {
+    const result = project(
+      inventoryEvidence("directory", "Fixture.app", [
+        { path: "contents/info.plist" },
+        macho("contents/macos/Fixture"),
+        { path: "contents/_codesignature/coderesources" },
+      ]),
+    );
+    expect(result.bundles[0]).toMatchObject({
+      layout: "macos-deep",
+      info_plist_path: "contents/info.plist",
+      executable_candidates: ["contents/macos/Fixture"],
+      signing_paths: ["contents/_codesignature/coderesources"],
+    });
+    expect(result.components.bundle_metadata.map(({ path }) => path)).toEqual([
+      "contents/info.plist",
+    ]);
+    expect(result.components.signing.map(({ path }) => path)).toEqual([
+      "contents/_codesignature/coderesources",
+    ]);
+  });
+
+  it("limits runtime families and bridge bases to path segments", () => {
+    const result = project(
+      inventoryEvidence("ipa", "Fixture.ipa", [
+        { path: "Payload/Fixture.app/Info.plist" },
+        macho("Payload/Fixture.app/Fixture"),
+        macho("Payload/Fixture.app/Frameworks/libfoo.dylib"),
+        macho("SwiftSupport/libswiftCore.dylib"),
+        macho("Payload/Fixture.app/Frameworks/MyApp.framework/MyApp"),
+        macho("Payload/Fixture.app/community/libcommunity.so"),
+        {
+          path: "Payload/Fixture.app/main.js",
+          format: "javascript-bundle",
+        },
+      ]),
+    );
+    expect(result.runtime_families).toEqual(
+      expect.arrayContaining(["javascript", "native", "swift-objective-c"]),
+    );
+    expect(result.runtime_families).not.toContain("flutter");
+    expect(result.runtime_families).not.toContain("unity");
+    expect(result.runtime_families).not.toContain("react-native");
+    expect(
+      result.bridge_candidates.every(
+        ({ basis }) => basis === "javascript-and-native-content",
+      ),
+    ).toBe(true);
+    expect(result.limitations).toEqual(
+      expect.arrayContaining([
+        "Runtime families are inferred from inventory formats and bounded framework path conventions, not observed runtime loading.",
+        "A bridge basis is inferred from the native path and is repeated for every managed component.",
+      ]),
+    );
+  });
+
+  it("recognizes framework segments and does not treat a bare dylib as Swift", () => {
+    const result = project(
+      inventoryEvidence("ipa", "Fixture.ipa", [
+        { path: "Payload/Fixture.app/Info.plist" },
+        macho("Payload/Fixture.app/Fixture"),
+        macho("Payload/Fixture.app/Frameworks/Flutter.framework/Flutter"),
+        macho(
+          "Payload/Fixture.app/Frameworks/UnityFramework.framework/UnityFramework",
+        ),
+        macho("Payload/Fixture.app/Frameworks/hermes.framework/hermes"),
+        macho("Payload/Fixture.app/Frameworks/libfoo.dylib"),
+      ]),
+    );
+    expect(result.runtime_families).toEqual(
+      expect.arrayContaining(["flutter", "unity", "react-native", "native"]),
+    );
+    expect(result.runtime_families).not.toContain("swift-objective-c");
   });
 });

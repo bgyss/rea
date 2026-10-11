@@ -2,10 +2,17 @@ import { parse } from "@babel/parser";
 import * as t from "@babel/types";
 
 import { sanitizeEndpointCandidate } from "./browserObservation.js";
-import type { WebPageInspection } from "./browserObservation.js";
+import { compositeKey } from "./unicodeCodePointOrder.js";
+import type { WebPageInspection } from "./browserObservationSchemas.js";
 import type { WebBundleAnalysis } from "./webBundleAnalysis.js";
-import { traverseJavaScriptAst } from "./javascript/javascriptSemanticTraversal.js";
-import { classifyParsedJavaScriptOpenReceivers } from "./javascript/javascriptSemanticAnalysis.js";
+import {
+  completeSemanticSteps,
+  traverseJavaScriptAst,
+} from "./javascript/javascriptSemanticTraversal.js";
+import {
+  classifyParsedJavaScriptOpenReceivers,
+  classifyParsedJavaScriptRpcClientRootsSteps,
+} from "./javascript/javascriptSemanticAnalysis.js";
 import type { JavaScriptOpenReceiverFact } from "./javascript/javascriptSemanticAnalysis.js";
 import { semanticStaticPropertyName } from "./javascript/javascriptAstValues.js";
 import {
@@ -21,6 +28,7 @@ import {
   resolveSpecifier,
   isUrlLikeModuleSpecifier,
 } from "./webBundleAnalyzerAst.js";
+import { createJavaScriptRpcScan } from "./javascript/javascriptRpcEndpoints.js";
 
 type BundleObservations = WebBundleAnalysis["observations"];
 type ChunkEdge = BundleObservations["chunks"]["edges"][number];
@@ -65,10 +73,24 @@ export const analyzeScript = (
   accumulator.parsedScripts += 1;
   detectVendorFingerprints(script, accumulator);
   const openReceiverFacts = classifyParsedJavaScriptOpenReceivers(file);
+  const rpc = createJavaScriptRpcScan(
+    script.source.artifact.text,
+    completeSemanticSteps(classifyParsedJavaScriptRpcClientRootsSteps(file)),
+  );
   traverseJavaScriptAst(file, {
     enter: (node) => {
       accumulator.visitedNodes += 1;
       inspectNode(script, node, accumulator, openReceiverFacts);
+      const endpoint = rpc.inspect(node);
+      if (endpoint !== undefined)
+        addFinding({
+          collection: accumulator.endpoints,
+          script,
+          rawValue: endpoint.value,
+          mechanism: endpoint.mechanism,
+          node,
+          accumulator,
+        });
     },
   });
 };
@@ -271,7 +293,14 @@ const addWebMcpDeclaration = (
           : [],
       )
     : [];
-  const key = `webmcp\0${script.script_key}\0${name ?? ""}\0${schemaPropertyNames.join("\0")}`;
+  // Property names are a variable-length source-derived list: NUL-joins
+  // would collapse ["a\0b"] with ["a", "b"] and drop a declaration.
+  const key = compositeKey([
+    "webmcp",
+    script.script_key,
+    name ?? "",
+    schemaPropertyNames,
+  ]);
   addUnique(accumulator, key, () =>
     accumulator.webMcp.push({
       name: name ?? null,

@@ -1,4 +1,4 @@
-import { canonicalDigest } from "../domain/comparisonSemantics.js";
+import { digestCanonicalValue } from "../domain/canonicalDigest.js";
 import type { ProgressReporter } from "../application/ProgressReporter.js";
 import type {
   ElectronPageInspection,
@@ -24,6 +24,7 @@ import {
 import { captureElectronScripts } from "./CdpElectronScripts.js";
 import { captureElectronWorkers } from "./CdpElectronWorkers.js";
 import { authorizedElectronFile } from "./ElectronFileScope.js";
+import { compareUnicodeCodePoints } from "../domain/unicodeCodePointOrder.js";
 
 interface ElectronContext {
   readonly connection: CdpConnection;
@@ -289,7 +290,7 @@ const captureResources = async (
             ? null
             : Math.max(0, numberValue(resource.contentSize) ?? 0),
       };
-      const resourceKey = `electron_resource_${canonicalDigest(item, "CDP capture")}`;
+      const resourceKey = `electron_resource_${digestCanonicalValue(item, "CDP capture")}`;
       if (seen.has(resourceKey)) continue;
       seen.add(resourceKey);
       resources.push({
@@ -300,7 +301,7 @@ const captureResources = async (
     pending.push(...recordsValue(tree.childFrames));
   }
   return resources.sort((left, right) =>
-    left.resource_key.localeCompare(right.resource_key),
+    compareUnicodeCodePoints(left.resource_key, right.resource_key),
   );
 };
 

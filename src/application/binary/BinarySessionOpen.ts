@@ -1,4 +1,5 @@
 import type { ExecutableFormatHint } from "../../domain/dosCom.js";
+import type { BinaryArchitecture } from "../../domain/binaryTargetTypes.js";
 import type { AnalysisProviderSelector } from "../../contracts/providerSelection.js";
 import type { AnalysisProfileCommitment } from "../../domain/analysisProfile.js";
 import {
@@ -8,12 +9,12 @@ import {
 } from "../../domain/analysisSnapshot.js";
 import type { AnalysisSnapshot } from "../../domain/analysisSnapshot.js";
 import { parseBinaryTarget } from "../BinaryTargetResolver.js";
-import { type BinaryTarget } from "../../domain/binaryTarget.js";
+import type { BinaryTarget } from "../../domain/binaryTargetTypes.js";
 import {
   EvidenceIntegrityError,
   AnalysisSnapshotMismatchError,
 } from "../../domain/evidenceErrors.js";
-import { type AnalysisError } from "../../domain/analysisErrorBase.js";
+import type { AnalysisError } from "../../domain/analysisErrorBase.js";
 import { err, type Result } from "../../domain/result.js";
 import type { SessionProviderRoute } from "./SessionProviderRouter.js";
 import { SessionProviderRouter } from "./SessionProviderRouter.js";
@@ -22,6 +23,8 @@ export interface BinarySessionOpenOptions {
   readonly signal?: AbortSignal;
   readonly targetKind?: BinaryTarget["kind"];
   readonly formatHint?: ExecutableFormatHint;
+  readonly architecture?: BinaryArchitecture;
+  readonly entryPoint?: string;
   readonly snapshot?: AnalysisSnapshot;
   readonly providerId?: AnalysisProviderSelector;
 }
@@ -65,13 +68,21 @@ export const resolveSessionOpen = async (
   input: ResolveSessionOpenInput,
 ): Promise<Result<ResolvedSessionOpen, AnalysisError>> => {
   const { path, options } = input;
-  const parsed = await parseBinaryTarget(
-    path,
-    process.cwd(),
-    process.arch,
-    options.targetKind,
-    options.formatHint,
-  );
+  const parsed = await parseBinaryTarget(path, {
+    ...(options.targetKind === undefined
+      ? {}
+      : { targetKind: options.targetKind }),
+    ...(options.formatHint === undefined
+      ? {}
+      : { formatHint: options.formatHint }),
+    ...(options.architecture === undefined
+      ? {}
+      : { architecture: options.architecture }),
+    ...(options.entryPoint === undefined
+      ? {}
+      : { entryPoint: options.entryPoint }),
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+  });
   if (!parsed.ok) return parsed;
   return resolveSessionTarget({ ...input, target: parsed.value });
 };

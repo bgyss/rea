@@ -149,11 +149,35 @@ describe("pointer fixup tables", () => {
     data.writeUInt16LE(99, 46);
     const fixups = parsePointerFixups(
       data,
-      { chained: { offset: 0, size: data.length }, binds: [], dylibs: [] },
+      {
+        chained: { offset: 0, size: data.length },
+        binds: [],
+        rebases: [],
+        dylibs: [],
+      },
       SEGMENTS,
       BASE,
     );
     expect(fixups.failures).toContain("Unsupported chained pointer format 99");
+  });
+
+  it("keeps unread LC_DYLD_INFO rebase bytes when chained fixups are present", () => {
+    const data = chainedData(1);
+    const fixups = parsePointerFixups(
+      data,
+      {
+        chained: { offset: 0, size: data.length },
+        binds: [],
+        rebases: [{ offset: 8, size: 12 }],
+        dylibs: [],
+      },
+      SEGMENTS,
+      BASE,
+    );
+    expect(fixups).toMatchObject({
+      kind: "chained",
+      unreadRebaseBytes: 12,
+    });
   });
 
   it("does not decode unreferenced imports while constructing fixup facts", () => {
@@ -164,7 +188,12 @@ describe("pointer fixup tables", () => {
     expect(() =>
       parsePointerFixups(
         data,
-        { chained: { offset: 0, size: data.length }, binds: [], dylibs: [] },
+        {
+          chained: { offset: 0, size: data.length },
+          binds: [],
+          rebases: [],
+          dylibs: [],
+        },
         SEGMENTS,
         BASE,
       ),
@@ -179,6 +208,7 @@ describe("pointer fixup tables", () => {
         {
           chained: { offset: 0, size: data.length },
           binds: [],
+          rebases: [],
           dylibs: ["/usr/lib/libobjc.A.dylib", "/usr/lib/libSystem.B.dylib"],
         },
         SEGMENTS,
@@ -241,6 +271,7 @@ describe("pointer fixup tables", () => {
           { offset: 0, size: opcodes.length, stream: "bind" },
           { offset: opcodes.length, size: lazy.length, stream: "lazy" },
         ],
+        rebases: [],
         dylibs: ["/usr/lib/libobjc.A.dylib", "/usr/lib/libSystem.B.dylib"],
       },
       SEGMENTS,
@@ -275,28 +306,27 @@ describe("Objective-C property attributes", () => {
     ).toEqual({
       name: "title",
       type_encoding: '@"NSString<NSCopying, NSSecureCoding>"',
+      atomicity: "nonatomic",
       attributes: [
-        expect.objectContaining({
-          name: "T",
-          value: '@"NSString<NSCopying, NSSecureCoding>"',
-        }),
-        expect.objectContaining({ name: "C", is_copy: true }),
-        expect.objectContaining({ name: "N" }),
-        expect.objectContaining({ name: "G", value: "customTitle" }),
-        expect.objectContaining({ name: "V", value: "_title" }),
+        { name: "T", value: '@"NSString<NSCopying, NSSecureCoding>"' },
+        { name: "C", value: "" },
+        { name: "N", value: "" },
+        { name: "G", value: "customTitle" },
+        { name: "V", value: "_title" },
       ],
       is_readonly: false,
       getter: "customTitle",
       setter: null,
     });
-    expect(parsePropertyAttributes("count", "Tq,R,N")).toMatchObject({
+    expect(parsePropertyAttributes("count", "Tq,R")).toMatchObject({
       type_encoding: "q",
       is_readonly: true,
+      atomicity: "atomic",
     });
-    expect(
-      parsePropertyAttributes("delegate", "T@,W,N,V_delegate").attributes[1],
-    ).toMatchObject({
-      is_weak: true,
-    });
+    expect(parsePropertyAttributes("count", "Tq,R,N").atomicity).toBe(
+      "nonatomic",
+    );
+    expect(parsePropertyAttributes("count", "").atomicity).toBeNull();
+    expect(parsePropertyAttributes("count", "R").atomicity).toBeNull();
   });
 });

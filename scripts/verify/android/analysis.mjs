@@ -7,11 +7,17 @@ import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { parseEvidence } from "../../../dist/domain/evidence.js";
-import { hashAndroidFile } from "../../../dist/android/AndroidTargetSnapshot.js";
+import { hashAndroidFile } from "./digest.mjs";
 import { JADX_RELEASE } from "../../../dist/android/JadxRelease.js";
 import fixture from "../../fixtures/android/apidemos.json" with { type: "json" };
 import { verifyAndroidCliCancellation } from "./cli-cancellation.mjs";
 import { verifyAndroidMetadata } from "./metadata.mjs";
+import { verifyAndroidFailureRecovery } from "./failure-recovery.mjs";
+import {
+  resolveJadxConfigurationInputs,
+  validateJadxConfiguration,
+} from "../../../dist/android/JadxConfiguration.js";
+import { verifyWindowsAndroidLifecycle } from "./windows-lifecycle.mjs";
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const apk = process.env.REA_ANDROID_TEST_APK;
@@ -32,10 +38,16 @@ assert.equal(
   JADX_RELEASE.sha256,
   "Real Android lane requires the audited headless JADX release JAR",
 );
-const java =
-  process.env.JAVA_HOME === undefined
-    ? "java"
-    : resolve(process.env.JAVA_HOME, "bin/java");
+const configuration = await resolveJadxConfigurationInputs(
+  process.env,
+  "inspect_android_package",
+);
+await validateJadxConfiguration(
+  configuration,
+  process.env,
+  "inspect_android_package",
+);
+const { java, jvmArguments } = configuration;
 const execute = promisify(execFile);
 await execute(java, ["-version"], { timeout: 10_000 });
 const entrypoint =
@@ -48,6 +60,9 @@ await verifyAndroidMetadata({
   apk: path,
   repository,
   execute,
+  jvmArguments,
+  entrypoint,
+  environment,
   bridge: resolve(dirname(entrypoint), "../bridge/android/ReaJadxBridge.java"),
 });
 const tasks = [
@@ -135,8 +150,8 @@ try {
     );
     assert.notEqual(response.isError, true, JSON.stringify(response));
     const structured = response.structuredContent;
-    assert.ok(structured !== undefined && structured.evidence !== undefined);
-    const evidence = parseEvidence(structured.evidence);
+    assert.ok(structured !== undefined);
+    const evidence = parseEvidence(structured);
     assert.deepEqual(
       evidence.normalized_result,
       cliResults.get(task.name).normalized_result,
@@ -155,7 +170,7 @@ try {
       cliResults.get(task.name).limitations,
     );
     assert.equal(evidence.confidence, cliResults.get(task.name).confidence);
-    assert.deepEqual(structured.result, evidence.normalized_result);
+    assert.deepEqual(structured.normalized_result, evidence.normalized_result);
     console.log(`PASS MCP/CLI parity ${task.name}`);
   }
 } catch (cause) {
@@ -199,12 +214,28 @@ assert.ok(
       reference.dex_offset === null && reference.source_line === null,
   ),
 );
-await verifyAndroidCliCancellation({
+const lifecycleOptions = {
   entrypoint,
   environment,
   path,
   repository,
   execute,
+};
+const windowsLifecycle =
+  process.platform === "win32"
+    ? await verifyWindowsAndroidLifecycle(lifecycleOptions)
+    : undefined;
+if (windowsLifecycle === undefined)
+  await verifyAndroidCliCancellation(lifecycleOptions);
+await verifyAndroidFailureRecovery({
+  java,
+  jvmArguments,
+  entrypoint,
+  environment,
+  path,
+  repository,
+  execute,
+  fixture,
 });
 assert.equal(
   await hashAndroidFile(apk),
@@ -220,7 +251,10 @@ const report = {
   cli_mcp_parity: true,
   original_apk_unchanged: true,
   apk_executed: false,
-  cli_sigterm_cleanup: true,
+  cli_sigterm_cleanup: process.platform !== "win32",
+  ...(windowsLifecycle === undefined
+    ? {}
+    : { windows_lifecycle: windowsLifecycle }),
   metadata_without_code_generation: true,
   stable_overload_selection: true,
 };

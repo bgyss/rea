@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import { describe, expect, it } from "vitest";
 import { observeNativeUi } from "./NativeUiObservation.js";
-import type { BinaryTarget } from "../domain/binaryTarget.js";
+import type { BinaryTarget } from "../domain/binaryTargetTypes.js";
 
 const target: BinaryTarget = {
   path: "/fixture/App",
@@ -70,6 +70,7 @@ describe("native UI screenshot validation", () => {
       "observe_native_ui",
       { ...scope, screenshot: true },
       {
+        environment: {},
         invoke: async () => ({
           ok: true,
           result: { ...snapshot, screenshot },
@@ -99,6 +100,7 @@ describe("native UI screenshot validation", () => {
         "observe_native_ui",
         { ...scope, screenshot: true },
         {
+          environment: {},
           invoke: async () => ({
             ok: true,
             result: { ...snapshot, screenshot },
@@ -123,6 +125,7 @@ describe("native UI screenshot validation", () => {
       "observe_native_ui",
       { ...scope, screenshot: true },
       {
+        environment: {},
         invoke: async () => ({
           ok: true,
           result: { ...snapshot, screenshot },
@@ -145,7 +148,7 @@ describe("native UI screenshot validation", () => {
       target,
       "observe_native_ui",
       { ...scope, accessibility: true },
-      { invoke: async () => ({ ok: true, result: partial }) },
+      { environment: {}, invoke: async () => ({ ok: true, result: partial }) },
     );
     expect(result.ok).toBe(true);
     if (result.ok)
@@ -168,7 +171,7 @@ describe("native UI capture selection and budgets", () => {
       target,
       "observe_native_ui",
       { pid: 123, window_id: 456, screenshot: false, accessibility: true },
-      { invoke },
+      { environment: {}, invoke },
     );
     expect(observed.ok).toBe(true);
     const captured = await observeNativeUi(
@@ -181,7 +184,7 @@ describe("native UI capture selection and budgets", () => {
         accessibility: true,
         steps: [{ kind: "click", path: [] }],
       },
-      { invoke },
+      { environment: {}, invoke },
     );
     expect(captured.ok).toBe(true);
     expect(calls).toBe(3);
@@ -204,6 +207,7 @@ describe("native UI capture selection and budgets", () => {
         steps,
       },
       {
+        environment: {},
         invoke: async (parameters) => {
           nodeLimits.push(parameters.max_nodes);
           return { ok: true, result: snapshot };
@@ -235,6 +239,7 @@ describe("native UI capture selection and budgets", () => {
         })),
       },
       {
+        environment: {},
         signal: controller.signal,
         invoke: async () => {
           controller.abort();
@@ -261,7 +266,10 @@ describe("native UI capture selection and budgets", () => {
         ...scope,
         steps: [{ kind: "wait", milliseconds: 0 }],
       },
-      { invoke: async () => ({ ok: true, result: largeSnapshot }) },
+      {
+        environment: {},
+        invoke: async () => ({ ok: true, result: largeSnapshot }),
+      },
     );
     expect(result.ok).toBe(true);
     if (result.ok)
@@ -279,6 +287,7 @@ describe("native UI target and cancellation failures", () => {
     "ambiguous-window",
   ])("preserves actionable %s without fallback", async (code) => {
     const result = await observeNativeUi(target, "observe_native_ui", scope, {
+      environment: {},
       invoke: async () => ({
         ok: false,
         code,
@@ -290,6 +299,7 @@ describe("native UI target and cancellation failures", () => {
   });
   it("preserves the underlying helper failure reason in diagnostics", async () => {
     const result = await observeNativeUi(target, "observe_native_ui", scope, {
+      environment: {},
       invoke: async () => {
         throw new Error(
           "Native helper returned invalid JSON: Unexpected token",
@@ -319,6 +329,7 @@ describe("native UI target and cancellation failures", () => {
         ],
       },
       {
+        environment: {},
         invoke: async (parameters) => {
           calls.push(parameters);
           return calls.length === 1
@@ -356,6 +367,7 @@ describe("native UI target and cancellation failures", () => {
         ],
       },
       {
+        environment: {},
         signal: controller.signal,
         invoke: async () => {
           calls++;
@@ -368,6 +380,7 @@ describe("native UI target and cancellation failures", () => {
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.value.steps[0]?.outcome).toBe("cancelled");
     const replaced = await observeNativeUi(target, "observe_native_ui", scope, {
+      environment: {},
       invoke: async () => ({
         ok: true,
         result: { ...snapshot, window: { ...snapshot.window, pid: 999 } },
@@ -411,6 +424,7 @@ const scenario = async (
     "capture_native_ui_scenario",
     { ...scope, accessibility, steps },
     {
+      environment: {},
       invoke: async (parameters) => {
         calls.push(parameters);
         return { ok: true, result: captured };
@@ -427,7 +441,10 @@ describe("native UI selectors and stable keys", () => {
         target,
         "observe_native_ui",
         { ...scope, accessibility: true },
-        { invoke: async () => ({ ok: true, result: tree(nodes) }) },
+        {
+          environment: {},
+          invoke: async () => ({ ok: true, result: tree(nodes) }),
+        },
       );
       if (!result.ok) throw result.error;
       return result.value.initial.nodes.map((captured) => captured.stable_key);
@@ -562,7 +579,7 @@ describe("native UI keys, conditions and checkpoints", () => {
       target,
       "capture_native_ui_scenario",
       { ...scope, accessibility: true, steps },
-      { invoke: helper.invoke },
+      { environment: {}, invoke: helper.invoke },
     );
 
   it("sends key chords with their modifiers and records a checkpoint label", async () => {
@@ -690,7 +707,7 @@ describe("native UI keys, conditions and checkpoints", () => {
       target,
       "capture_native_ui_scenario",
       { ...scope, accessibility: false, screenshot: true, steps },
-      { invoke: helper.invoke },
+      { environment: {}, invoke: helper.invoke },
     );
     expect(result.ok).toBe(false);
     expect(helper.calls).toHaveLength(0);
@@ -711,6 +728,7 @@ describe("native UI pointer requests", () => {
       "capture_native_ui_scenario",
       { ...scope, accessibility: true, steps },
       {
+        environment: {},
         invoke: async (parameters) => {
           calls.push(parameters);
           return { ok: true, result: pointerTree };

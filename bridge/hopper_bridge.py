@@ -9,7 +9,6 @@ import json
 import hmac
 import os
 import socket
-import struct
 from typing import Any, Optional, Protocol, Sequence
 
 BAD_ADDRESSES = (-1, 0xFFFFFFFFFFFFFFFF, None)
@@ -277,76 +276,6 @@ def _procedure(document, value=None):
     return result
 
 
-def _original_file_offset(document, offset):
-    """Translate Hopper's image-relative mapping using the observed loaded header."""
-    if offset > 9007199254740991:
-        raise CapabilityUnavailableError("Provider file offset exceeds the exact JSON integer range")
-    path = globals().get("REA_ORIGINAL_EXECUTABLE_PATH") or document.getExecutableFilePath()
-    if not path:
-        raise CapabilityUnavailableError("Hopper did not identify the original executable for file-offset verification")
-    try:
-        with open(path, "rb") as source:
-            size = os.fstat(source.fileno()).st_size
-            header = source.read(8)
-            formats = {
-                b"\xca\xfe\xba\xbe": (">", False),
-                b"\xbe\xba\xfe\xca": ("<", False),
-                b"\xca\xfe\xba\xbf": (">", True),
-                b"\xbf\xba\xfe\xca": ("<", True),
-            }
-            fat = formats.get(header[:4])
-            if fat is None:
-                if offset >= size:
-                    raise InvalidRequestError("Mapped offset is outside the original executable file at %s" % path)
-                return offset, path, 0
-            if len(header) != 8:
-                raise CapabilityUnavailableError("Original FAT executable has a truncated header at %s" % path)
-            byte_order, wide = fat
-            count = struct.unpack(byte_order + "I", header[4:])[0]
-            stride = 32 if wide else 20
-            table_end = 8 + count * stride
-            if count == 0 or table_end > size:
-                raise CapabilityUnavailableError("Original FAT executable has an invalid architecture table at %s" % path)
-            header_address = document.getAddressFromFileOffset(0)
-            reader = getattr(document, "readBytes", None)
-            if header_address in BAD_ADDRESSES or document.getSegmentAtAddress(header_address) is None or not callable(reader):
-                raise CapabilityUnavailableError("Hopper did not expose a readable loaded Mach-O header to identify its FAT slice")
-            loaded = reader(header_address, 12)
-            if not isinstance(loaded, (bytes, bytearray)) or len(loaded) != 12:
-                raise CapabilityUnavailableError("Hopper did not expose the loaded Mach-O header to identify its FAT slice")
-            loaded_order = {b"\xce\xfa\xed\xfe": "<", b"\xcf\xfa\xed\xfe": "<", b"\xfe\xed\xfa\xce": ">", b"\xfe\xed\xfa\xcf": ">"}.get(bytes(loaded[:4]))
-            if loaded_order is None:
-                raise CapabilityUnavailableError("Hopper's loaded header is not a supported Mach-O image")
-            identity = struct.unpack(loaded_order + "II", loaded[4:12])
-            selected = None
-            for index in range(count):
-                source.seek(8 + index * stride)
-                entry = source.read(stride)
-                if len(entry) != stride:
-                    raise CapabilityUnavailableError("Original FAT executable architecture table changed during verification")
-                cpu, subtype, start, length, alignment = struct.unpack(byte_order + ("IIQQI" if wide else "IIIII"), entry[:28] if wide else entry)
-                if length < 12 or start < table_end or start > size or length > size - start or alignment > 52 or start % (1 << alignment):
-                    raise CapabilityUnavailableError("Original FAT executable has an invalid slice range at index %s" % index)
-                if (cpu, subtype) != identity:
-                    continue
-                source.seek(start)
-                if source.read(12) != bytes(loaded):
-                    raise CapabilityUnavailableError("FAT slice declaration disagrees with Hopper's loaded header")
-                if selected is not None:
-                    raise CapabilityUnavailableError("Multiple FAT slices match Hopper's loaded header; original-file mapping is ambiguous")
-                selected = (start, length)
-            if selected is None:
-                raise CapabilityUnavailableError("No original FAT slice matches Hopper's loaded header")
-            start, length = selected
-            if offset >= length:
-                raise InvalidRequestError("Mapped offset is outside Hopper's loaded FAT slice")
-            if start + offset > 9007199254740991:
-                raise CapabilityUnavailableError("Original file offset exceeds the exact JSON integer range")
-            return start + offset, path, start
-    except OSError as error:
-        raise CapabilityUnavailableError("Cannot read the original executable for file-offset verification at %s: %s" % (path, error)) from error
-
-
 def _procedure_name(procedure):
     entry = procedure.getEntryPoint()
     return procedure.getSegment().getNameAtAddress(entry) or _hex(entry)
@@ -389,34 +318,54 @@ def _containing_procedure(document, address):
 
 def _basic_block_end(procedure, block):
     """Normalize native block endpoints to an exclusive byte address."""
+    owner_at = getattr(procedure, "getBasicBlockAtAddress", None)
+    if not callable(owner_at):
+        raise CapabilityUnavailableError(
+            "Instruction enumeration requires Hopper basic-block ownership"
+        )
     end = block.getEndingAddress()
     # Hopper 6.1 returns the final instruction address, despite the Python
     # documentation describing an exclusive end. Membership distinguishes
     # that representation from an actual exclusive endpoint in other builds.
-    if procedure.getBasicBlockAtAddress(end) == block:
+    if owner_at(end) == block:
         instruction = procedure.getSegment().getInstructionAtAddress(end)
         if instruction is not None and instruction.getInstructionLength() > 0:
             return end + instruction.getInstructionLength()
     return end
 
 
+def _block_instruction_addresses(procedure, block):
+    """Walk either endpoint convention using Hopper's block ownership API.
+
+    Some Hopper builds return the final instruction start, despite the public
+    API documenting an exclusive end. Equality compares fresh native wrappers;
+    probing ownership also keeps an exclusive endpoint in the next block out.
+    """
+    segment = procedure.getSegment()
+    address = block.getStartingAddress()
+    end = _basic_block_end(procedure, block)
+    while address < end:
+        if procedure.getBasicBlockAtAddress(address) != block:
+            break
+        instruction = segment.getInstructionAtAddress(address)
+        if instruction is None:
+            break
+        length = instruction.getInstructionLength()
+        if length <= 0 or address + length > end:
+            break
+        yield address
+        address += length
+
+
 def _instruction_addresses(procedure):
     result = []
     seen = set()
-    segment = procedure.getSegment()
     for block in procedure.basicBlockIterator():
-        address = block.getStartingAddress()
-        end = _basic_block_end(procedure, block)
-        while address < end and address not in seen:
+        for address in _block_instruction_addresses(procedure, block):
+            if address in seen:
+                continue
             seen.add(address)
-            instruction = segment.getInstructionAtAddress(address)
-            if instruction is None:
-                break
             result.append(address)
-            length = instruction.getInstructionLength()
-            if length <= 0:
-                break
-            address += length
     return result
 
 
@@ -604,7 +553,12 @@ def _search_results(document, kind, params):
         if not matches(item[1]):
             continue
         selected.append(item)
-    return [{"address": address, **_string_inventory(document)[address]} for address, _ in selected] if kind == "string" else [
+    if not selected:
+        return []
+    if kind == "string":
+        records = _string_inventory(document)
+        return [{"address": address, **records[address]} for address, _ in selected]
+    return [
             {
                 "address": address,
                 "value": value,
@@ -762,6 +716,8 @@ def _analyze_function(document, params):
         "referenced_strings": referenced_strings,
         "referenced_names": referenced_names,
         "basic_blocks": blocks,
+        "native_api": None,
+        "native_value_flow": None,
         "limitations": [
             "Native CallReference classifications are observed where available; detailed reference flags remain unknown.",
             "Hopper's public Python API does not expose equivalent external or thunk classification in this dossier.",
@@ -873,8 +829,17 @@ def _dispatch(method, params):
         # file header. An integer alone does not prove source-file provenance.
         if inverse(offset) != address:
             raise InvalidRequestError("Address has no authoritative file-offset mapping: reverse lookup disagrees at %s" % _hex(address))
-        original_offset, source_path, image_base = _original_file_offset(document, offset)
-        return {"address": _hex(address), "file_offset": original_offset, "provider_file_offset": offset, "image_base_file_offset": image_base, "source_path": source_path}
+        if offset > 9007199254740991:
+            raise CapabilityUnavailableError("Provider file offset exceeds the exact JSON integer range")
+        header_address = inverse(0)
+        reader = getattr(document, "readBytes", None)
+        header = reader(header_address, 12) if header_address not in BAD_ADDRESSES and document.getSegmentAtAddress(header_address) is not None and callable(reader) else None
+        return {
+            "address": _hex(address),
+            "provider_file_offset": offset,
+            "provider_source_path": document.getExecutableFilePath(),
+            "provider_image_header_hex": bytes(header).hex() if isinstance(header, (bytes, bytearray)) and len(header) == 12 else None,
+        }
     if method == "resolve_containing_procedure":
         address = _address(document, params.get("address"))
         procedure, reason = _containing_procedure(document, address)
@@ -1051,73 +1016,87 @@ def _dispatch(method, params):
 def _serve_connection(connection):
     """Serve one capability-authenticated NDJSON connection."""
     file = connection.makefile("rwb")
-    while True:
-        line = file.readline()
-        if not line:
-            break
-        request_id = None
-        authenticated = False
-        should_stop = False
-        try:
+    should_stop = False
+    try:
+        while True:
+            line = file.readline()
+            if not line:
+                break
+            request_id = None
+            authenticated = False
+            should_stop = False
             try:
-                request = json.loads(line.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError) as error:
-                raise InvalidRequestError("Invalid bridge request JSON") from error
-            if not isinstance(request, dict) or set(request) != {"id", "token", "method", "params"}:
-                raise InvalidRequestError("Invalid bridge request shape")
-            request_id = request["id"]
-            if isinstance(request_id, bool) or not isinstance(request_id, int) or request_id < 0:
-                raise InvalidRequestError("Invalid bridge request id")
-            if (
-                not isinstance(request["method"], str) or not request["method"]
-                or not isinstance(request["params"], dict)
-            ):
-                raise InvalidRequestError("Invalid bridge method or parameters")
-            if (
-                not isinstance(request["token"], str) or not request["token"].isascii()
-                or not hmac.compare_digest(request["token"], REA_TOKEN)
-            ):
-                raise PermissionError("Invalid bridge capability")
-            authenticated = True
-            _write_message(file, {"id": request_id, "event": {
-                "type": "progress",
-                "phase": "hopper_bridge",
-                "completed": 0,
-                "total": 1,
-                "message": "Hopper bridge started request",
-            }})
-            result = _dispatch(request["method"], request["params"])
-            should_stop = request["method"] == "shutdown_document" or (
-                request["method"] == "shutdown" and not result.get("cleanup_required", False)
-            )
-            safe_result = _json_safe(result)
-            _write_message(file, {"id": request_id, "event": {
-                "type": "progress",
-                "phase": "hopper_bridge",
-                "completed": 1,
-                "total": 1,
-                "message": "Hopper bridge completed request",
-                "terminal": True,
-            }})
-            response = {"id": request_id, "result": safe_result}
-        except Exception as error:
-            diagnostic = _safe_diagnostic(error)
-            if authenticated:
+                try:
+                    request = json.loads(line.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                    raise InvalidRequestError("Invalid bridge request JSON") from error
+                if not isinstance(request, dict) or set(request) != {"id", "token", "method", "params"}:
+                    raise InvalidRequestError("Invalid bridge request shape")
+                request_id = request["id"]
+                if isinstance(request_id, bool) or not isinstance(request_id, int) or request_id < 0:
+                    raise InvalidRequestError("Invalid bridge request id")
+                if (
+                    not isinstance(request["method"], str) or not request["method"]
+                    or not isinstance(request["params"], dict)
+                ):
+                    raise InvalidRequestError("Invalid bridge method or parameters")
+                if (
+                    not isinstance(request["token"], str) or not request["token"].isascii()
+                    or not hmac.compare_digest(request["token"], REA_TOKEN)
+                ):
+                    raise PermissionError("Invalid bridge capability")
+                authenticated = True
                 _write_message(file, {"id": request_id, "event": {
-                    "type": "diagnostic",
-                    "error": diagnostic,
+                    "type": "progress",
+                    "phase": "hopper_bridge",
+                    "completed": 0,
+                    "total": 1,
+                    "message": "Hopper bridge started request",
                 }})
-            response_id = request_id if (
-                isinstance(request_id, int)
-                and not isinstance(request_id, bool)
-                and request_id >= 0
-            ) else 0
-            response = {"id": response_id, "error": diagnostic}
-        _write_message(file, response)
-        if should_stop:
-            break
-    file.close()
-    connection.close()
+                result = _dispatch(request["method"], request["params"])
+                should_stop = request["method"] in ("shutdown", "shutdown_document") and (
+                    result.get("shutdown") is True and (
+                        (result.get("document_closed") is True and result.get("analysis_stopped") is True)
+                        or (result.get("document_closed") is False and result.get("document_retained") is True)
+                    )
+                )
+                safe_result = _json_safe(result)
+                _write_message(file, {"id": request_id, "event": {
+                    "type": "progress",
+                    "phase": "hopper_bridge",
+                    "completed": 1,
+                    "total": 1,
+                    "message": "Hopper bridge completed request",
+                    "terminal": True,
+                }})
+                response = {"id": request_id, "result": safe_result}
+            except Exception as error:
+                diagnostic = _safe_diagnostic(error)
+                if authenticated:
+                    _write_message(file, {"id": request_id, "event": {
+                        "type": "diagnostic",
+                        "error": diagnostic,
+                    }})
+                response_id = request_id if (
+                    isinstance(request_id, int)
+                    and not isinstance(request_id, bool)
+                    and request_id >= 0
+                ) else 0
+                response = {"id": response_id, "error": diagnostic}
+            _write_message(file, response)
+            if should_stop:
+                break
+    except (ConnectionError, OSError):
+        # A lost client cannot confirm document closure or revoke this run.
+        pass
+    finally:
+        try:
+            file.close()
+        except OSError:
+            # Closing a failed writer can repeat the same disconnected-pipe error.
+            pass
+        connection.close()
+    return should_stop
 
 
 def _write_message(file, message):
@@ -1159,8 +1138,17 @@ def _run():
     os.chmod(REA_SOCKET, 0o600)
     server.listen(1)
     try:
-        connection, _ = server.accept()
-        _serve_connection(connection)
+        while True:
+            try:
+                connection, _ = server.accept()
+            except socket.timeout:
+                break
+            connection.settimeout(None)
+            if _serve_connection(connection):
+                break
+            # Match REA's cleanup handshake budget without pinning Hopper's
+            # Python thread indefinitely after a client disappears.
+            server.settimeout(REA_RECONNECT_TIMEOUT_SECONDS)
     finally:
         server.close()
         if os.path.exists(REA_SOCKET):

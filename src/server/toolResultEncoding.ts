@@ -1,12 +1,8 @@
-import { STDIO_DEFAULT_MAX_BUFFER_SIZE } from "@modelcontextprotocol/server";
 import { constants as bufferConstants } from "node:buffer";
 
 import type { JsonValue } from "../domain/jsonValue.js";
 import { bufferedJsonParts, jsonParts } from "../domain/jsonSerialization.js";
 
-// Leave room for the SDK's JSON-RPC envelope and protocol metadata. This budget
-// follows the pinned client's actual default framing limit, not a result-row cap.
-export const MCP_RESULT_BUDGET_BYTES = STDIO_DEFAULT_MAX_BUFFER_SIZE - 1024;
 export const MCP_RESULT_STRING_LIMIT = bufferConstants.MAX_STRING_LENGTH - 1024;
 
 const RESULT_ENVELOPE_BYTES =
@@ -16,6 +12,16 @@ const RESULT_ENVELOPE_BYTES =
       structuredContent: null,
     }),
   ) - 4;
+
+const TEXT_RESULT_ENVELOPE_BYTES = Buffer.byteLength(
+  JSON.stringify({ content: [{ type: "text", text: "" }] }),
+);
+
+/**
+ * MCP representations a result carries on the wire. Successful results repeat
+ * the JSON as structured content and escaped text; error results carry text only.
+ */
+export type ToolResultRepresentations = "structured-and-text" | "text";
 
 /** Result of encoding the complete repeated MCP representations within a wire budget. */
 export type ToolResultEncoding =
@@ -27,18 +33,23 @@ export type ToolResultEncoding =
       readonly constraint: "receive-buffer" | "string-length";
     };
 
-/** Account for structured JSON and escaped text before allocating the complete text. */
+/** Account for the delivered JSON representations before allocating the complete text. */
 export const encodeToolResult = (
   value: JsonValue,
-  budgetBytes = MCP_RESULT_BUDGET_BYTES,
+  budgetBytes: number,
+  representations: ToolResultRepresentations = "structured-and-text",
 ): ToolResultEncoding => {
+  const structured = representations === "structured-and-text";
   const parts: string[] = [];
-  let bytes = RESULT_ENVELOPE_BYTES;
-  let codeUnits = RESULT_ENVELOPE_BYTES;
+  let bytes = structured ? RESULT_ENVELOPE_BYTES : TEXT_RESULT_ENVELOPE_BYTES;
+  let codeUnits = bytes;
   for (const part of bufferedJsonParts(jsonParts(value))) {
     const escapedPart = JSON.stringify(part);
-    bytes += Buffer.byteLength(part) + Buffer.byteLength(escapedPart) - 2;
-    codeUnits += part.length + escapedPart.length - 2;
+    bytes +=
+      (structured ? Buffer.byteLength(part) : 0) +
+      Buffer.byteLength(escapedPart) -
+      2;
+    codeUnits += (structured ? part.length : 0) + escapedPart.length - 2;
     if (bytes > budgetBytes || codeUnits > MCP_RESULT_STRING_LIMIT)
       return {
         ok: false,

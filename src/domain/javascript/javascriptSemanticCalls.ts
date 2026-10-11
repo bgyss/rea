@@ -12,8 +12,8 @@ import type {
 import {
   semanticCallableIdForNode,
   semanticReferenceRole,
-  semanticStaticPropertyKey,
 } from "./javascriptSemanticProjection.js";
+import { semanticStaticPropertyKey } from "./javascriptAstValues.js";
 import {
   resolveSemanticBindingState,
   isUnshadowedGlobal,
@@ -428,4 +428,10 @@ const enclosingFunction = (
 const semanticCallSiteId = (
   node: t.CallExpression | t.OptionalCallExpression | t.NewExpression,
 ): string =>
-  `call:${t.isNewExpression(node) ? "construct" : "call"}:${String(node.start ?? -1)}:${String(node.end ?? -1)}`;
+  // Join once so retained IDs do not keep a chain of intermediate strings.
+  [
+    "call",
+    t.isNewExpression(node) ? "construct" : "call",
+    String(node.start ?? -1),
+    String(node.end ?? -1),
+  ].join(":");

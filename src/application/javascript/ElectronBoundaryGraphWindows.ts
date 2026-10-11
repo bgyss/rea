@@ -1,4 +1,4 @@
-import type { ApplicationNode } from "../../domain/javascript/javascriptApplicationGraph.js";
+import type { ApplicationNode } from "../../domain/javascript/javascriptApplicationGraphSchemas.js";
 import type {
   ElectronBrowserWindowFinding,
   ElectronContextBridgeFinding,
@@ -39,17 +39,32 @@ export const addElectronWindowBoundaries = (
     if (javascript === null) continue;
     const coverage = javascriptAnalysisCoverage(javascript);
     for (const value of javascript.electron.browser_windows) {
-      const source = electronFindingSourceNode(context, file, value.module_key);
+      const source = electronFindingSourceNode(
+        context,
+        file,
+        value.module_key,
+        value.module_runtime,
+      );
       if (source !== undefined)
         addBrowserWindow({ context, file, source, value, coverage });
     }
     for (const value of javascript.electron.context_bridge_apis) {
-      const source = electronFindingSourceNode(context, file, value.module_key);
+      const source = electronFindingSourceNode(
+        context,
+        file,
+        value.module_key,
+        value.module_runtime,
+      );
       if (source !== undefined)
         addContextBridge({ context, file, source, value, coverage });
     }
     for (const value of javascript.electron.utility_processes) {
-      const source = electronFindingSourceNode(context, file, value.module_key);
+      const source = electronFindingSourceNode(
+        context,
+        file,
+        value.module_key,
+        value.module_runtime,
+      );
       if (source !== undefined)
         addUtilityProcess({ context, file, source, value, coverage });
     }

@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { isAbsoluteLocalPath } from "../localPath.js";
+import { isAbsolute } from "node:path";
+import { localPathStringSchema } from "../localPath.js";
 
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/u);
 
@@ -15,9 +16,10 @@ export const NATIVE_TEXT_ENCODINGS = [
 
 /** One operator-supplied Thingy-format `.tbl` character table, pinned by digest. */
 export const nativeTextTableInputSchema = z.strictObject({
-  path: z
-    .string()
-    .refine(isAbsoluteLocalPath, "Character table path must be absolute"),
+  path: localPathStringSchema.refine(
+    isAbsolute,
+    "Character table path must be absolute",
+  ),
   sha256,
 });
 

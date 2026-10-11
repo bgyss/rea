@@ -25,6 +25,11 @@ class ReaJadxBridge {
   private record MethodSnapshot(String name, String shortId, Map<String, Object> summary) {}
   private record ClassSnapshot(JavaClass node, List<MethodSnapshot> methods, Map<String, Object> summary) {}
 
+  private static final class InputFailure extends IllegalArgumentException {
+    final String field;
+    InputFailure(String field, String message) { super(message); this.field = field; }
+  }
+
   private ReaJadxBridge(SessionHolder holder) { this.holder = holder; }
 
   private static CallToolResult text(String value, boolean failed) {
@@ -100,8 +105,9 @@ class ReaJadxBridge {
     }
     String name = string(args, "class_name");
     List<ClassSnapshot> candidates = classes.get(name);
-    if (candidates == null) throw new IllegalArgumentException("Exact class not found: " + name);
-    if (candidates.size() != 1) throw new IllegalArgumentException("Ambiguous metadata class identity: " + name
+    if (candidates == null) throw new InputFailure("class_name", "Exact class not found: " + name
+        + "; use search_android_classes to discover fully qualified names.");
+    if (candidates.size() != 1) throw new InputFailure("class_name", "Ambiguous metadata class identity: " + name
         + "; raw identities: " + candidates.stream().map(candidate -> candidate.node().getRawName()).toList());
     return candidates.get(0);
   }
@@ -109,7 +115,8 @@ class ReaJadxBridge {
   private List<MethodSnapshot> methods(ClassSnapshot cls, JsonObject args) {
     String name = string(args, "method_name");
     List<MethodSnapshot> result = cls.methods().stream().filter(method -> method.name().equals(name)).toList();
-    if (result.isEmpty()) throw new IllegalArgumentException("Method not found: " + name);
+    if (result.isEmpty()) throw new InputFailure("method_name", "Method not found: " + name
+        + "; use inspect_android_class to discover available methods.");
     return result;
   }
 
@@ -117,6 +124,20 @@ class ReaJadxBridge {
     JavaMethod result = cls.node().searchMethodByShortId(selected.shortId());
     if (result == null) throw new IllegalArgumentException("Method identity no longer available: " + selected.shortId());
     return result;
+  }
+
+  private JadxSession.SmartCode methodBody(JadxSession current, ClassSnapshot cls,
+      MethodSnapshot selected, JavaMethod method) {
+    if (!selected.shortId().equals("<clinit>()V"))
+      return current.getMethodBodySmart(method, current.getMaxSourceBytes(), true);
+    // Java code generation can fold all or part of <clinit> into field declarations.
+    // Its method text cannot establish coverage, even when a static block remains.
+    JadxSession.MethodSmali smali = current.getMethodSmali(cls.node(), method.getName());
+    if (!smali.getFound() || smali.getBlocks().size() != 1)
+      throw new IllegalArgumentException("Static initializer disassembly requires one exact method: " + selected.shortId());
+    return new JadxSession.SmartCode(
+        TextUtilKt.truncateToBytes(smali.getBlocks().get(0), current.getMaxSourceBytes()),
+        "smali", true, List.of("static_initializer_disassembly"));
   }
 
   private CallToolResult handle(String name, JsonObject args) {
@@ -141,9 +162,9 @@ class ReaJadxBridge {
     if (name.equals("get_method_body")) {
       List<MethodSnapshot> overloads = methods(cls, args);
       int index = integer(args, "overload_index", 0);
-      if (index >= overloads.size()) throw new IllegalArgumentException("overload_index out of range: " + index);
+      if (index >= overloads.size()) throw new InputFailure("overload_index", "overload_index out of range: " + index);
       JavaMethod method = method(cls, overloads.get(index));
-      JadxSession.SmartCode code = current.getMethodBodySmart(method, current.getMaxSourceBytes(), true);
+      JadxSession.SmartCode code = methodBody(current, cls, overloads.get(index), method);
       return json(Map.of("class_name", cls.summary().get("full_name"),
           "method_name", overloads.get(index).name(), "full_name", method.getFullName(),
           "overload_index", index, "overload_count", overloads.size(),
@@ -155,7 +176,7 @@ class ReaJadxBridge {
     if (name.equals("get_xrefs_to_class")) uses = cls.node().getUseIn();
     else {
       List<MethodSnapshot> overloads = methods(cls, args);
-      if (overloads.size() != 1) throw new IllegalArgumentException("Method references require a unique overload");
+      if (overloads.size() != 1) throw new InputFailure("method_name", "Method references require a unique overload");
       target += "." + overloads.get(0).name();
       uses = method(cls, overloads.get(0)).getUseIn();
     }
@@ -204,13 +225,15 @@ class ReaJadxBridge {
       String description = switch (name) {
         case "list_classes" -> "Indexed pages of all top-level class names, with offset and limit.";
         case "get_class_summary" -> "Parsed member metadata for one exact class name; no source generation.";
-        case "get_method_body" -> "Source for an exact class and stable same-name overload index, with smali fallback.";
+        case "get_method_body" -> "Source for an exact class and stable same-name overload index; static initializers use smali to preserve folded field initialization.";
         default -> "Complete static references to an exact class or unique method; source lines are unresolved.";
       };
       Tool narrowed = new Tool(name, new ToolSchema(null, new JsonObject(properties),
           tool.getInputSchema().getRequired(), null), description, null, null, null, null, null, null);
       server.addTool(narrowed, (connection, request, continuation) -> {
         try { return bridge.handle(name, request.getArguments()); }
+        catch (InputFailure error) { return text(JSON.toJson(Map.of(
+            "kind", "invalid-input", "field", error.field, "message", error.getMessage())), true); }
         catch (IllegalArgumentException error) { return text(error.getMessage(), true); }
       });
     }

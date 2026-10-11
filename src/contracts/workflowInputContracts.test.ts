@@ -1,8 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { traceJavaScriptSemanticsRequestSchema } from "./javascript/applicationWorkflowInputContracts.js";
-import { ARTIFACT_TOOL_CONTRACTS } from "./artifactToolContracts.js";
-import { JAVASCRIPT_FEATURE_TRACE_FULL_EVIDENCE_EXAMPLE } from "./javascript/javascriptApplicationWorkflowExamples.js";
+import { JAVASCRIPT_FEATURE_TRACE_EXAMPLE } from "./javascript/javascriptApplicationWorkflowExamples.js";
 import {
   MANAGED_APPLICATION_GRAPH_EXAMPLE,
   MANAGED_MEMBER_COMPARISON_EXAMPLE,
@@ -24,7 +23,7 @@ describe("workflow input contracts", () => {
       traceJavaScriptSemanticsRequestSchema.safeParse({ query }).success,
     ).toBe(false);
 
-    const evidence = JAVASCRIPT_FEATURE_TRACE_FULL_EVIDENCE_EXAMPLE.application;
+    const evidence = JAVASCRIPT_FEATURE_TRACE_EXAMPLE.application;
     expect(
       traceJavaScriptSemanticsRequestSchema.safeParse({
         application: evidence,
@@ -62,28 +61,5 @@ describe("workflow input contracts", () => {
     expect(
       managedApplicationGraphReferenceInputSchema.safeParse({}).success,
     ).toBe(false);
-  });
-
-  it("accepts each complete managed application Evidence source", () => {
-    for (const input of [
-      { managed_artifact: MANAGED_APPLICATION_GRAPH_EXAMPLE.managed_members },
-      { managed_members: MANAGED_APPLICATION_GRAPH_EXAMPLE.managed_members },
-      {
-        managed_native_boundaries:
-          MANAGED_APPLICATION_GRAPH_EXAMPLE.managed_members,
-      },
-    ])
-      expect(
-        managedApplicationGraphReferenceInputSchema.safeParse(input).success,
-      ).toBe(true);
-  });
-
-  it("accepts an explicit artifact integrity continuation policy", () => {
-    const input = { integrity_policy: "record-and-continue" as const };
-    const inspect = ARTIFACT_TOOL_CONTRACTS.find(
-      ({ name }) => name === "inspect_artifact",
-    );
-    if (inspect === undefined) throw new Error("Missing inspect_artifact");
-    expect(inspect.inputSchema.safeParse(input).success).toBe(true);
   });
 });

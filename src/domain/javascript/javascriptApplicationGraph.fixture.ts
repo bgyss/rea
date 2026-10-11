@@ -2,10 +2,10 @@ import {
   createJavaScriptApplicationEdge,
   createJavaScriptApplicationGraph,
   createJavaScriptApplicationNode,
-  type ApplicationGraphEvidence,
-  type ApplicationNode,
   type JavaScriptApplicationGraph,
 } from "./javascriptApplicationGraph.js";
+import type { ApplicationNode } from "./javascriptApplicationGraphSchemas.js";
+import type { ApplicationGraphEvidence } from "./javascriptApplicationEvidenceSchemas.js";
 
 export const APPLICATION_GRAPH_DIGESTS = {
   package: "1".repeat(64),
@@ -109,7 +109,7 @@ type FixtureNodeArguments = [
   evidence: ApplicationGraphEvidence,
 ];
 
-const fixtureNode = (
+export const fixtureNode = (
   ...[kind, identity, label, properties, evidence]: FixtureNodeArguments
 ): FixtureNode =>
   createJavaScriptApplicationNode({

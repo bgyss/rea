@@ -1,5 +1,9 @@
-import { compareCodePoints } from "../canonicalOrdering.js";
-import type { ApplicationNode } from "./javascriptApplicationGraph.js";
+import { canonicalJson } from "../comparisonSemantics.js";
+import {
+  compareUnicodeCodePoints,
+  compositeKey,
+} from "../unicodeCodePointOrder.js";
+import type { ApplicationNode } from "./javascriptApplicationGraphSchemas.js";
 import type { JsonValue } from "../jsonValue.js";
 
 /** One deterministic one-to-one match between two graph versions. */
@@ -84,7 +88,7 @@ export const matchJavaScriptApplicationVersions = (
   const rightIds = new Set(remainingRight.map(({ node_id: id }) => id));
   return {
     pairs: pairs.sort((a, b) =>
-      compareCodePoints(
+      compareUnicodeCodePoints(
         `${a.left.node_id}\0${a.right.node_id}`,
         `${b.left.node_id}\0${b.right.node_id}`,
       ),
@@ -108,7 +112,7 @@ interface TierContext {
 const applyTier = (context: TierContext): void => {
   const leftByKey = nodesByKey(context.left.values(), context.tier.key);
   const rightByKey = nodesByKey(context.right.values(), context.tier.key);
-  for (const key of [...leftByKey.keys()].sort(compareCodePoints)) {
+  for (const key of [...leftByKey.keys()].sort(compareUnicodeCodePoints)) {
     const leftGroup = leftByKey.get(key) ?? [];
     const rightGroup = rightByKey.get(key) ?? [];
     if (rightGroup.length === 0) continue;
@@ -173,7 +177,7 @@ const filteredCandidates = (
     [...candidates.entries()].flatMap(([nodeId, values]) => {
       const filtered = [...values]
         .filter((value) => retained.has(value))
-        .sort(compareCodePoints);
+        .sort(compareUnicodeCodePoints);
       return filtered.length === 0 ? [] : [[nodeId, filtered] as const];
     }),
   );
@@ -195,7 +199,7 @@ const moduleSourceDigestKey = (node: ApplicationNode): string | null => {
 const sourceMapKey = (node: ApplicationNode): string | null =>
   node.kind === "source-module" &&
   node.identity.strategy === "source-map-original"
-    ? `source-map\0${node.identity.original_source}`
+    ? `source-map\0${canonicalJson([node.identity.source_root, node.identity.original_source])}`
     : null;
 
 const structuralFingerprintKey = (node: ApplicationNode): string | null => {
@@ -253,7 +257,15 @@ const semanticValue = (
     return (
       joined(
         properties.specifier,
-        stringList(properties.requested_members).join(","),
+        compositeKey([
+          stringList(properties.requested_members),
+          typeof properties.namespace_access === "boolean"
+            ? properties.namespace_access
+            : null,
+          typeof properties.dynamic_member_access === "boolean"
+            ? properties.dynamic_member_access
+            : null,
+        ]),
       ) ?? firstLabel(node)
     );
   if (
@@ -294,7 +306,7 @@ const uniqueStringProperty = (
 
 const joined = (...values: readonly unknown[]): string | null => {
   const strings = values.map(nonEmptyString);
-  return strings.some((value) => value === null) ? null : strings.join("\0");
+  return strings.some((value) => value === null) ? null : compositeKey(strings);
 };
 
 const nonEmptyString = (value: unknown): string | null =>
@@ -308,10 +320,10 @@ const stringList = (value: unknown): string[] =>
   Array.isArray(value)
     ? value
         .filter((item): item is string => typeof item === "string")
-        .sort(compareCodePoints)
+        .sort(compareUnicodeCodePoints)
     : [];
 
 const sortedNodes = (nodes: Iterable<ApplicationNode>): ApplicationNode[] =>
   [...nodes].sort((left, right) =>
-    compareCodePoints(left.node_id, right.node_id),
+    compareUnicodeCodePoints(left.node_id, right.node_id),
   );

@@ -2,14 +2,16 @@ import type { BrowserObservationPort } from "../application/BrowserObservationPo
 import type { ProviderIdentity } from "../application/AnalysisProvider.js";
 import type { ExecutionOptions } from "../application/AnalysisProvider.js";
 import {
-  browserTargetListSchema,
   sanitizeBrowserUrl,
-  webPageInspectionSchema,
-  type BrowserTargetList,
   type InspectWebPageInput,
   type ListBrowserTargetsInput,
-  type WebPageInspection,
 } from "../domain/browserObservation.js";
+import {
+  browserTargetListSchema,
+  webPageInspectionSchema,
+  type BrowserTargetList,
+  type WebPageInspection,
+} from "../domain/browserObservationSchemas.js";
 import { analyzeCapturedWebBundle } from "../domain/webBundleAnalyzer.js";
 import {
   webBundleAnalysisSchema,
@@ -41,9 +43,10 @@ import {
   type WebScreenshotDiff,
 } from "../domain/webScreenshot.js";
 import { AnalysisError } from "../domain/analysisErrorBase.js";
+import { AnalysisInputError } from "../domain/analysisErrorCore.js";
 import { BrowserObservationError } from "../domain/browserObservationError.js";
 import { ProviderAdapterError } from "../domain/providerAdapterError.js";
-import { type BrowserObservationOperation } from "../domain/browserObservationErrors.js";
+import type { BrowserObservationOperation } from "../domain/browserObservationErrors.js";
 import { err, ok, type Result } from "../domain/result.js";
 import {
   discoverCdpEndpoint,
@@ -64,16 +67,14 @@ import { discoverWebMcp } from "./CdpWebMcpDiscovery.js";
 import { captureCdpScreenshot } from "./CdpScreenshot.js";
 import { comparePngScreenshots } from "./PngVisualDiff.js";
 
-/** Public identity committed by passive browser observations. */
-export { CDP_BROWSER_PROVIDER_IDENTITY } from "./providerIdentities.js";
 import { CDP_BROWSER_PROVIDER_IDENTITY } from "./providerIdentities.js";
-const IDENTITY = CDP_BROWSER_PROVIDER_IDENTITY;
+import { compareUnicodeCodePoints } from "../domain/unicodeCodePointOrder.js";
 const CLEANUP_DOMAINS = ["Network", "Debugger", "Runtime", "Page"] as const;
 
 /** Passive browser observation through a selected user-owned CDP endpoint. */
 export class CdpBrowserProvider implements BrowserObservationPort {
   identity(): ProviderIdentity {
-    return IDENTITY;
+    return CDP_BROWSER_PROVIDER_IDENTITY;
   }
 
   async listTargets(
@@ -315,6 +316,12 @@ export class CdpBrowserProvider implements BrowserObservationPort {
     try {
       return ok(webScreenshotDiffSchema.parse(comparePngScreenshots(input)));
     } catch (cause: unknown) {
+      if (cause instanceof TypeError)
+        return err(
+          new AnalysisInputError("compare_web_screenshots", { cause }, [
+            { path: [], reason: "invalid_format", message: cause.message },
+          ]),
+        );
       return err(providerError(cause, "compare_web_screenshots"));
     }
   }
@@ -402,7 +409,9 @@ const selectTargets = (
       attached: target.attached,
     });
   }
-  allowed.sort((left, right) => left.target_id.localeCompare(right.target_id));
+  allowed.sort((left, right) =>
+    compareUnicodeCodePoints(left.target_id, right.target_id),
+  );
   return {
     allowed,
     excluded: {
@@ -440,4 +449,6 @@ const providerError = (
     ? new BrowserObservationError(operation, cause.reason, { cause })
     : cause instanceof AnalysisError
       ? cause
-      : new ProviderAdapterError(IDENTITY.id, operation, { cause });
+      : new ProviderAdapterError(CDP_BROWSER_PROVIDER_IDENTITY.id, operation, {
+          cause,
+        });

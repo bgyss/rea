@@ -3,9 +3,6 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import type { Readable } from "node:stream";
 
-import { parse } from "plist";
-import { z } from "zod";
-
 import type { ArtifactCommand } from "../domain/artifactGraph.js";
 import {
   ArtifactReaderFailure,
@@ -13,24 +10,22 @@ import {
   type ArtifactReader,
 } from "./ArtifactReader.js";
 import { DirectoryArtifactReader } from "./DirectoryArtifactReader.js";
-import { execFileOutput } from "../process/ExecFileOutput.js";
-const DETACH_TIMEOUT_MS = 120_000;
-const attachOutputSchema = z.object({
-  "system-entities": z.array(
-    z.object({
-      "dev-entry": z.string().startsWith("/dev/"),
-      "mount-point": z.string().optional(),
-    }),
-  ),
-});
-const infoOutputSchema = z.object({
-  images: z.array(
-    z.object({
-      "system-entities": z.array(z.object({ "dev-entry": z.string() })),
-    }),
-  ),
-});
-
+import {
+  execFileOutput,
+  execFileOutputFailure,
+} from "../process/ExecFileOutput.js";
+import {
+  parseNativeDmgAttachOutput,
+  parseNativeDmgInfo,
+  resolveNativeDmgOwnership,
+  type NativeDmgAttachOutput,
+  type NativeDmgInfo,
+} from "./NativeDmgOwnership.js";
+const HDIUTIL_COMMAND_TIMEOUT_MS = 120_000;
+// APFS ejects and busy reporting can lag a detach attempt.
+const DETACH_SETTLE_DELAYS_MS = [250, 500, 1000] as const;
+const delay = (milliseconds: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, milliseconds));
 /** Narrow host seam for tested, shell-free hdiutil lifecycle operations. */
 export interface NativeDmgHost {
   run(
@@ -43,70 +38,109 @@ export interface NativeDmgHost {
     readonly exitCode: number;
     readonly cause?: unknown;
   }>;
+  /** Wait between detach rechecks; tests may resolve immediately. */
+  delay?(milliseconds: number): Promise<void>;
 }
 
-const systemHost: NativeDmgHost = {
+class NativeDmgCommandFailure extends ArtifactReaderFailure {
+  readonly processNotStarted: boolean;
+
+  constructor(
+    reason: ArtifactReaderFailure["reason"],
+    message: string,
+    readonly stdout: string,
+    options?: {
+      readonly cause?: unknown;
+      readonly processNotStarted?: boolean;
+    },
+  ) {
+    super(
+      reason,
+      message,
+      options?.cause === undefined ? undefined : { cause: options.cause },
+    );
+    this.processNotStarted = options?.processNotStarted ?? false;
+  }
+}
+
+const createSystemHost = (
+  environment: Readonly<NodeJS.ProcessEnv>,
+): NativeDmgHost => ({
+  delay,
   async run(arguments_, signal, options) {
     try {
       const { stdout, stderr } = await execFileOutput(
         "/usr/bin/hdiutil",
         [...arguments_],
         {
+          env: environment,
+          stopSignal: "SIGTERM",
           ...(options === undefined ? {} : { timeout: options.timeoutMs }),
           ...(signal === undefined ? {} : { signal }),
         },
       );
       return { stdout, stderr, exitCode: 0 };
     } catch (cause: unknown) {
+      const output = execFileOutputFailure(cause);
       if (cause instanceof Error && cause.name === "AbortError")
-        throw new ArtifactReaderFailure("cancelled", "DMG operation cancelled");
-      const exitCode = processExitCode(cause);
+        throw new NativeDmgCommandFailure(
+          "cancelled",
+          "DMG operation cancelled",
+          output?.stdout ?? "",
+          { cause },
+        );
+      const exitCode =
+        typeof output?.code === "number" ? output.code : processExitCode(cause);
       if (exitCode !== undefined)
         return {
-          stdout: processOutput(cause, "stdout"),
-          stderr: processOutput(cause, "stderr"),
+          stdout: output?.stdout ?? processOutput(cause, "stdout"),
+          stderr: output?.stderr ?? processOutput(cause, "stderr"),
           exitCode,
           cause,
         };
-      throw new ArtifactReaderFailure(
+      throw new NativeDmgCommandFailure(
         commandFailureReason(cause, arguments_[0]),
         `hdiutil ${arguments_[0] ?? "operation"} failed: ${describeCommandFailure(cause, arguments_)}`,
-        { cause },
+        output?.stdout ?? "",
+        { cause, processNotStarted: processNotStarted(cause) },
       );
     }
   },
-};
+});
 
 /** Read-only macOS DMG adapter that owns attachment and reverse-order detach. */
 export class NativeDmgArtifactReader implements ArtifactReader {
   readonly format = "file" as const;
+  private readonly host: NativeDmgHost;
   readonly #provenance: ArtifactCommand[] = [];
+  #initialization: Promise<void> | undefined;
   #directory: DirectoryArtifactReader | undefined;
   #devices: string[] = [];
+  #inventoryConfirmedDevices = new Set<string>();
   #mountRoot: string | undefined;
+  #baselineDevices = new Set<string>();
+  #attachOutput: NativeDmgAttachOutput | undefined;
+  #attachOutputReturned = false;
+  #attachMayHaveMounted = false;
+  #ownershipUncertainty: string | undefined;
+  #closed = false;
+  #closePromise: Promise<void> | undefined;
 
-  private constructor(
+  constructor(
     private readonly path: string,
-    private readonly host: NativeDmgHost,
-  ) {}
-
-  /** Verify and attach one image beneath an exclusively owned temporary root. */
-  static async create(
-    path: string,
-    signal?: AbortSignal,
-    host: NativeDmgHost = systemHost,
-  ): Promise<NativeDmgArtifactReader> {
-    if (process.platform !== "darwin" && host === systemHost)
+    environment: Readonly<NodeJS.ProcessEnv>,
+    host?: NativeDmgHost,
+  ) {
+    if (process.platform !== "darwin" && host === undefined)
       throw new ArtifactReaderFailure(
         "unavailable",
         "Native DMG traversal is available only on macOS",
       );
-    const reader = new NativeDmgArtifactReader(path, host);
-    await reader.attach(signal);
-    return reader;
+    this.host = host ?? createSystemHost(environment);
   }
 
   async *entries(signal?: AbortSignal): AsyncIterable<ArtifactEntry> {
+    await this.#ensureAttached(signal);
     if (this.#directory === undefined)
       throw new ArtifactReaderFailure("unavailable", "DMG is not attached");
     const prefix = basename(this.path);
@@ -114,11 +148,10 @@ export class NativeDmgArtifactReader implements ArtifactReader {
       yield { ...entry, path: `${prefix}/${entry.path}` };
   }
 
-  open(entry: ArtifactEntry, signal?: AbortSignal): Promise<Readable> {
+  async open(entry: ArtifactEntry, signal?: AbortSignal): Promise<Readable> {
+    await this.#ensureAttached(signal);
     if (this.#directory === undefined)
-      return Promise.reject(
-        new ArtifactReaderFailure("unavailable", "DMG is not attached"),
-      );
+      throw new ArtifactReaderFailure("unavailable", "DMG is not attached");
     return this.#directory.open(entry, signal);
   }
 
@@ -126,27 +159,50 @@ export class NativeDmgArtifactReader implements ArtifactReader {
     return structuredClone(this.#provenance);
   }
 
-  async close(): Promise<void> {
-    let detachFailure: unknown;
-    const remainingDevices: string[] = [];
+  close(): Promise<void> {
+    this.#closed = true;
+    this.#closePromise ??= this.#closeOwnedResources().catch(
+      (cause: unknown) => {
+        this.#closePromise = undefined;
+        throw cause;
+      },
+    );
+    return this.#closePromise;
+  }
+
+  async #closeOwnedResources(): Promise<void> {
+    await this.#initialization?.catch(() => undefined);
+    let detachFailure = await this.#reconcileAttachState();
+    let remainingDevices: string[] = [];
     for (const device of [...this.#devices].reverse()) {
-      try {
-        await runChecked(this.host, ["detach", device], undefined, {
-          timeoutMs: DETACH_TIMEOUT_MS,
-        });
-        this.#provenance.push(command(["detach", device], ["mount"]));
-      } catch (cause: unknown) {
-        // Detaching a synthesized APFS container also ejects the image that
-        // backs it, so a later whole disk of the same image may already be
-        // gone. Only a device that is still attached is a cleanup failure.
-        if (await this.#isAttached(device)) {
-          remainingDevices.push(device);
-          detachFailure ??= cause;
-        }
+      const failure = await this.#detach(device);
+      if (failure !== undefined) {
+        remainingDevices.push(device);
+        detachFailure ??= failure;
       }
     }
+    // APFS container detach may briefly leave its backing image listed.
+    for (const delayMs of DETACH_SETTLE_DELAYS_MS) {
+      if (remainingDevices.length === 0) break;
+      await (this.host.delay ?? delay)(delayMs);
+      const stillAttached: string[] = [];
+      for (const device of remainingDevices) {
+        if (!(await this.#isAttached(device))) continue;
+        const failure = await this.#detach(device);
+        if (failure !== undefined) {
+          stillAttached.push(device);
+          detachFailure = failure;
+        }
+      }
+      remainingDevices = stillAttached;
+    }
+    if (remainingDevices.length === 0) detachFailure = undefined;
     this.#devices = remainingDevices.reverse();
-    if (this.#devices.length === 0 && this.#mountRoot !== undefined)
+    if (
+      this.#devices.length === 0 &&
+      this.#mountRoot !== undefined &&
+      !this.#attachMayHaveMounted
+    )
       await rm(this.#mountRoot, { recursive: true, force: true }).then(
         () => {
           this.#mountRoot = undefined;
@@ -156,40 +212,101 @@ export class NativeDmgArtifactReader implements ArtifactReader {
           detachFailure ??= cause;
         },
       );
+    if (this.#attachMayHaveMounted) {
+      detachFailure ??= new Error(
+        this.#ownershipUncertainty ??
+          "hdiutil attachment ownership remains unknown",
+      );
+    }
     if (detachFailure !== undefined)
       throw new ArtifactReaderFailure(
         "unavailable",
         `DMG detach or mount-root cleanup failed for ${JSON.stringify(this.path)}: ${failureMessage(detachFailure)}`,
-        { cause: detachFailure },
+        {
+          cause: detachFailure,
+          cleanup: {
+            reason: failureMessage(detachFailure),
+            resources: [
+              ...this.#devices.map((device) => `DMG device ${device}`),
+              ...(this.#attachMayHaveMounted
+                ? [
+                    `DMG attachment ownership unknown at mount root ${this.#mountRoot ?? this.path}`,
+                  ]
+                : []),
+              ...(this.#mountRoot === undefined
+                ? []
+                : [`DMG mount root ${this.#mountRoot}`]),
+            ],
+          },
+        },
       );
   }
 
-  /**
-   * Report whether hdiutil still lists a device; unknown state counts as
-   * attached. Like detach, this cleanup query runs after the inventory
-   * snapshot has captured provenance, so it is not recorded there.
-   */
+  /** Detach one device; return the failure only while it remains attached. */
+  async #detach(device: string): Promise<unknown> {
+    try {
+      await runChecked(this.host, ["detach", device], undefined, {
+        timeoutMs: HDIUTIL_COMMAND_TIMEOUT_MS,
+      });
+      this.#provenance.push(command(["detach", device], ["mount"]));
+      return undefined;
+    } catch (cause: unknown) {
+      return (await this.#isAttached(device)) ? cause : undefined;
+    }
+  }
+
+  async #reconcileAttachState(): Promise<unknown> {
+    if (!this.#attachMayHaveMounted) return undefined;
+    try {
+      await this.#resolveAttachOwnership();
+      return undefined;
+    } catch (cause: unknown) {
+      this.#ownershipUncertainty = failureMessage(cause);
+      return cause;
+    }
+  }
+
+  /** Treat unknown hdiutil state as attached during cleanup. */
   async #isAttached(device: string): Promise<boolean> {
     try {
-      const info = await runChecked(this.host, ["info", "-plist"], undefined, {
-        timeoutMs: DETACH_TIMEOUT_MS,
-      });
-      const parsed = infoOutputSchema.parse(parse(info.stdout));
-      return parsed.images.some((image) =>
+      const parsed = await this.#readInfo();
+      const isListed = parsed.images.some((image) =>
         image["system-entities"].some(
           (entity) => entity["dev-entry"] === device,
         ),
       );
+      if (isListed) {
+        this.#inventoryConfirmedDevices.add(device);
+        return true;
+      }
+      return !this.#inventoryConfirmedDevices.has(device);
     } catch {
       return true;
     }
   }
 
-  async attach(signal?: AbortSignal): Promise<void> {
+  async #ensureAttached(signal?: AbortSignal): Promise<void> {
+    if (this.#closed)
+      throw new ArtifactReaderFailure("unavailable", "DMG reader is closed");
+    this.#initialization ??= this.#attach(signal);
+    await this.#initialization;
+    if (this.#closed)
+      throw new ArtifactReaderFailure("unavailable", "DMG reader is closed");
+  }
+
+  async #attach(signal?: AbortSignal): Promise<void> {
     await runChecked(this.host, ["verify", this.path], signal);
     this.#provenance.push(command(["verify", this.path], ["read"]));
-    this.#mountRoot = await realpath(await mkdtemp(join(tmpdir(), "rea-dmg-")));
+    const baseline = await this.#readInfo();
+    this.#baselineDevices = new Set(
+      baseline.images.flatMap((image) =>
+        image["system-entities"].map(({ "dev-entry": device }) => device),
+      ),
+    );
+    const mountRoot = await realpath(await mkdtemp(join(tmpdir(), "rea-dmg-")));
+    this.#mountRoot = mountRoot;
     try {
+      this.#attachMayHaveMounted = true;
       const attached = await runChecked(
         this.host,
         [
@@ -198,42 +315,37 @@ export class NativeDmgArtifactReader implements ArtifactReader {
           "-nobrowse",
           "-plist",
           "-mountroot",
-          this.#mountRoot,
+          mountRoot,
           this.path,
         ],
         signal,
+        { timeoutMs: HDIUTIL_COMMAND_TIMEOUT_MS },
       );
-      const parsed = attachOutputSchema.parse(parse(attached.stdout));
-      const devices = [
-        ...new Set(
-          parsed["system-entities"].map((entity) => entity["dev-entry"]),
-        ),
-      ];
-      // Detaching an observed whole disk also detaches its partitions. Do not
-      // subsequently detach the now-unavailable child devices.
-      this.#devices = devices.filter(
-        (device) =>
-          !devices.some(
-            (parent) =>
-              /^\/dev\/disk\d+$/u.test(parent) &&
-              device.startsWith(`${parent}s`) &&
-              /^\d+$/u.test(device.slice(parent.length + 1)),
-          ),
-      );
-      if (this.#devices.length === 0)
+      this.#attachOutputReturned = true;
+      let parsed: NativeDmgAttachOutput;
+      try {
+        parsed = parseNativeDmgAttachOutput(attached.stdout);
+      } catch (cause: unknown) {
+        throw new ArtifactReaderFailure(
+          "format",
+          "hdiutil returned a malformed attachment plist",
+          { cause },
+        );
+      }
+      if (parsed["system-entities"].length === 0)
         throw new ArtifactReaderFailure(
           "format",
           "hdiutil returned no attached devices",
         );
-      for (const entity of parsed["system-entities"])
-        if (
-          entity["mount-point"] !== undefined &&
-          !entity["mount-point"].startsWith(`${this.#mountRoot}/`)
-        )
-          throw new ArtifactReaderFailure(
-            "path",
-            "hdiutil mounted outside the owned root",
-          );
+      this.#attachOutput = parsed;
+      const ownership = await this.#resolveAttachOwnership();
+      if (ownership !== "owned")
+        throw new ArtifactReaderFailure(
+          ownership === "unknown" ? "unavailable" : "path",
+          ownership === "unknown"
+            ? `DMG attachment ownership is uncertain: ${this.#ownershipUncertainty ?? "no unique mount under the owned root"}`
+            : "hdiutil did not mount a new image beneath the owned root",
+        );
       this.#provenance.push(
         command(
           [
@@ -242,33 +354,86 @@ export class NativeDmgArtifactReader implements ArtifactReader {
             "-nobrowse",
             "-plist",
             "-mountroot",
-            this.#mountRoot,
+            mountRoot,
             this.path,
           ],
           ["read", "mount"],
         ),
       );
-      this.#directory = new DirectoryArtifactReader(this.#mountRoot);
+      this.#directory = new DirectoryArtifactReader(mountRoot);
     } catch (cause: unknown) {
-      let cleanupFailure: unknown;
-      try {
-        await this.close();
-      } catch (cleanupCause: unknown) {
-        cleanupFailure = cleanupCause;
+      if (cause instanceof NativeDmgCommandFailure && cause.stdout !== "") {
+        try {
+          this.#attachOutput = parseNativeDmgAttachOutput(cause.stdout);
+          this.#attachOutputReturned = true;
+        } catch {
+          // The original command failure remains primary; fresh info still recovers mounts.
+        }
       }
-      if (cleanupFailure !== undefined)
-        throw new ArtifactReaderFailure(
-          "unavailable",
-          `DMG attach failed and cleanup could not detach every device: ${failureMessage(cause)}; cleanup: ${failureMessage(cleanupFailure)}`,
-          { cause: new AggregateError([cause, cleanupFailure]) },
-        );
+      if (cause instanceof NativeDmgCommandFailure && cause.processNotStarted) {
+        this.#attachMayHaveMounted = false;
+        this.#ownershipUncertainty = undefined;
+      }
       throw cause;
     }
+  }
+
+  async #readInfo(): Promise<NativeDmgInfo> {
+    const info = await runChecked(this.host, ["info", "-plist"], undefined, {
+      timeoutMs: HDIUTIL_COMMAND_TIMEOUT_MS,
+    });
+    return parseNativeDmgInfo(info.stdout);
+  }
+
+  async #resolveAttachOwnership(): Promise<"owned" | "none" | "unknown"> {
+    const mountRoot = this.#mountRoot;
+    if (mountRoot === undefined)
+      throw new Error("DMG mount root is unavailable for ownership discovery");
+    const ownership = resolveNativeDmgOwnership({
+      info: await this.#readInfo(),
+      ...(this.#attachOutput === undefined
+        ? {}
+        : { attachOutput: this.#attachOutput }),
+      attachOutputReturned: this.#attachOutputReturned,
+      mountRoot,
+      baselineDevices: this.#baselineDevices,
+    });
+    if (ownership.status === "owned") {
+      this.#devices = [...ownership.devices];
+      if (ownership.source === "info")
+        for (const device of ownership.devices)
+          this.#inventoryConfirmedDevices.add(device);
+      this.#attachMayHaveMounted = false;
+      this.#ownershipUncertainty = undefined;
+      return "owned";
+    }
+    if (ownership.status === "unknown") {
+      this.#ownershipUncertainty = ownership.reason;
+      return "unknown";
+    }
+    this.#attachMayHaveMounted = false;
+    this.#ownershipUncertainty = undefined;
+    this.#devices = [];
+    return "none";
   }
 }
 
 const failureMessage = (cause: unknown): string =>
   cause instanceof Error ? cause.message : String(cause);
+
+const processNotStarted = (cause: unknown): boolean => {
+  if (!(cause instanceof Error)) return false;
+  const syscall = Reflect.get(cause, "syscall");
+  const code = Reflect.get(cause, "code");
+  const errno = Reflect.get(cause, "errno");
+  return (
+    typeof syscall === "string" &&
+    syscall.startsWith("spawn ") &&
+    (typeof code === "string" ||
+      typeof code === "number" ||
+      typeof errno === "number")
+  );
+};
 
 const runChecked = async (
   host: NativeDmgHost,
@@ -282,16 +447,21 @@ const runChecked = async (
   } catch (cause: unknown) {
     if (cause instanceof ArtifactReaderFailure) throw cause;
     if (cause instanceof Error && cause.name === "AbortError")
-      throw new ArtifactReaderFailure("cancelled", "DMG operation cancelled", {
-        cause,
-      });
-    throw new ArtifactReaderFailure(
+      throw new NativeDmgCommandFailure(
+        "cancelled",
+        "DMG operation cancelled",
+        execFileOutputFailure(cause)?.stdout ?? "",
+        { cause },
+      );
+    const output = execFileOutputFailure(cause);
+    throw new NativeDmgCommandFailure(
       commandFailureReason(cause, arguments_[0]),
       `hdiutil ${arguments_[0] ?? "operation"} failed: ${describeCommandFailure(
         cause,
         arguments_,
       )}`,
-      { cause },
+      output?.stdout ?? "",
+      { cause, processNotStarted: processNotStarted(cause) },
     );
   }
   if (result.exitCode !== 0) {
@@ -308,12 +478,13 @@ const runChecked = async (
     const details = describeCommandFailure(failure, arguments_);
     const unknownVerifyFailure =
       arguments_[0] === "verify" && reason === "unavailable";
-    throw new ArtifactReaderFailure(
+    throw new NativeDmgCommandFailure(
       reason,
       unknownVerifyFailure
         ? `hdiutil verify failed; captured diagnostics do not establish the failure cause: ${details}`
         : `hdiutil ${arguments_[0] ?? "operation"} failed: ${details}`,
-      result.cause === undefined ? undefined : { cause: result.cause },
+      result.stdout,
+      { cause: result.cause ?? failure },
     );
   }
   return { stdout: result.stdout, exitCode: 0 };

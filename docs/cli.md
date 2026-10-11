@@ -20,6 +20,23 @@ files when neither `--provider` nor `--snapshot` is supplied. See
 [JavaScript artifact reconstruction](javascript-artifact-reconstruction.md)
 for results, integrity checks and coverage.
 
+The complete application Evidence can be hundreds of megabytes for a real
+application. When an agent or a person reads the result, save it to a file and
+project a summary, a module page or one module from the saved Evidence:
+
+```bash
+rea analyze-javascript-application /absolute/path/to/app --json > app-evidence.json
+jq -c '{source: {kind: "inline", evidence: .}, view: {kind: "summary"}}' app-evidence.json > app-view.json
+rea inspect-analysis-view app-view.json
+```
+
+For example, a 334 MB Obsidian application Evidence file yields a summary view
+of about 10 KB. Replace the view with
+`{"kind": "page", "collection": "modules", "offset": 0, "limit": 32}` for a
+module page. See
+[JavaScript application workflows](javascript-application-workflows.md) for
+views, feature traces and comparisons that take the same saved Evidence.
+
 ## Native analysis
 
 Configure [Hopper or Ghidra](installation.md#hopper), or the
@@ -43,7 +60,8 @@ Run `rea --help` or a command's `--help` for arguments and output options.
 The [generated catalog](product-catalog.json) lists all CLI commands and MCP
 tools. Provider-specific target support is described in the
 [native guide](native-investigation.md), [DOS guide](ghidra-dos.md),
-[raw image guide](ghidra-raw-image.md), and [Windows Ghidra guide](windows-ghidra-p0.md).
+[raw binary guide](raw-binary.md), [raw image guide](ghidra-raw-image.md), and
+[Windows Ghidra guide](windows-ghidra-p0.md).
 
 ## Choose a provider
 
@@ -80,7 +98,7 @@ or close. Provider failures are returned with their original reason. For an
 `ambiguous` selection error, choose from `details.candidate_ids`; for
 `provider_unavailable`, run `rea doctor --provider ID --json` to diagnose the
 selected engine. See [task readiness](installation.md#check-readiness-for-your-task)
-and [provider selection](adr/0001-provider-selection-and-analysis-profiles.md).
+and [provider selection](mcp-contracts.md#identity-and-discovery).
 
 The session reports work still in progress through `analysis_activity`.
 A client timeout can end its wait while the provider continues analyzing.
@@ -96,6 +114,12 @@ an exact result when the target bytes, operation, parameters, provider and
 settings match. Mutations and cursor-dependent calls are excluded from the
 cache. Snapshot files are local and use owner-only permissions.
 
+Snapshots retain eligible target-scoped question histories in full, including
+mutation Evidence recorded while another target was active. Observations and
+related questions must still belong to the saved target. If those dependencies
+cannot be retained, the entire history is excluded instead of reverting the
+question to an earlier revision or disposition.
+
 ```bash
 rea analyze /absolute/path/to/program --provider ghidra --snapshot /absolute/path/to/analysis/program.json
 # Repeat the same query to reuse its saved result.
@@ -108,6 +132,13 @@ for its matching target; an MCP provider may still start before returning a
 cached result. `close_binary` accepts `snapshot_path` and optional
 `overwrite: true` to save before releasing provider resources. A failed save
 leaves the session open so the caller can resolve the output failure.
+
+The MCP save receipt reports `primitive_entries`, `workflow_entries`, and
+`evidence_records` separately. Zero primitive bindings can still accompany retained workflow
+results and Evidence. These are cached observations, not a saved provider
+database: only eligible exact queries can reuse a result, and new or live
+queries can still require provider startup. The CLI uses the same snapshot
+format and preserves these records when loading and updating it.
 
 ## Import, export and compare Evidence
 
@@ -136,9 +167,20 @@ rea import-reference-source /absolute/path/to/source
 ```
 
 The import records hashes and metadata for the supplied files, separately
-from observations of the current app. File names do not automatically exclude
-files. Set `REA_REFERENCE_SECRET_PATTERNS_JSON` to a JSON array of ignore
-patterns when you want to exclude selected paths.
+from observations of the current app. It honors the source tree's `.gitignore`
+and applies default exclusions for common generated and dependency paths such
+as `node_modules/`, `dist/`, and `*.log`. Pattern-based exclusions record the
+matched pattern and whether it came from project, default, caller, or sensitive
+path policy. Set `REA_REFERENCE_SECRET_PATTERNS_JSON` to a JSON array of ignore
+patterns when you want to mark selected paths as sensitive; those patterns are
+reported separately as configured-secret exclusions.
+
+Re-import saved graphs whose pattern-based exclusions lack `pattern` before
+using them in source-to-bundle comparisons.
+
+JavaScript and TypeScript import parsing requires valid UTF-8. Malformed source
+bytes retain their original hashes and sizes with a decoding diagnostic; REA
+does not infer module targets from replacement characters.
 
 Historical-source import requires safe no-follow file opens on Linux or
 macOS. Native Windows returns `unsupported_host`; use Linux REA inside WSL
@@ -162,7 +204,10 @@ user permissions; consult the chosen guide for host requirements and effects.
 ## Output and exit status
 
 The default terminal format is TOON. Use `--json` when saving results for a
-JSON consumer. Output selection and formatting do not change operation status.
+JSON consumer. `--json` is indented on a terminal and compact when piped or
+redirected, which keeps large results smaller for agents and scripts; pipe
+through `jq .` for indented files. Output selection and formatting do not change
+operation status.
 
 | Status    | Meaning                                                                                                                                              |
 | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |

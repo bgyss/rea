@@ -1,20 +1,33 @@
-import type { BinaryArchitecture } from "./binaryTargetTypes.js";
+import type {
+  BinaryArchitecture,
+  MipsElfMetadata,
+} from "./binaryTargetTypes.js";
 import { err, ok, type Result } from "./result.js";
 import { mzWindowsHeaderOffset, parseDosMzHeader } from "./dosMz.js";
-
-export type { BinaryArchitecture, BinaryTarget } from "./binaryTargetTypes.js";
 
 /** Format and architecture facts recovered from an executable header. */
 export type ExecutableMetadata =
   | {
+      readonly format: "elf";
+      readonly architecture: "mips";
+      readonly availableArchitectures: readonly "mips"[];
+      readonly mips: MipsElfMetadata;
+    }
+  | {
       readonly format: "mach-o" | "elf" | "dos-mz" | "dos-com";
-      readonly architecture: BinaryArchitecture;
-      readonly availableArchitectures: readonly BinaryArchitecture[];
+      readonly architecture: Exclude<BinaryArchitecture, "mips">;
+      readonly availableArchitectures: readonly Exclude<
+        BinaryArchitecture,
+        "mips"
+      >[];
     }
   | {
       readonly format: "pe";
-      readonly architecture: BinaryArchitecture;
-      readonly availableArchitectures: readonly BinaryArchitecture[];
+      readonly architecture: Exclude<BinaryArchitecture, "mips">;
+      readonly availableArchitectures: readonly Exclude<
+        BinaryArchitecture,
+        "mips"
+      >[];
       readonly executableRole:
         | "application"
         | "shared-library"
@@ -35,28 +48,39 @@ export const parseExecutableHeader = (
     bytes.length >= 4 &&
     bytes.subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]))
   )
-    return parseElf(bytes);
+    return parseElf(bytes, fileSize);
   if (bytes.length >= 2 && bytes[0] === 0x4d && bytes[1] === 0x5a)
     return parseMz(bytes, fileSize);
   if (bytes.length < 8) return err("truncated or unsupported binary header");
   const magic = bytes.readUInt32BE(0);
   if ([0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe].includes(magic))
-    return parseThinMachO(bytes, magic);
+    return parseThinMachO(bytes, magic, fileSize);
   if ([0xcafebabe, 0xbebafeca, 0xcafebabf, 0xbfbafeca].includes(magic))
-    return parseFatMachO(bytes, magic, hostArchitecture);
+    return parseFatMachO(bytes, magic, hostArchitecture, fileSize);
   return err("unsupported binary format");
 };
 
 const parseThinMachO = (
   bytes: Buffer,
   magic: number,
+  fileSize: number,
 ): Result<ExecutableMetadata, string> => {
-  if (bytes.length < 8) return err("truncated Mach-O header");
+  const is64 = magic === 0xfeedfacf || magic === 0xcffaedfe;
+  const headerSize = is64 ? 32 : 28;
+  if (bytes.length < headerSize)
+    return err(
+      `truncated Mach-O header: a ${is64 ? 64 : 32}-bit header needs ${headerSize} bytes; the file has ${fileSize}`,
+    );
   const little = magic === 0xcefaedfe || magic === 0xcffaedfe;
-  const architecture = machArchitecture(
-    little ? bytes.readUInt32LE(4) : bytes.readUInt32BE(4),
-  );
+  const read = (offset: number): number =>
+    little ? bytes.readUInt32LE(offset) : bytes.readUInt32BE(offset);
+  const architecture = machArchitecture(read(4));
   if (architecture === undefined) return err("unsupported Mach-O architecture");
+  const commandBytes = read(20);
+  if (headerSize + commandBytes > fileSize)
+    return err(
+      `truncated Mach-O load commands: the header declares ${commandBytes} bytes after its ${headerSize}-byte header; the file has ${fileSize}`,
+    );
   return ok({
     format: "mach-o",
     architecture,
@@ -68,6 +92,7 @@ const parseFatMachO = (
   bytes: Buffer,
   magic: number,
   host: NodeJS.Architecture,
+  fileSize: number,
 ): Result<ExecutableMetadata, string> => {
   const little = magic === 0xbebafeca || magic === 0xbfbafeca;
   const is64 = magic === 0xcafebabf || magic === 0xbfbafeca;
@@ -78,11 +103,25 @@ const parseFatMachO = (
   const entrySize = is64 ? 32 : 20;
   if (count === 0 || count > 128 || bytes.length < 8 + count * entrySize)
     return err("truncated or invalid FAT architecture table");
-  const architectures: BinaryArchitecture[] = [];
+  const architectures: Exclude<BinaryArchitecture, "mips">[] = [];
+  const sliceEnds = new Map<BinaryArchitecture, bigint>();
   for (let index = 0; index < count; index += 1) {
-    const architecture = machArchitecture(read(8 + index * entrySize));
-    if (architecture !== undefined && !architectures.includes(architecture))
-      architectures.push(architecture);
+    const entry = 8 + index * entrySize;
+    const architecture = machArchitecture(read(entry));
+    if (architecture === undefined || architectures.includes(architecture))
+      continue;
+    architectures.push(architecture);
+    const offset = is64
+      ? little
+        ? bytes.readBigUInt64LE(entry + 8)
+        : bytes.readBigUInt64BE(entry + 8)
+      : BigInt(read(entry + 8));
+    const size = is64
+      ? little
+        ? bytes.readBigUInt64LE(entry + 16)
+        : bytes.readBigUInt64BE(entry + 16)
+      : BigInt(read(entry + 12));
+    sliceEnds.set(architecture, offset + size);
   }
   const preferred =
     host === "arm64"
@@ -96,6 +135,11 @@ const parseFatMachO = (
             : undefined;
   if (preferred === undefined || !architectures.includes(preferred))
     return err(`FAT binary has no host-compatible ${host} architecture`);
+  const sliceEnd = sliceEnds.get(preferred) ?? 0n;
+  if (sliceEnd > BigInt(fileSize))
+    return err(
+      `truncated FAT slice: the ${preferred} slice ends at byte ${sliceEnd}; the file has ${fileSize}`,
+    );
   return ok({
     format: "mach-o",
     architecture: preferred,
@@ -103,14 +147,36 @@ const parseFatMachO = (
   });
 };
 
-const parseElf = (bytes: Buffer): Result<ExecutableMetadata, string> => {
-  if (bytes.length < 20) return err("truncated ELF header");
+const parseElf = (
+  bytes: Buffer,
+  fileSize: number,
+): Result<ExecutableMetadata, string> => {
+  if (bytes.length < 6) return err("truncated ELF header");
   if (bytes[4] !== 1 && bytes[4] !== 2) return err("unsupported ELF class");
   const little = bytes[5] === 1;
   if (!little && bytes[5] !== 2) return err("unsupported ELF endianness");
+  const headerSize = bytes[4] === 1 ? 52 : 64;
+  if (bytes.length < headerSize)
+    return err(
+      `truncated ELF header: an ELF${bytes[4] === 1 ? 32 : 64} header needs ${headerSize} bytes; the file has ${fileSize}`,
+    );
   const machine = little ? bytes.readUInt16LE(18) : bytes.readUInt16BE(18);
   const architecture = elfArchitecture(machine);
   if (architecture === undefined) return err("unsupported ELF architecture");
+  if (architecture === "mips")
+    return ok({
+      format: "elf",
+      architecture,
+      availableArchitectures: [architecture],
+      mips: {
+        elfClass: bytes[4] === 1 ? 32 : 64,
+        byteOrder: little ? "little" : "big",
+        type: little ? bytes.readUInt16LE(16) : bytes.readUInt16BE(16),
+        flags: little
+          ? bytes.readUInt32LE(bytes[4] === 1 ? 36 : 48)
+          : bytes.readUInt32BE(bytes[4] === 1 ? 36 : 48),
+      },
+    });
   return ok({
     format: "elf",
     architecture,
@@ -202,7 +268,9 @@ const peManagedStatus = (
   );
 };
 
-const machArchitecture = (cpu: number): BinaryArchitecture | undefined => {
+const machArchitecture = (
+  cpu: number,
+): Exclude<BinaryArchitecture, "mips"> | undefined => {
   switch (cpu) {
     case 7:
       return "x86";
@@ -222,6 +290,8 @@ const elfArchitecture = (machine: number): BinaryArchitecture | undefined => {
       return "x86";
     case 62:
       return "x86_64";
+    case 8: // EM_MIPS: ISA, ABI and byte order remain separate ELF facts.
+      return "mips";
     case 40:
       return "arm";
     case 183:
@@ -230,7 +300,9 @@ const elfArchitecture = (machine: number): BinaryArchitecture | undefined => {
   return undefined;
 };
 
-const peArchitecture = (machine: number): BinaryArchitecture | undefined => {
+const peArchitecture = (
+  machine: number,
+): Exclude<BinaryArchitecture, "mips"> | undefined => {
   switch (machine) {
     case 0x14c:
       return "x86";

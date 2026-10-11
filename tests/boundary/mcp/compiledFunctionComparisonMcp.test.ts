@@ -12,7 +12,7 @@ const connect = async () => {
   const session = createTestBinarySession(() => {
     throw new Error("Compiled function comparison must not launch a provider");
   });
-  const server = createServer(session, session);
+  const server = createServer({ kind: "session", session });
   const client = new Client({ name: "compiled-comparison-test", version: "1" });
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
@@ -31,9 +31,7 @@ describe("compare_compiled_function MCP integration", () => {
         arguments: { left, right },
       });
       expect(compared.isError).not.toBe(true);
-      const evidence = parseEvidence(
-        jsonObjectSchema.parse(compared.structuredContent).evidence,
-      );
+      const evidence = parseEvidence(compared.structuredContent);
       expect(evidence.operation).toBe("compare_compiled_function");
       expect(evidence.predicate_type).toBe("rea.compiled-function-comparison");
       expect(evidence.parameters).toEqual({
@@ -68,7 +66,7 @@ describe("compare_compiled_function MCP integration", () => {
         },
       });
       expect(rejected.isError).toBe(true);
-      expect(JSON.stringify(rejected.structuredContent)).toContain(
+      expect(JSON.stringify(rejected.content)).toContain(
         "inspect_native_function_instructions",
       );
     } finally {

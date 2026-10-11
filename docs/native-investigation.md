@@ -12,6 +12,21 @@ input file and include the observed lipo slice offset for universal binaries.
 If that offset is unavailable, segment evidence locations are omitted with an
 explicit limitation; architecture inventory locations remain available.
 
+Hopper's `address_to_file_offset` combines the native image-relative mapping with
+original-file coordinates only after checking the source against the session's
+SHA-256. FAT tables and embedded Mach-O headers come from that same hashing pass.
+A changed or nonregular source reports `artifact_changed`; an unreadable or
+missing source reports its access or filesystem failure. Those errors retain the native offset,
+loaded header and provider source path in `details.partial_observation`, with the
+original-file coordinate explicitly unavailable. Restore the original bytes or
+reopen the changed executable to obtain verified coordinates. Snapshot replay
+remains historical evidence for its recorded artifact identity.
+
+A selected Hopper database's digest identifies the database rather than its
+original executable. Original-file mapping is unavailable for that selection;
+native mapping facts remain in partial evidence, and `read_bytes` still reads
+the loaded database. Open the original executable to verify source coordinates.
+
 Native Xcode command execution uses shared process supervision with a 60-second
 deadline and a 64 MiB aggregate stdout/stderr budget. Timeout, cancellation,
 stream failure, and output exhaustion retain the captured output, exit details,
@@ -44,17 +59,24 @@ complete observation.
   a source-owned AppKit XIB with `ibtool`. Storyboards require an installed
   iOS platform; unsupported archive forms remain explicit.
   XML plist archives accept UTF-8 and BOM-marked UTF-16 in either byte order.
-  The shared keyed-archive and Interface Builder decoder consumes an initial
+  App bundle `Info.plist` executable resolution uses the same decoder as keyed
+  archives and Interface Builder. The decoder consumes an initial
   BOM and rejects malformed byte sequences, unsupported encoding declarations,
   and declarations that disagree with the detected encoding. It never substitutes
   UTF-8 for a declared encoding it cannot process. Archive and evidence digests
-  still identify the original serialized bytes. Interface Builder decoding
+  still identify the original serialized bytes. Bundle resolution reports
+  malformed bytes and unsupported encodings against the original plist path
+  before looking up the executable. Interface Builder decoding
   limits aggregate input archives to 32 MiB.
   Before decoding, it also bounds the serialized structure: expanded binary
   plist references, NIB table records, XML elements and text, plus their
   projected representations must fit the 256 MiB aggregate decode budget.
-  This is a format-derived representation estimate, not a process-wide heap
-  ceiling.
+  NIB string values, data, property names and class names are charged at each
+  projected JSON occurrence, including when the archive reuses one source
+  value. Binary plist data projection also accounts for the temporary byte
+  copy made by the pinned decoder projection. These are format-derived
+  representation reservations, not exact heap measurements or a process-wide
+  heap ceiling.
   Archives beyond either aggregate budget are omitted with their paths and an
   explicitly partial `archive_decode` facet; previously decoded documents and
   their identities remain available.
@@ -74,8 +96,18 @@ complete observation.
 
   So an external superclass resolves from its `_OBJC_CLASS_$_` bind (for
   example `NSObject`). The `pointer_fixups` coverage facet names the mechanism.
-  Class properties, with parsed attributes, and `__objc_catlist` categories are
-  also decoded. Categories record the extended class, local or external, plus
+  Class properties preserve each encoded attribute as a raw `{name, value}`
+  pair, for example `{ name: "N", value: "" }`, and report atomicity on the
+  property: `N` means `nonatomic`; a complete typed attribute string without
+  `N` means the Objective-C default `atomic`;
+  missing or incomplete attribute metadata leaves `atomicity` and any
+  unestablished read-only value null. `is_meta_class`, `is_root_class`, and
+  `ivar_count` are also nullable when the selected provider exposes only symbol
+  names. Class implementation methods have null `is_required` and `is_optional`
+  fields because those facts apply to protocol declarations; decoded protocol
+  method lists retain their observed required/optional values. Class properties
+  and `__objc_catlist` categories are also decoded. Categories record the
+  extended class, local or external, plus
   their methods, protocols and properties; category methods appear as
   implementations with a `category`. Swift field-offset globals that are only
   initialized at runtime stay unresolved. Generic, resilient, async and
@@ -106,6 +138,9 @@ an explicit `0x` or address-space prefix selects an address; otherwise an exact
 database symbol name takes precedence over a bare hexadecimal address. Thus a
 function renamed to `dead` remains selectable by name. Use the names returned
 by the inventory, including their namespaces and any platform symbol prefix.
+Ghidra also accepts secondary symbols at a function entry, such as an imported
+`_main` label. A label inside a function is not a procedure-name selector; use
+its address when selecting the containing function.
 Overloads can share a fully qualified name; ambiguity errors return every
 matching entry address so the caller can select the intended function directly.
 
@@ -159,6 +194,40 @@ address tokens, typed references and flow destinations. Mid-instruction, data,
 outside-memory and undecodable addresses have separate outcomes. Effective
 memory base/index/displacement roles and per-instruction context mode remain
 unavailable; `mode` is the program language variant.
+
+`inspect_native_instruction` also returns `incoming_references` to the exact
+queried address, including data, interior-instruction and undecodable addresses.
+Ghidra enumerates its ReferenceManager, excludes synthetic entry-point
+references, and returns deterministic source-address ordering while retaining
+distinct operand references from the same source. `[]` means that enumeration
+found no references; omission or `null` means this facet is unavailable in an
+older capture or another provider. Empty static references do not prove that
+the address is unused at runtime. The existing `references` field still holds
+outgoing instruction references, and `xrefs` still returns bare source addresses.
+The Ghidra analysis profile versions this incoming-reference coverage. Reopen
+the target without an older snapshot and save a fresh snapshot to acquire it;
+the older snapshot's Evidence bundle remains readable with this facet unavailable.
+
+Compact incoming, outgoing instruction and call-target references preserve the source
+address, operand index, DATA/READ/WRITE classification, primary status, provider
+`provenance`, and reference `source` (for Ghidra: `analysis`, `default`, `imported`
+or `user_defined`). Primary status reports the provider's chosen reference; it
+does not establish literal addressing. Analyzer-inferred indexed targets remain
+static references, not observed runtime reads or writes. Older evidence may omit
+the additive fields, and null or omitted facts mean unavailable rather than false.
+
+Ghidra distinguishes a return using decoded instruction p-code's `RETURN`
+operation. `flow.classification_evidence` preserves the Listing flow type and
+the observed return evidence; mnemonic spelling alone is not the classifier.
+Other terminal or trap flows retain the provider's classification, and this
+inspection does not change function extents or prove a calling convention.
+The analysis profile commits this decoder behavior. Snapshots from the earlier
+profile produce a profile mismatch rather than replaying the former generic
+terminal result. The old snapshot's `evidence_bundle` remains valid retained
+Evidence: copy that object to a separate JSON file and use `rea evidence-import`
+to validate it. Run analysis without the old snapshot and save a fresh one
+under the current profile. Other providers and older captures may omit the
+classification evidence field.
 
 `inspect_native_function_instructions` (CLI `inspect-native-function-instructions
 <path> <procedure>`) lists every instruction of one function: bytes, mnemonic,
@@ -258,6 +327,18 @@ in `limitations`.
 Call resolution reports direct, resolved indirect, ambiguous, unresolved and
 non-call outcomes from static call references. It does not establish runtime
 execution or classify Objective-C/Swift/vtable/closure mechanisms from names.
+
+`batch_decompile` keeps each caller-selected symbol or address in `items[].address`.
+The separate `procedure` field reports the canonical entry and the provider's
+observed entry label. An interior address therefore remains visible without
+being mistaken for the function entry. Identity failures are reported as
+`procedure.status: "unknown"`; label failures leave a null name and `name_error`.
+Neither failure discards usable pseudocode, and names are not parsed from it.
+Resolved entries also appear in the composed Evidence locations. New batch
+Evidence commits the revised workflow profile; retained historical Evidence
+remains valid. This tool
+has no dedicated CLI command; the existing `decompile` command remains the
+single-procedure CLI operation.
 
 Type inspection selects one exact database pathname or typed data address.
 Struct/union fields, enums, pointers, arrays, typedefs, size, alignment, packing
@@ -468,9 +549,9 @@ the tool fails with a `debugger-attach-denied` reason.
 ## Provider and verification boundaries
 
 Install a Ghidra 12.1.x release and the 64-bit full JDK it declares, then configure REA to
-use them. Ghidra analysis supports Linux x64 and macOS x64/arm64; macOS requires
+use them. Ghidra analysis supports Linux x64/arm64 and macOS x64/arm64; each installation requires
 the matching native decompiler. Experimental Windows x64 P0 admits native
-x86-64 PE applications on local NTFS using bundled Job Object ownership,
+x86 and x86-64 PE applications and DLLs on local NTFS using bundled Job Object ownership,
 protected runtime DACLs, and handle-based path admission. See [Windows Ghidra P0](windows-ghidra-p0.md) and
 [issue #527](https://github.com/morluto/rea/issues/527).
 On Linux and macOS, `annotate_native_function` atomically edits a function name
@@ -480,6 +561,12 @@ unpaired Unicode surrogate; a rejection identifies the field and UTF-16 index
 and leaves every annotation unchanged. CRLF, supplementary Unicode characters,
 and combining characters are preserved. Windows P0 remains read-only. Ghidra has no
 GUI authority, and REA never falls back automatically to Hopper.
+`set_address_name` and `set_addresses_names` give Ghidra sessions the same
+compact naming results as Hopper: a local function entry renames that function,
+and any other mapped address, such as a global, receives a new or renamed primary
+label. A batch applies each address separately and reports one success boolean
+per address. Use them to name many globals and helpers cheaply; use
+`annotate_native_function` when you also want comments and a refreshed dossier.
 Ghidra name edits preserve the existing namespace. Supply either a leaf name
 such as `renamed` or a fully qualified name in that namespace, such as
 `alpha::renamed`. The returned qualified name can be reused as an idempotent
@@ -679,3 +766,25 @@ A keyed-archive hierarchy UID without an object-table entry marks the hierarchy
 as partial while preserving decoded objects and known links. UID 0 remains
 archived nil and does not count as a missing reference. Archive and evidence
 digests identify the original serialized bytes.
+
+## Keyed archive integer precision
+
+The archive reader observes XML number element types and binary number markers.
+Integers beyond the exact range of a JSON number are reported with the original
+decimal text as `{ "$plist_type": "integer", "decimal": "<exact digits>" }` when
+that source value can be associated unambiguously. Integral real values remain
+numbers. Colliding integer/real values, unclassified numbers, and malformed UID
+markers remain decoded with an explicit precision limitation. The limitation
+also counts observed unsafe integer literals, including observations outside the
+selected object page. Incomplete supplemental metadata produces an explicit
+precision note without rejecting an archive accepted by the byte decoder.
+Mixed XML number content (comments, CDATA, processing instructions or child
+elements) and integer text the supplemental reader cannot classify disable exact
+association and retain decoded numbers with that precision note. Nonnumeric
+`UID` and `CF$UID` dictionary values remain ordinary data and are projected
+recursively; numeric reference markers retain their original representation.
+
+Value projection preserves serialized node kinds, IDs, references and pagination.
+Exact and ambiguous value counts describe emitted root/object value instances;
+a root and an object may contain the same value. Archive digests identify the
+original bytes.

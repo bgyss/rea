@@ -5,8 +5,10 @@ import { z } from "zod";
 
 import { artifactComparisonResultSchema } from "./artifactComparison.js";
 import { uniqueSorted } from "./canonicalOrdering.js";
+import { compareUnicodeCodePoints } from "./unicodeCodePointOrder.js";
+import { comparisonSourceEvidenceIds } from "./comparisonSourceEvidence.js";
 import { evidenceSchema, parseEvidence, type Evidence } from "./evidence.js";
-import { functionComparisonResultSchema } from "./functionComparison.js";
+import { functionComparisonResultSchema } from "./functionComparisonSchemas.js";
 import {
   PROCESS_PROVIDER,
   isProcessEvidenceProvider,
@@ -15,7 +17,7 @@ import type { JsonValue } from "./jsonValue.js";
 import {
   comparisonStatusSchema,
   processCaptureComparisonSchema,
-} from "./process/processCapture.js";
+} from "./process/processComparison.js";
 import { PROCESS_COMPARISON_DIMENSIONS } from "./process/processComparison.js";
 import { prefixedDigestSchema } from "./../domain/digests.js";
 
@@ -174,7 +176,7 @@ export const correlateStaticAndRuntime = (
   const correlations = parsed.mappings
     .map((mapping) => correlate(mapping, staticById, runtimeById))
     .sort((left, right) =>
-      left.correlation_id.localeCompare(right.correlation_id, "en"),
+      compareUnicodeCodePoints(left.correlation_id, right.correlation_id),
     );
   if (
     new Set(correlations.map(({ correlation_id: id }) => id)).size !==
@@ -392,64 +394,20 @@ const assertComparisonIdentity = (evidence: Evidence): void => {
         evidence.provider.version !== "1") ||
     evidence.confidence !== "derived" ||
     evidence.authority !== "analyst-inference" ||
-    evidence.subject !== null ||
-    evidence.evidence_links.length < 2 ||
-    new Set(evidence.evidence_links).size !== evidence.evidence_links.length
+    evidence.subject !== null
   )
     throw new TypeError(
       "Comparison Evidence operation, predicate, provider, or citations disagree",
     );
-  const parameterLinks = comparisonParameterLinks(evidence);
-  if (!sameSet(parameterLinks, evidence.evidence_links))
+  const expectedLinks = comparisonSourceEvidenceIds(evidence);
+  const actualLinks = uniqueSorted(evidence.evidence_links);
+  if (
+    expectedLinks.length !== actualLinks.length ||
+    expectedLinks.some((id, index) => id !== actualLinks[index])
+  )
     throw new TypeError(
       "Comparison Evidence closure disagrees with its source parameters",
     );
-};
-
-const comparisonParameterLinks = (evidence: Evidence): string[] => {
-  if (evidence.operation === "compare_process_captures") {
-    const parameters = z
-      .object({
-        left_evidence_id: evidenceIdSchema,
-        right_evidence_id: evidenceIdSchema,
-      })
-      .passthrough()
-      .parse(evidence.parameters);
-    return [parameters.left_evidence_id, parameters.right_evidence_id];
-  }
-  const parameters = z
-    .object({
-      left_evidence_id: evidenceIdSchema.optional(),
-      right_evidence_id: evidenceIdSchema.optional(),
-      left_evidence_ids: z.array(evidenceIdSchema).min(1).optional(),
-      right_evidence_ids: z.array(evidenceIdSchema).min(1).optional(),
-    })
-    .passthrough()
-    .parse(evidence.parameters);
-  const left =
-    parameters.left_evidence_id === undefined
-      ? (parameters.left_evidence_ids ?? [])
-      : [parameters.left_evidence_id];
-  const right =
-    parameters.right_evidence_id === undefined
-      ? (parameters.right_evidence_ids ?? [])
-      : [parameters.right_evidence_id];
-  if (left.length === 0 || right.length === 0)
-    throw new TypeError("Comparison Evidence omitted its source parameters");
-  return [...left, ...right];
-};
-
-const sameSet = (
-  left: readonly string[],
-  right: readonly string[],
-): boolean => {
-  if (left.length !== right.length) return false;
-  const rightSet = new Set(right);
-  return (
-    rightSet.size === right.length &&
-    new Set(left).size === left.length &&
-    left.every((item) => rightSet.has(item))
-  );
 };
 
 const observedPattern = (

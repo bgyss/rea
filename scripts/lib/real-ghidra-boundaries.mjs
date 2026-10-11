@@ -1,3 +1,8 @@
+import {
+  requireMcpToolError,
+  mcpTextValue,
+  requireMcpOperationResult,
+} from "./mcp-verifier-results.mjs";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -7,10 +12,14 @@ import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import Ajv from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
-import { mcpTextValue, requireMcpResult } from "./mcp-verifier-results.mjs";
+
+import { analysisErrorProjectionSchema } from "../../dist/contracts/errorSchemas.js";
+
 import { verifyLegacyGhidraReferenceSnapshot } from "./ghidra-reference-snapshot-e2e.mjs";
 import { verifyGhidraSnapshotLifecycle } from "./real-ghidra-snapshot-lifecycle.mjs";
 import { verifyGhidraTargetAdmission } from "./real-ghidra-target-admission.mjs";
+import { verifyGhidraLargeResults } from "./real-ghidra-large-results.mjs";
+import { verifyGhidraEntryAliases } from "./real-ghidra-entry-aliases.mjs";
 import { verifyGhidraNamespaceAnnotations } from "./real-ghidra-namespace-annotations.mjs";
 import {
   verifyAnnotationSets,
@@ -18,6 +27,8 @@ import {
   verifyTypeDefinitions,
   verifyTypedAnnotations,
 } from "./real-ghidra-typed-annotations.mjs";
+import { verifyGhidraBatchIdentity } from "./real-ghidra-batch-identity.mjs";
+import { verifyGhidraInstructionFlow } from "./real-ghidra-instruction-flow.mjs";
 
 /** Probe real Ghidra location, annotation and error contracts through public adapters. */
 export async function verifyGhidraBoundaries(
@@ -35,13 +46,17 @@ export async function verifyGhidraBoundaries(
         ajv.validateSchema(tool[key]),
         `${tool.name} ${key}: ${JSON.stringify(ajv.errors)}`,
       );
-    validators.set(tool.name, ajv.compile(tool.outputSchema));
+    validators.set(
+      tool.name,
+      (tool.outputSchema?.$id && ajv.getSchema(tool.outputSchema.$id)) ||
+        ajv.compile(tool.outputSchema),
+    );
   }
   let successfulCalls = 0;
   let rejectedCalls = 0;
   const call = async (name, args = {}) => {
     const reply = await client.callTool({ name, arguments: args }, options);
-    const result = requireMcpResult(reply, name);
+    const result = requireMcpOperationResult(reply, name);
     const validate = validators.get(name);
     assert.ok(validate, `${name} missing from catalog`);
     assert.ok(
@@ -49,6 +64,15 @@ export async function verifyGhidraBoundaries(
       `${name}: ${JSON.stringify(validate.errors)}`,
     );
     assert.deepEqual(reply.structuredContent, JSON.parse(mcpTextValue(reply)));
+    if (name === "list_strings" || name === "search_strings")
+      assert.ok(
+        reply.structuredContent.limitations.some((limitation) =>
+          /Only Ghidra-defined string Data.*empty search does not establish/u.test(
+            limitation,
+          ),
+        ),
+        `${name} omitted defined-string coverage`,
+      );
     successfulCalls++;
     return result;
   };
@@ -59,14 +83,19 @@ export async function verifyGhidraBoundaries(
       true,
       `${name} accepted ${JSON.stringify(args)}`,
     );
+    // SDK input rejections are prose; application errors carry canonical JSON
+    // text without publishing data outside the advertised success schema.
+    const error = mcpTextValue(reply).startsWith("{")
+      ? requireMcpToolError(reply)
+      : undefined;
+    assert.equal(reply.structuredContent, undefined);
     if (diagnostic !== undefined) {
-      const error = reply.structuredContent?.error;
       assert.equal(error?.code, "invalid_request");
       assert.equal(error?.details?.operation, name);
       assert.match(JSON.stringify(error.details.issues), diagnostic);
     }
     rejectedCalls++;
-    return reply.structuredContent?.error;
+    return error;
   };
   const cli = async (command, value, flags = []) => {
     const { stdout } = await promisify(execFile)(
@@ -151,6 +180,8 @@ export async function verifyGhidraBoundaries(
     /Annotations require a local function entry/u,
   );
   const names = await call("list_names");
+  const batchIdentity = await verifyGhidraBatchIdentity(call, names);
+  const instructionFlow = await verifyGhidraInstructionFlow(call, names, cli);
   const leaf = names.find((item) =>
     item.value.endsWith("rea_ghidra_inventory_leaf"),
   );
@@ -205,6 +236,24 @@ export async function verifyGhidraBoundaries(
     entrypoint,
     env,
   });
+  const longSelector = "REA_MISSING_" + "x".repeat(32768);
+  for (const selected of [
+    longSelector,
+    `${longSelector}:0x1`,
+    `${"%78".repeat(12000)}:0x1`,
+    `${longSelector}%GG:0x1`,
+  ]) {
+    await invalid(
+      "procedure_address",
+      { procedure: selected },
+      /Unknown|invalid/u,
+    );
+    assert.equal(
+      await call("procedure_address", { procedure: address }),
+      address,
+      "Invalid selectors must preserve the live provider connection",
+    );
+  }
   const baseline = await call("inspect_native_instruction", { address });
   assert.equal(baseline.status, "decoded");
   const bytes = await call("read_bytes", { address, length: baseline.length });
@@ -255,7 +304,25 @@ export async function verifyGhidraBoundaries(
     await cli("inspect-native-instruction", address.toUpperCase()),
     baseline,
   );
-  const interior = `0x${(BigInt(address) + 1n).toString(16)}`;
+  // x86 function entries can begin with a one-byte PUSH. Locate an observed
+  // multi-byte instruction instead of assuming entry + 1 is an interior byte.
+  let multiByteInstruction;
+  for (const range of original.procedure.body.ranges) {
+    let cursor = BigInt(range.start);
+    while (cursor <= BigInt(range.end)) {
+      const instruction = await call("inspect_native_instruction", {
+        address: `0x${cursor.toString(16)}`,
+      });
+      if (instruction.status === "decoded" && instruction.length > 1) {
+        multiByteInstruction = instruction;
+        break;
+      }
+      cursor += BigInt(instruction.length ?? 1);
+    }
+    if (multiByteInstruction !== undefined) break;
+  }
+  assert.ok(multiByteInstruction, "Fixture lacks a multi-byte instruction");
+  const interior = `0x${(BigInt(multiByteInstruction.address) + 1n).toString(16)}`;
   assert.equal(
     (await call("inspect_native_instruction", { address: interior })).status,
     "not-instruction-boundary",
@@ -325,6 +392,12 @@ export async function verifyGhidraBoundaries(
       })
     ).some((item) => item.address === marker.address),
     false,
+  );
+  assert.deepEqual(
+    await call("search_strings", {
+      pattern: `REA_GHIDRA_ABSENT_${randomUUID()}`,
+    }),
+    [],
   );
   assert.equal(
     (await call("inspect_native_instruction", { address: strings[0].address }))
@@ -434,7 +507,7 @@ export async function verifyGhidraBoundaries(
     options,
   );
   assert.equal(regexFailure.isError, true);
-  const regexError = regexFailure.structuredContent.error;
+  const regexError = requireMcpToolError(regexFailure);
   assert.equal(regexError.code, "resource_constraint");
   assert.equal(regexError.details.operation, "search_strings");
   assert.equal(regexError.details.resource, "memory");
@@ -456,7 +529,7 @@ export async function verifyGhidraBoundaries(
     options,
   );
   assert.equal(compileFailure.isError, true);
-  const compileError = compileFailure.structuredContent.error;
+  const compileError = requireMcpToolError(compileFailure);
   assert.equal(compileError.code, "resource_constraint");
   assert.equal(compileError.details.operation, "search_procedures");
   assert.match(compileError.details.reason, /stack while compiling pattern/u);
@@ -704,6 +777,20 @@ export async function verifyGhidraBoundaries(
     entrypoint,
     env,
   });
+  await verifyGhidraEntryAliases({
+    call,
+    reject: invalid,
+    target,
+    entrypoint,
+    env,
+  });
+  await verifyGhidraLargeResults({
+    call,
+    reject: invalid,
+    target,
+    entrypoint,
+    env,
+  });
   await assert.rejects(access(socketRoot), { code: "ENOENT" });
   await assert.rejects(access(runtimeRoot), { code: "ENOENT" });
   assert.equal(await call("procedure_address", { procedure: name }), address);
@@ -748,7 +835,12 @@ export async function verifyGhidraBoundaries(
     missing_and_nonregular_source_rejected: true,
     imported_source_identity_retained: true,
     equivalent_instruction_address_spellings: true,
+    batch_procedure_identity: batchIdentity,
+    instruction_flow: instructionFlow,
     qualified_annotation_name_roundtrip: true,
+    imported_entry_alias_selection: true,
+    oversized_result_retention_and_complete_export: true,
+    long_selector_rejection_and_provider_recovery: true,
     source_immutable: true,
     reopen_discards_edits: true,
     long_tmpdir_private_socket_cleanup: true,

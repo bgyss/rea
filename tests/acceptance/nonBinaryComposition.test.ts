@@ -1,3 +1,4 @@
+import { parseMcpToolError } from "../fixtures/mcpToolError.js";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -16,11 +17,14 @@ const connect = async (environment: NodeJS.ProcessEnv) => {
   const session = createTestBinarySession(() => {
     throw new Error("Target-free analysis must not acquire a deep provider");
   });
-  const server = createServer(session, session, {
-    androidAnalysis: createAndroidAnalysisProvider(environment),
-    firmwareAnalysis: createFirmwareAnalysisProvider(environment),
-    javascriptRecovery: createJavaScriptRecoveryProvider(environment),
-  });
+  const server = createServer(
+    { kind: "session", session },
+    {
+      androidAnalysis: createAndroidAnalysisProvider(environment),
+      firmwareAnalysis: createFirmwareAnalysisProvider(environment),
+      javascriptRecovery: createJavaScriptRecoveryProvider(environment),
+    },
+  );
   const client = new Client({ name: "composition-parity", version: "1" });
   onTestFinished(async () => {
     await client.close();
@@ -34,33 +38,43 @@ const connect = async (environment: NodeJS.ProcessEnv) => {
   return client;
 };
 
-cliTest.skipIf(process.platform === "win32")(
-  "preserves the selected APK configuration through the compiled CLI and MCP factories",
-  async ({ cli }) => {
-    const root = await createTestTempDirectory("rea-android-composition-");
-    const apk = join(root, "fixture.apk");
-    await writeOrderedZip(apk, ["AndroidManifest.xml", "classes.dex"]);
-    const environment = {
-      REA_LOG_LEVEL: "silent",
-      JAVA_HOME: "relative-fixture-jdk",
-    };
-    const cliResult = await cli.run({
-      arguments: ["inspect-android-package", apk, "--json"],
-      environment,
-      timeoutMs: 10_000,
-    });
-    expect(cliResult.exitCode).toBe(1);
-    expect(cliResult.json).toMatchObject({ code: "capability_unavailable" });
-    const client = await connect(environment);
-    const response = await client.callTool({
-      name: "inspect_android_package",
-      arguments: { path: apk },
-    });
-    expect(response.isError).toBe(true);
-    expect(response.structuredContent).toEqual({ error: cliResult.json });
-    expect(JSON.stringify(response.structuredContent)).toContain("JAVA_HOME");
-  },
-);
+for (const { jarConfigured, setting } of [
+  { jarConfigured: false, setting: "REA_JADX_MCP_JAR" },
+  { jarConfigured: true, setting: "JAVA_HOME" },
+])
+  cliTest.skipIf(process.platform === "win32")(
+    `preserves the APK ${setting} failure through the compiled CLI and MCP factories`,
+    async ({ cli }) => {
+      const root = await createTestTempDirectory("rea-android-composition-");
+      const apk = join(root, "fixture.apk");
+      await writeOrderedZip(apk, ["AndroidManifest.xml", "classes.dex"]);
+      const jar = join(root, "jadx-headless-mcp.jar");
+      await writeFile(
+        jar,
+        "fixture jar; validation must fail before execution",
+      );
+      const environment = {
+        REA_LOG_LEVEL: "silent",
+        JAVA_HOME: "relative-fixture-jdk",
+        ...(jarConfigured ? { REA_JADX_MCP_JAR: jar } : {}),
+      };
+      const cliResult = await cli.run({
+        arguments: ["inspect-android-package", apk, "--json"],
+        environment,
+        timeoutMs: 10_000,
+      });
+      expect(cliResult.exitCode).toBe(1);
+      expect(cliResult.json).toMatchObject({ code: "capability_unavailable" });
+      const client = await connect(environment);
+      const response = await client.callTool({
+        name: "inspect_android_package",
+        arguments: { path: apk },
+      });
+      expect(response.isError).toBe(true);
+      expect(parseMcpToolError(response)).toEqual({ error: cliResult.json });
+      expect(JSON.stringify(parseMcpToolError(response))).toContain(setting);
+    },
+  );
 
 cliTest.skipIf(process.platform !== "linux")(
   "preserves the missing firmware command reason through both caller paths",
@@ -82,8 +96,8 @@ cliTest.skipIf(process.platform !== "linux")(
       arguments: { path },
     });
     expect(response.isError).toBe(true);
-    expect(response.structuredContent).toEqual({ error: cliResult.json });
-    expect(JSON.stringify(response.structuredContent)).toContain(
+    expect(parseMcpToolError(response)).toEqual({ error: cliResult.json });
+    expect(JSON.stringify(parseMcpToolError(response))).toContain(
       "REA_BINWALK_COMMAND",
     );
   },
@@ -135,8 +149,8 @@ cliTest(
       arguments: { path, output_directory: join(root, "output") },
     });
     expect(response.isError).toBe(true);
-    expect(response.structuredContent).toEqual({ error: cliResult.json });
-    expect(JSON.stringify(response.structuredContent)).toContain(
+    expect(parseMcpToolError(response)).toEqual({ error: cliResult.json });
+    expect(JSON.stringify(parseMcpToolError(response))).toContain(
       "REA_WAKARU_COMMAND",
     );
   },
@@ -173,7 +187,7 @@ cliTest(
       });
       expect(result.exitCode).toBe(1);
       expect(response.isError).toBe(true);
-      expect(response.structuredContent).toEqual({ error: result.json });
+      expect(parseMcpToolError(response)).toEqual({ error: result.json });
       expect(result.json).toMatchObject({
         code: "invalid_request",
         details: {

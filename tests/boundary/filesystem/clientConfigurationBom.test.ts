@@ -99,22 +99,30 @@ describe.each([
   );
 });
 
-it("rejects malformed BOM-prefixed JSON without writing or backing it up", async () => {
-  const home = await createTestTempDirectory("rea-client-config-bom-invalid-");
-  const configPath = join(home, "mcp.json");
-  const client = { name: "vscode", format: "vscode", configPath } as const;
-  const original = '\uFEFF{"servers": {"rea": @}}';
-  await writeFile(configPath, original);
+it.each(['\uFEFF{"servers": {"rea": @}}', '\uFEFF{"setting":\uFEFFtrue}'])(
+  "rejects malformed BOM placement without mutation: %j",
+  async (original) => {
+    const home = await createTestTempDirectory(
+      "rea-client-config-bom-invalid-",
+    );
+    const configPath = join(home, "mcp.json");
+    const client = { name: "vscode", format: "vscode", configPath } as const;
+    await writeFile(configPath, original);
+    const invalidOffset = original.includes("@") ? original.indexOf("@") : 12;
+    expect(() => parseClientConfiguration(original, client.format)).toThrow(
+      `Invalid JSON/JSONC at offset ${invalidOffset}: InvalidSymbol`,
+    );
 
-  expect(
-    await inspectClientConfiguration(client, {}, ["rea", "mcp"]),
-  ).toMatchObject({ status: "invalid" });
-  expect(
-    await configureClientConfiguration(client, {}, ["rea", "mcp"]),
-  ).toEqual({ status: "failed", reason: "readback" });
-  expect(await readFile(configPath)).toEqual(Buffer.from(original));
-  expect(await readdir(home)).toEqual(["mcp.json"]);
-});
+    expect(
+      await inspectClientConfiguration(client, {}, ["rea", "mcp"]),
+    ).toMatchObject({ status: "invalid" });
+    expect(
+      await configureClientConfiguration(client, {}, ["rea", "mcp"]),
+    ).toEqual({ status: "failed", reason: "readback" });
+    expect(await readFile(configPath)).toEqual(Buffer.from(original));
+    expect(await readdir(home)).toEqual(["mcp.json"]);
+  },
+);
 
 it("restores original BOM-prefixed JSONC bytes after update and removal", async () => {
   const home = await createTestTempDirectory("rea-client-config-bom-cycle-");
@@ -149,3 +157,33 @@ it("restores original BOM-prefixed JSONC bytes after update and removal", async 
   });
   expect(await readFile(client.configPath, "utf8")).toBe(original);
 });
+
+it.each(["", "\n  \n", "\uFEFF"])(
+  "configures an empty client file %j as a new document",
+  async (original) => {
+    const home = await createTestTempDirectory("rea-client-config-empty-");
+    const client = supportedClients(home, "linux", {}).find(
+      (candidate) => candidate.name === "antigravity",
+    );
+    if (client?.format !== "json")
+      throw new Error("missing Antigravity JSON config");
+    await mkdir(dirname(client.configPath), { recursive: true });
+    await writeFile(client.configPath, original);
+    const command = [join(home, "rea"), "mcp"];
+
+    expect(await inspectClientConfiguration(client, {}, command)).toEqual({
+      status: "update",
+      backupPath: `${client.configPath}.rea.backup`,
+    });
+    expect(await configureClientConfiguration(client, {}, command)).toEqual({
+      status: "configured",
+      backupPath: `${client.configPath}.rea.backup`,
+    });
+    expect(JSON.parse(await readFile(client.configPath, "utf8"))).toEqual({
+      mcpServers: { rea: clientRegistrationEntry(client.format, command, {}) },
+    });
+    expect(await inspectClientConfiguration(client, {}, command)).toEqual({
+      status: "already_current",
+    });
+  },
+);

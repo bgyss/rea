@@ -6,52 +6,48 @@ import {
   AnnotationLedgerBinding,
   appendAnnotationFromEvidence,
 } from "../application/AnnotationLedger.js";
+import type { EvidenceMcpServer } from "./EvidenceMcpServer.js";
 import type { EvidenceWriter } from "../application/investigation/InvestigationRecordPort.js";
-import type { McpServer, ServerContext } from "@modelcontextprotocol/server";
-import { z } from "zod";
+import type { ServerContext } from "@modelcontextprotocol/server";
 
 import type {
   AnalysisExecution,
   AnalysisOperationPort,
 } from "../application/AnalysisProvider.js";
 import type { ProgressReporter } from "../application/ProgressReporter.js";
-import type { ToolContract } from "../contracts/toolContracts.js";
 import { OFFICIAL_TOOL_CONTRACTS } from "../contracts/officialToolContracts.js";
-import type { BinaryTarget } from "../domain/binaryTarget.js";
+import type { BinaryTarget } from "../domain/binaryTargetTypes.js";
 import type { AnalysisError } from "../domain/analysisErrorBase.js";
 import { createEvidence, type Evidence } from "../domain/evidence.js";
-import {
-  jsonObjectSchema,
-  jsonValueSchema,
-  type JsonValue,
-} from "../domain/jsonValue.js";
+import { jsonObjectSchema, type JsonValue } from "../domain/jsonValue.js";
 import { ok, type Result } from "../domain/result.js";
-import type { Logger } from "../logger.js";
+import type { Logger } from "pino";
 import { mcpProgressReporter } from "./mcpProgress.js";
 import { logToolExecution } from "./toolLogging.js";
 import { toolRegistrationOptions } from "./toolRegistrationOptions.js";
-import { toCallToolResult } from "./toolResult.js";
+import type { WithAdmittedAnalysis } from "./analysisAdmission.js";
 
 /** Optional session services used by direct tool registration. */
 export interface OfficialToolRegistration {
   readonly logger: Logger;
   readonly activeTarget: (() => BinaryTarget | undefined) | undefined;
   readonly recordEvidence: EvidenceWriter["recordEvidence"] | undefined;
+  readonly withAdmittedAnalysis: WithAdmittedAnalysis;
   /** Ledger bound by open_binary; annotation tools append to it. */
   readonly annotationLedger?: AnnotationLedgerBinding;
 }
 
 /** Register direct bridge proxies, preserving MCP cancellation and typed errors. */
 export const registerOfficialTools = (
-  server: McpServer,
-  analysis: AnalysisOperationPort,
+  server: EvidenceMcpServer,
   options: OfficialToolRegistration,
 ): void => {
   for (const contract of OFFICIAL_TOOL_CONTRACTS) {
-    registerOfficialTool(server, analysis, contract, {
+    registerOfficialTool(server, contract, {
       logger: options.logger,
       activeTarget: options.activeTarget,
       recordEvidence: options.recordEvidence,
+      withAdmittedAnalysis: options.withAdmittedAnalysis,
       ...(options.annotationLedger === undefined
         ? {}
         : { annotationLedger: options.annotationLedger }),
@@ -60,13 +56,13 @@ export const registerOfficialTools = (
 };
 
 const registerOfficialTool = (
-  server: McpServer,
-  analysis: AnalysisOperationPort,
+  server: EvidenceMcpServer,
   contract: (typeof OFFICIAL_TOOL_CONTRACTS)[number],
   registration: {
     readonly logger: Logger;
     readonly activeTarget: (() => BinaryTarget | undefined) | undefined;
     readonly recordEvidence: EvidenceWriter["recordEvidence"] | undefined;
+    readonly withAdmittedAnalysis: WithAdmittedAnalysis;
     readonly annotationLedger?: AnnotationLedgerBinding;
   },
 ): void => {
@@ -74,50 +70,67 @@ const registerOfficialTool = (
     contract.name,
     toolRegistrationOptions(contract),
     async (input: unknown, context: ServerContext) => {
-      const arguments_ = projectOfficialArguments(contract, input);
-      const progress = mcpProgressReporter(context);
-      const result = await runOfficialOperation(
-        analysis,
-        contract,
-        arguments_,
-        {
-          logger: registration.logger,
-          signal: context.mcpReq.signal,
-          progress,
+      const admitted = await registration.withAdmittedAnalysis(
+        contract.name,
+        context.mcpReq.signal,
+        async (admittedAnalysis) => {
+          const arguments_ = jsonObjectSchema.parse(
+            contract.inputSchema.parse(input),
+          );
+          const progress = mcpProgressReporter(context);
+          const result = await runOfficialOperation(
+            admittedAnalysis,
+            contract,
+            arguments_,
+            {
+              logger: registration.logger,
+              signal: context.mcpReq.signal,
+              progress,
+            },
+          );
+          if (!result.ok) {
+            return server.delivery.toCallToolResult(result, contract);
+          }
+          const evidence = createEvidence(
+            result.value.subject ?? registration.activeTarget?.(),
+            result.value.provider,
+            {
+              operation: contract.name,
+              parameters: arguments_,
+              result: result.value.result,
+              ...(result.value.analysisProfile === undefined
+                ? {}
+                : { analysisProfile: result.value.analysisProfile }),
+              rawResult: result.value.rawResult,
+              limitations: result.value.limitations,
+              locations: result.value.locations,
+            },
+          );
+          const recorded = registration.recordEvidence?.(evidence);
+          if (
+            (recorded === undefined || recorded.ok) &&
+            isAnnotationOperation(contract.name)
+          ) {
+            const appended = await recordAnnotation(
+              registration.annotationLedger,
+              registration.activeTarget?.(),
+              contract.name,
+              arguments_,
+              evidence,
+            );
+            if (!appended.ok)
+              return server.delivery.toCallToolResult(appended, contract);
+          }
+          return server.delivery.toEvidenceToolResult(
+            evidence,
+            contract,
+            recorded,
+          );
         },
       );
-      if (!result.ok) {
-        return toCallToolResult(result, contract);
-      }
-      const evidence = createEvidence(
-        result.value.subject ?? registration.activeTarget?.(),
-        result.value.provider,
-        {
-          operation: contract.name,
-          parameters: arguments_,
-          result: result.value.result,
-          ...(result.value.analysisProfile === undefined
-            ? {}
-            : { analysisProfile: result.value.analysisProfile }),
-          rawResult: result.value.rawResult,
-          limitations: result.value.limitations,
-          locations: result.value.locations,
-        },
-      );
-      const recorded = registration.recordEvidence?.(evidence);
-      if (recorded !== undefined && !recorded.ok)
-        return toCallToolResult(recorded, contract);
-      if (isAnnotationOperation(contract.name)) {
-        const appended = await recordAnnotation(
-          registration.annotationLedger,
-          registration.activeTarget?.(),
-          contract.name,
-          arguments_,
-          evidence,
-        );
-        if (!appended.ok) return toCallToolResult(appended, contract);
-      }
-      return toCallToolResult({ ok: true, value: evidence }, contract);
+      return admitted.ok
+        ? admitted.value
+        : server.delivery.toCallToolResult(admitted, contract);
     },
   );
 };
@@ -152,26 +165,6 @@ const runOfficialOperation = async (
     terminal: true,
   });
   return result;
-};
-
-const projectOfficialArguments = (
-  contract: ToolContract,
-  input: unknown,
-): Readonly<Record<string, JsonValue>> => {
-  // Annotation omissions preserve existing values; they are not Python defaults.
-  if (isAnnotationOperation(contract.name))
-    return jsonObjectSchema.parse(contract.inputSchema.parse(input));
-  const parsed = jsonObjectSchema.parse(input);
-  if (!(contract.inputSchema instanceof z.ZodObject))
-    throw new TypeError(
-      "Official tool input contract must be an object schema",
-    );
-
-  const projected: Record<string, JsonValue> = {};
-  for (const key of Object.keys(contract.inputSchema.shape)) {
-    projected[key] = jsonValueSchema.parse(parsed[key] ?? null);
-  }
-  return projected;
 };
 
 /** Append to the ledger bound for the active target, if any. */

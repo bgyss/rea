@@ -1,13 +1,15 @@
 import { z } from "zod";
-import { isAbsoluteLocalPath } from "../localPath.js";
+import { isAbsolute } from "node:path";
+import { localPathStringSchema } from "../localPath.js";
 
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/u);
 
 /** One operator-supplied Function ID database, pinned by content digest. */
 export const nativeSignatureDatabaseInputSchema = z.strictObject({
-  path: z
-    .string()
-    .refine(isAbsoluteLocalPath, "Function ID database path must be absolute"),
+  path: localPathStringSchema.refine(
+    isAbsolute,
+    "Function ID database path must be absolute",
+  ),
   sha256,
 });
 

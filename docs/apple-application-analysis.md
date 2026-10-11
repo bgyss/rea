@@ -7,6 +7,16 @@ hashes, detected formats, bundle anatomy, runtime-family hints, and path-based
 bridge hypotheses. It does not parse plist or CMS semantics or claim observed
 runtime calls.
 
+Framework hints match complete path segments such as `React.framework`,
+`ReactNative.framework`, `hermes.framework`, `Flutter.framework`, and
+`UnityFramework.framework`. Substrings in `Preact.framework`,
+`Community.framework`, or `MyApp.framework` do not identify those families.
+A generic `App.framework` also does not identify Flutter by itself. Runtime
+families remain inventory-derived hints, not observed loading. Generic framework
+and dylib paths do not establish Swift or Objective-C; this projection does not
+decode language metadata. A bridge basis is inferred from the native path and
+repeated for each paired script, rather than proving a particular binding.
+
 ```sh
 rea project-apple-application-graph '{"inventory_evidence":[<inventory_artifact Evidence>]}'
 ```
@@ -30,6 +40,14 @@ deterministic prefix when the byte budget is exceeded. The result's
 overall coverage becomes `partial` and a limitation explains the omission.
 Duplicate inventory pages are merged by artifact identity and occurrence path;
 their Evidence IDs remain attached as source Evidence.
+
+Content nodes identify bytes by SHA-256 and report only content-derived formats.
+Each occurrence reports its own `artifact_kind`, `artifact_format`, and executable
+permission. Identical bytes can therefore appear as a script, resource, or native
+addon at different paths without overwriting another occurrence's role. Package
+formats such as APK and IPA belong to the occurrence; their ZIP bytes share a
+content format. Graph and directory identities use locale-independent Unicode
+ordering.
 
 For IPA inventories, archive components outside every application root remain
 in the component lists. Their JavaScript and native candidates are grouped with

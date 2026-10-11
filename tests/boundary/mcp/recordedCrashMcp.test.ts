@@ -21,7 +21,10 @@ it("advertises exact valid schemas and records inline recorded-core evidence wit
   const session = createTestBinarySession(() => {
     throw new Error("deep provider must not start");
   });
-  const server = createServer(session, session, { recordedCrash: service });
+  const server = createServer(
+    { kind: "session", session },
+    { recordedCrash: service },
+  );
   const client = new Client({ name: "recorded-crash-contract", version: "1" });
   onTestFinished(async () => {
     await client.close();
@@ -61,9 +64,10 @@ it("advertises exact valid schemas and records inline recorded-core evidence wit
   const parsed = toolContract("inspect_recorded_crash").outputSchema.parse(
     response.structuredContent,
   );
-  const evidence = parseEvidence(parsed.evidence);
-  expect(parsed.result).toEqual(value);
-  expect(parsed.result).toEqual(evidence.normalized_result);
+  const evidence = parseEvidence(parsed);
+  expect(evidence.confidence).toBe("observed");
+  expect(evidence.subject?.digest.sha256).toBe(value.artifact.sha256);
+  expect(parsed.normalized_result).toEqual(value);
   expect(session.evidenceById(evidence.evidence_id)).toEqual(evidence);
   expect(
     (

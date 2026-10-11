@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import type { TerminalRetention } from "../../domain/process/processCaptureCoverage.js";
 
 import type {
   RecordProcessCaptureEvent,
@@ -12,6 +13,8 @@ const HeadlessPackage =
 // SAFETY: the addon package is pinned with the compatible headless xterm release.
 const SerializePackage =
   require("@xterm/addon-serialize") as typeof import("@xterm/addon-serialize");
+
+const TRAILING_SPACES = / +$/u;
 
 interface TerminalRendererOptions {
   readonly columns: number;
@@ -36,6 +39,8 @@ export class TerminalRenderer {
   readonly #frames: RenderedTerminalFrame[] = [];
   #pending: Promise<void> = Promise.resolve();
   #capturedBytes = 0;
+  #observedBytes = 0;
+  #observedFrames = 0;
   #truncated = false;
 
   constructor(private readonly options: TerminalRendererOptions) {
@@ -50,12 +55,16 @@ export class TerminalRenderer {
 
   /** Queue one PTY chunk and capture state only after xterm has parsed it. */
   write(data: string, atMs: number): void {
-    this.#pending = this.#pending.then(
+    this.#queue(
       () =>
-        new Promise<void>((resolveWrite) => {
+        new Promise<void>((resolveWrite, rejectWrite) => {
           this.#terminal.write(data, () => {
-            this.#capture(atMs);
-            resolveWrite();
+            try {
+              this.#capture(atMs);
+              resolveWrite();
+            } catch (error) {
+              rejectWrite(error);
+            }
           });
         }),
     );
@@ -63,7 +72,7 @@ export class TerminalRenderer {
 
   /** Queue a terminal resize after every preceding write. */
   resize(columns: number, rows: number, atMs: number): void {
-    this.#pending = this.#pending.then(() => {
+    this.#queue(() => {
       this.#terminal.resize(columns, rows);
       this.#capture(atMs);
     });
@@ -80,11 +89,30 @@ export class TerminalRenderer {
     return this.#truncated;
   }
 
+  /** Budget accounting after awaiting queued writes with frames(). */
+  retention(): TerminalRetention {
+    return {
+      budget_bytes: this.options.maxBytes,
+      observed_bytes: this.#observedBytes,
+      retained_bytes: this.#capturedBytes,
+      observed_frames: this.#observedFrames,
+      retained_frames: this.#frames.length,
+    };
+  }
+
   /** Release addon and terminal resources after all writes settle. */
   async dispose(): Promise<void> {
-    await this.#pending;
-    this.#serializeAddon.dispose();
+    // frames() owns observation failures; cleanup reports only disposal failures.
+    await this.#pending.catch(() => undefined);
+    // xterm owns and disposes every addon loaded through loadAddon().
     this.#terminal.dispose();
+  }
+
+  #queue(operation: () => void | Promise<void>): void {
+    this.#pending = this.#pending.then(operation);
+    // PTY callbacks can fail before capture completion awaits frames(). Keep
+    // the original rejection observable there without an unhandled rejection.
+    void this.#pending.catch(() => undefined);
   }
 
   #capture(atMs: number): void {
@@ -92,13 +120,16 @@ export class TerminalRenderer {
     const lines: string[] = [];
     for (let row = 0; row < this.#terminal.rows; row += 1) {
       const line = buffer.getLine(buffer.viewportY + row);
+      // Trailing blank cells carry no information beyond `columns`; dropping
+      // them keeps sparse screens from costing a full row per blank line.
       lines.push(
-        this.options.normalize(
-          (line?.translateToString(false, 0, this.#terminal.cols) ?? "").padEnd(
-            this.#terminal.cols,
-            " ",
-          ),
-        ),
+        this.options
+          .normalize(
+            (
+              line?.translateToString(false, 0, this.#terminal.cols) ?? ""
+            ).padEnd(this.#terminal.cols, " "),
+          )
+          .replace(TRAILING_SPACES, ""),
       );
     }
     const serializedState = this.options.normalize(
@@ -107,6 +138,8 @@ export class TerminalRenderer {
     const bytes =
       Buffer.byteLength(serializedState) +
       lines.reduce((total, line) => total + Buffer.byteLength(line), 0);
+    this.#observedBytes += bytes;
+    this.#observedFrames += 1;
     if (this.#capturedBytes + bytes > this.options.maxBytes) {
       this.#truncated = true;
       return;

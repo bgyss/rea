@@ -13,7 +13,7 @@ import {
   parseCompleteFunctionDossierEvidence,
 } from "../domain/hopperValues.js";
 import { AnalysisInputError } from "../domain/analysisErrorCore.js";
-import type { BinaryTarget } from "../domain/binaryTarget.js";
+import type { BinaryTarget } from "../domain/binaryTargetTypes.js";
 import { ok } from "../domain/result.js";
 
 const provider = { id: "fixture", name: "Fixture", version: "1" };
@@ -56,7 +56,8 @@ describe("analyze_function facet projection", () => {
     if (!result.ok) throw result.error;
     expect(requests).toEqual([{ procedure: "fixture_main" }]);
     expect(result.value.parameters).toEqual({ procedure: "fixture_main" });
-    expect(result.value.raw_result).toEqual(ghidraFunctionDossier());
+    // The provider returned no representation distinct from the result.
+    expect(result.value.raw_result).toBeNull();
     expect(result.value.normalized_result).toEqual(providerDossier);
     expect(result.value.limitations).toEqual(["provider limitation"]);
     expect(() =>

@@ -1,4 +1,4 @@
-import { type WebSocket } from "ws";
+import type { WebSocket } from "ws";
 
 import type { FakeCdpCommand, FakeOptions } from "./fakeCdpBrowserTypes.js";
 
@@ -49,7 +49,7 @@ const emitWebMcpEvents = (
           description: "Search orders; authorization=Bearer tool-secret",
           frameId: "frame-main",
           backendNodeId: 42,
-          inputSchema: {
+          inputSchema: options.webMcpInputSchema ?? {
             type: "object",
             properties: inputSchemaProperties,
             required: ["orderId"],
@@ -516,6 +516,7 @@ const emitNetworkEvents = (
     requestId: "websocket-1",
     url: `ws://127.0.0.1:${String(port)}/live?token=websocket-url-secret`,
   });
+  if (options.webSocketWithoutFrames === true) return;
   event(socket, "Network.webSocketFrameSent", command.sessionId, {
     requestId: "websocket-1",
     response: {

@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { IdaProvider } from "../../src/ida/IdaProvider.js";
 import { createIdaTarget, RecordingIdaMcp } from "../fixtures/idaMcp.js";
 import { createTestBinarySession } from "../fixtures/binarySession.js";
-import { parseConfig } from "../../src/config.js";
+import { parseConfig } from "../../src/config/parseConfig.js";
 import {
   createAnalysisSnapshotEntry,
   snapshotBinding,
@@ -13,7 +13,7 @@ import {
 import { createEvidence } from "../../src/domain/evidence.js";
 import { createEvidenceBundle } from "../../src/domain/evidenceBundle.js";
 import { createAnalysisExecution } from "../../src/application/AnalysisProvider.js";
-import { IDA_PROVIDER_IDENTITY } from "../../src/ida/IdaProvider.js";
+import { IDA_PROVIDER_IDENTITY } from "../../src/ida/IdaProviderCapabilities.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -37,7 +37,7 @@ describe("IDA provider composition", () => {
     const config = parseConfig({ REA_IDA_MCP_CONFIG: path });
     if (!config.ok) throw config.error;
     const producer = new RecordingIdaMcp(target, "headless");
-    const provider = new IdaProvider(config.value, () => producer);
+    const provider = new IdaProvider(config.value, {}, () => producer);
     expect(provider.inspectAvailability()).toMatchObject({
       status: "available",
       diagnostics: { live_connection_probed: false },
@@ -67,7 +67,7 @@ describe("IDA provider composition", () => {
     if (!config.ok) throw config.error;
     const producer = new RecordingIdaMcp(target);
     const session = createTestBinarySession(
-      new IdaProvider(config.value, () => producer),
+      new IdaProvider(config.value, {}, () => producer),
     );
     expect((await session.open(target.path)).ok).toBe(true);
     const query = { procedure: "main", document: target.path };
@@ -124,7 +124,7 @@ describe("IDA provider composition", () => {
     await session.close();
     expect(producer.closes).toBe(1);
   });
-  it("rejects unsupported target kinds and incomplete upstream compatibility profiles with useful reasons", async () => {
+  it("rejects unsupported target kinds and reports incomplete upstream profiles on first analysis", async () => {
     const { root, target } = await createIdaTarget();
     roots.push(root);
     const path = join(root, "registration.json");
@@ -139,7 +139,7 @@ describe("IDA provider composition", () => {
     const config = parseConfig({ REA_IDA_MCP_CONFIG: path });
     if (!config.ok) throw config.error;
     const producer = new RecordingIdaMcp(target);
-    const provider = new IdaProvider(config.value, () => producer);
+    const provider = new IdaProvider(config.value, {}, () => producer);
     expect(
       provider.inspectTargetSupport({
         path: target.path,
@@ -149,9 +149,22 @@ describe("IDA provider composition", () => {
       }),
     ).toMatchObject({ status: "unsupported", code: "target_kind_unsupported" });
     const session = createTestBinarySession(provider);
-    const opened = await session.open(target.path);
-    expect(opened.ok).toBe(false);
-    if (!opened.ok) expect(opened.error.message).toContain("missing tools");
+    expect((await session.open(target.path)).ok).toBe(true);
+    expect(producer.connects).toBe(0);
+    const analyzed = await session.execute("procedure_pseudo_code", {
+      procedure: "main",
+    });
+    expect(analyzed).toMatchObject({
+      ok: false,
+      error: {
+        _tag: "AnalysisProtocolError",
+        message: expect.stringContaining(
+          "headless compatibility profile is missing tools: idb_open",
+        ),
+      },
+    });
+    expect(producer.connects).toBe(1);
+    expect((await session.close()).ok).toBe(true);
     expect(producer.closes).toBe(1);
   });
 });
@@ -160,7 +173,7 @@ describe("IDA raw-image admission", () => {
   it("declines a caller-declared raw-image profile it cannot apply", () => {
     const config = parseConfig({});
     if (!config.ok) throw config.error;
-    const provider = new IdaProvider(config.value, () => {
+    const provider = new IdaProvider(config.value, {}, () => {
       throw new Error("support inspection must not connect");
     });
     expect(

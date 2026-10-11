@@ -5,14 +5,14 @@ workers_dev = true
 preview_urls = false
 
 [assets]
-directory = "./public"
+directory = "./_site"
 html_handling = "auto-trailing-slash"
 not_found_handling = "none"
 
 [build]
 cwd = ".."
-command = "python3 scripts/prepare-website.py && python3 scripts/verify-website.py"
-watch_dir = "./public/examples/notes-electron"
+command = "python3 scripts/website.py check"
+watch_dir = ["./public", "./locales", "./templates"]
 
 # Public HTTPS depends on zone activation and certificate readiness.
 [env.production]
@@ -20,3 +20,8 @@ name = "rea-website"
 workers_dev = true
 preview_urls = false
 routes = [{ pattern = "rea.tools", custom_domain = true }]
+
+# Production receives the already prepared and verified shared Pages artifact.
+# Override the preview build so deployment does not regenerate local assets.
+[env.production.build]
+command = ""

@@ -1,8 +1,8 @@
-import { constants } from "node:fs";
+import { constants, type Stats } from "node:fs";
 import { createHash } from "node:crypto";
 import {
   access,
-  open,
+  lstat,
   realpath,
   stat,
   type FileHandle,
@@ -10,8 +10,14 @@ import {
 import { extname, isAbsolute, resolve } from "node:path";
 
 import { BinaryTargetError } from "../domain/configurationErrors.js";
+import {
+  openRegularFile,
+  sameRegularFileState,
+} from "../filesystem/RegularFile.js";
+import { AnalysisCancelledError } from "../domain/analysisErrorCore.js";
 import type { BinaryTarget } from "../domain/binaryTargetTypes.js";
 import { err, ok, type Result } from "../domain/result.js";
+import { readMipsElfAbiFlags } from "./MipsElfAbiFlags.js";
 import {
   resolveAppBundleExecutable,
   type ResolvedAppBundle,
@@ -26,9 +32,12 @@ import {
   parseDosMzHeader,
   type BoundLinearExecutable,
 } from "../domain/dosMz.js";
+import { admitRawBinary } from "../domain/rawBinary.js";
 import { validateRawImageLayout } from "../domain/rawImage.js";
+import type { BinaryArchitecture } from "../domain/binaryTargetTypes.js";
 import {
   hasZipSignature,
+  isZipPackageFormat,
   zipPackageFormatForPath,
 } from "../domain/zipPackageFormat.js";
 
@@ -38,6 +47,17 @@ import {
   type ExecutableMetadata,
 } from "../domain/binaryTarget.js";
 
+/** Options for resolving a local binary target and its stable identity. */
+export interface BinaryTargetResolverOptions {
+  readonly cwd?: string;
+  readonly hostArchitecture?: NodeJS.Architecture;
+  readonly targetKind?: BinaryTarget["kind"];
+  readonly formatHint?: ExecutableFormatHint;
+  readonly architecture?: BinaryArchitecture;
+  readonly entryPoint?: string;
+  readonly signal?: AbortSignal;
+}
+
 /**
  * Resolve and classify a readable local target before a provider is selected.
  * FAT Mach-O inputs select only a host-compatible architecture so setup remains
@@ -45,24 +65,46 @@ import {
  */
 export const parseBinaryTarget = async (
   input: string,
-  cwd = process.cwd(),
-  hostArchitecture: NodeJS.Architecture = process.arch,
-  targetKind?: BinaryTarget["kind"],
-  formatHint?: ExecutableFormatHint,
-): Promise<Result<BinaryTarget, BinaryTargetError>> => {
+  options: BinaryTargetResolverOptions = {},
+): Promise<
+  Result<BinaryTarget, BinaryTargetError | AnalysisCancelledError>
+> => {
+  const cwd = options.cwd ?? process.cwd();
+  const hostArchitecture = options.hostArchitecture ?? process.arch;
+  const { targetKind, formatHint, signal, architecture, entryPoint } = options;
   const candidate = isAbsolute(input) ? input : resolve(cwd, input);
   try {
+    throwIfTargetResolutionCancelled(signal);
     await access(candidate, constants.R_OK);
+    throwIfTargetResolutionCancelled(signal);
     const canonical = await realpath(candidate);
+    throwIfTargetResolutionCancelled(signal);
     const resolved = await resolveAppBundle(canonical);
+    throwIfTargetResolutionCancelled(signal);
     if (!resolved.ok) return err(resolved.error);
     const { executable: path, infoPlist } = resolved.value;
     const bundle =
       infoPlist === undefined ? {} : { bundleInfoPlist: infoPlist };
-    const handle = await open(path, "r");
+    const handle = await openRegularFile(path, {
+      symlinks: "reject",
+      signal,
+    });
     try {
-      if (!(await handle.stat()).isFile())
+      throwIfTargetResolutionCancelled(signal);
+      const metadata = await handle.stat();
+      throwIfTargetResolutionCancelled(signal);
+      if (!metadata.isFile())
         return err(new BinaryTargetError(path, "target is not a regular file"));
+      if (
+        formatHint !== "raw-binary" &&
+        (architecture !== undefined || entryPoint !== undefined)
+      )
+        return err(
+          new BinaryTargetError(
+            path,
+            "architecture and entry_point apply only with format=raw-binary",
+          ),
+        );
       if (typeof formatHint === "object") {
         if (targetKind !== undefined && targetKind !== "executable")
           return err(
@@ -73,16 +115,43 @@ export const parseBinaryTarget = async (
           );
         const layout = validateRawImageLayout(
           formatHint.profile,
-          (await handle.stat()).size,
+          metadata.size,
         );
         if (!layout.ok) return err(new BinaryTargetError(path, layout.error));
         return ok({
           path,
           sourcePath: canonical,
-          sha256: await sha256Handle(handle),
+          sha256: await sha256Handle(handle, path, metadata, signal),
           kind: "executable",
           format: "raw-image",
           rawImage: formatHint.profile,
+        });
+      }
+      if (formatHint === "raw-binary") {
+        if (targetKind !== undefined && targetKind !== "executable")
+          return err(
+            new BinaryTargetError(
+              path,
+              "raw-binary format requires an executable target kind",
+            ),
+          );
+        const admitted = admitRawBinary({
+          architecture,
+          entryPoint,
+          fileBytes: metadata.size,
+        });
+        if (!admitted.ok)
+          return err(new BinaryTargetError(path, admitted.error));
+        return ok({
+          path,
+          sourcePath: canonical,
+          sha256: await sha256Handle(handle, path, metadata, signal),
+          kind: "executable",
+          format: "raw-binary",
+          architecture: admitted.value.architecture,
+          availableArchitectures: [admitted.value.architecture],
+          entryPoint: admitted.value.entryPoint,
+          entryPointSource: admitted.value.entryPointSource,
         });
       }
       if (formatHint === "dos-com") {
@@ -93,12 +162,12 @@ export const parseBinaryTarget = async (
               "DOS COM format requires an executable target kind",
             ),
           );
-        const length = validateDosComLength((await handle.stat()).size);
+        const length = validateDosComLength(metadata.size);
         if (!length.ok) return err(new BinaryTargetError(path, length.error));
         return ok({
           path,
           sourcePath: canonical,
-          sha256: await sha256Handle(handle),
+          sha256: await sha256Handle(handle, path, metadata, signal),
           kind: "executable",
           format: "dos-com",
           architecture: "x86",
@@ -112,28 +181,32 @@ export const parseBinaryTarget = async (
         return ok({
           path,
           sourcePath: process.platform === "win32" ? candidate : canonical,
-          sha256: await sha256Handle(handle),
+          sha256: await sha256Handle(handle, path, metadata, signal),
           kind: "database",
           format: "analysis-database",
         });
-      const artifactFormat = await detectArtifactFormat(path, handle);
+      const artifactFormat = await detectArtifactFormat(path, handle, signal);
       if (artifactFormat !== undefined) {
         const identity = {
           path,
           sourcePath: process.platform === "win32" ? candidate : canonical,
-          sha256: await sha256Handle(handle),
+          sha256: await sha256Handle(handle, path, metadata, signal),
         };
         return isArchiveFormat(artifactFormat)
           ? ok({ ...identity, kind: "archive", format: artifactFormat })
           : ok({ ...identity, kind: "artifact", format: artifactFormat });
       }
-      const detected = await readExecutableMetadata(handle, hostArchitecture);
+      const detected = await readExecutableMetadata(
+        handle,
+        hostArchitecture,
+        signal,
+      );
       if (!detected.ok) return err(new BinaryTargetError(path, detected.error));
       return ok({
         path,
         sourcePath: process.platform === "win32" ? candidate : canonical,
         ...bundle,
-        sha256: await sha256Handle(handle),
+        sha256: await sha256Handle(handle, path, metadata, signal),
         kind: "executable",
         ...detected.value,
       });
@@ -141,6 +214,8 @@ export const parseBinaryTarget = async (
       await handle.close();
     }
   } catch (cause: unknown) {
+    if (cause instanceof AnalysisCancelledError) return err(cause);
+    if (cause instanceof BinaryTargetError) return err(cause);
     if (!(cause instanceof Error)) throw cause;
     const code = filesystemErrorCode(cause);
     if (code === undefined) throw cause;
@@ -169,14 +244,24 @@ const targetFailureReason = (code: string, detail: string): string => {
       return `permission denied while reading target: ${detail}`;
     case "EISDIR":
       return `target is a directory, not a readable file: ${detail}`;
+    case "ENOTFILE":
+      return "target is not a regular file";
+    case "ELOOP":
+      return `target changed while being opened: ${detail}`;
     default:
       return `target could not be read (${code}): ${detail}`;
   }
 };
 
+const throwIfTargetResolutionCancelled = (signal?: AbortSignal): void => {
+  if (signal?.aborted === true)
+    throw new AnalysisCancelledError("resolve_binary_target");
+};
+
 const detectArtifactFormat = async (
   path: string,
   handle: FileHandle,
+  signal?: AbortSignal,
 ): Promise<
   | Exclude<
       BinaryTarget["format"],
@@ -187,13 +272,19 @@ const detectArtifactFormat = async (
       | "dos-mz"
       | "dos-com"
       | "raw-image"
+      | "raw-binary"
     >
   | undefined
 > => {
+  throwIfTargetResolutionCancelled(signal);
   const lower = path.toLowerCase();
   const magic = Buffer.alloc(8);
   const observed = await handle.read(magic, 0, magic.length, 0);
+  throwIfTargetResolutionCancelled(signal);
   if (hasZipSignature(magic.subarray(0, observed.bytesRead))) {
+    // The HarmonyOS App Pack suffix `.app` is a root-input concept; a nested
+    // ZIP member ending in `.app` keeps the generic zip classification.
+    if (lower.endsWith(".app")) return "app-pack";
     return zipPackageFormatForPath(lower) ?? "zip";
   }
   const named = namedArtifactFormat(lower);
@@ -205,10 +296,13 @@ const detectArtifactFormat = async (
   )
     return "pkg";
   if (lower.endsWith(".dmg")) {
+    throwIfTargetResolutionCancelled(signal);
     const size = (await handle.stat()).size;
+    throwIfTargetResolutionCancelled(signal);
     if (size >= 512) {
       const trailer = Buffer.alloc(4);
       const read = await handle.read(trailer, 0, trailer.length, size - 512);
+      throwIfTargetResolutionCancelled(signal);
       if (read.bytesRead === 4 && trailer.toString("ascii") === "koly")
         return "dmg";
     }
@@ -235,20 +329,43 @@ const isArchiveFormat = (
     | "dos-mz"
     | "dos-com"
     | "raw-image"
+    | "raw-binary"
   >,
 ): format is Extract<BinaryTarget, { kind: "archive" }>["format"] =>
-  ["zip", "ipa", "apk", "msix", "appx", "asar", "dmg", "pkg"].includes(format);
+  isZipPackageFormat(format) || ["asar", "dmg", "pkg"].includes(format);
 
-const sha256Handle = async (handle: FileHandle): Promise<string> => {
+const sha256Handle = async (
+  handle: FileHandle,
+  path: string,
+  initial: Stats,
+  signal?: AbortSignal,
+): Promise<string> => {
   const hash = createHash("sha256");
   const chunk = Buffer.allocUnsafe(64 * 1024);
   let position = 0;
   while (true) {
-    const observed = await handle.read(chunk, 0, chunk.length, position);
+    throwIfTargetResolutionCancelled(signal);
+    const observed = await handle.read(
+      chunk,
+      0,
+      Math.min(chunk.length, initial.size - position + 1),
+      position,
+    );
+    throwIfTargetResolutionCancelled(signal);
     if (observed.bytesRead === 0) break;
     hash.update(chunk.subarray(0, observed.bytesRead));
     position += observed.bytesRead;
+    if (position > initial.size)
+      throw new BinaryTargetError(path, "target grew while being read");
   }
+  throwIfTargetResolutionCancelled(signal);
+  const [opened, currentPath] = await Promise.all([handle.stat(), lstat(path)]);
+  if (
+    !sameRegularFileState(initial, opened) ||
+    !sameRegularFileState(initial, currentPath) ||
+    position !== initial.size
+  )
+    throw new BinaryTargetError(path, "target changed while being read");
   return hash.digest("hex");
 };
 
@@ -273,16 +390,23 @@ const resolveAppBundle = async (
 const readExecutableMetadata = async (
   handle: FileHandle,
   hostArchitecture: NodeJS.Architecture,
+  signal?: AbortSignal,
 ): Promise<Result<ExecutableMetadata, string>> => {
+  throwIfTargetResolutionCancelled(signal);
   const prefix = Buffer.alloc(4096);
   const prefixRead = await handle.read(prefix, 0, prefix.length, 0);
+  throwIfTargetResolutionCancelled(signal);
   const bytes = prefix.subarray(0, prefixRead.bytesRead);
+  // Header commitments such as Mach-O load commands and FAT slices are
+  // checked against the whole file, not the probed prefix.
+  const fileSize = (await handle.stat()).size;
+  throwIfTargetResolutionCancelled(signal);
   if (bytes.length >= 2 && bytes[0] === 0x4d && bytes[1] === 0x5a) {
     const offset = mzWindowsHeaderOffset(bytes);
     if (offset !== null) {
       if (offset < 64)
         return err("invalid Windows new-header offset in MZ image");
-      return readPeMetadata(handle, offset);
+      return readPeMetadata(handle, offset, signal);
     }
     // MZ relocation records may extend past the initial probe; their format
     // bounds are at most 65535 records inside a 65535-paragraph header.
@@ -291,7 +415,6 @@ const readExecutableMetadata = async (
         ? bytes.readUInt16LE(24) + bytes.readUInt16LE(6) * 4
         : 0;
     const headerBytes = bytes.length >= 28 ? bytes.readUInt16LE(8) * 16 : 0;
-    const fileSize = (await handle.stat()).size;
     let header = bytes;
     if (
       tableEnd > bytes.length &&
@@ -300,6 +423,7 @@ const readExecutableMetadata = async (
     ) {
       const table = Buffer.alloc(tableEnd);
       const observed = await handle.read(table, 0, table.length, 0);
+      throwIfTargetResolutionCancelled(signal);
       header = table.subarray(0, observed.bytesRead);
     }
     const metadata = parseExecutableHeader(header, hostArchitecture, fileSize);
@@ -323,14 +447,36 @@ const readExecutableMetadata = async (
       if (count <= 128 && required > bytes.length) {
         const header = Buffer.alloc(required);
         const headerRead = await handle.read(header, 0, header.length, 0);
+        throwIfTargetResolutionCancelled(signal);
         return parseExecutableHeader(
           header.subarray(0, headerRead.bytesRead),
           hostArchitecture,
+          fileSize,
         );
       }
     }
   }
-  return parseExecutableHeader(bytes, hostArchitecture);
+  const parsed = parseExecutableHeader(bytes, hostArchitecture, fileSize);
+  if (
+    !parsed.ok ||
+    parsed.value.architecture !== "mips" ||
+    parsed.value.mips.elfClass !== 32
+  )
+    return parsed;
+  const abiFlags = await readMipsElfAbiFlags(handle, parsed.value.mips, () =>
+    throwIfTargetResolutionCancelled(signal),
+  );
+  if (!abiFlags.ok) return abiFlags;
+  return ok({
+    ...parsed.value,
+    mips: {
+      ...parsed.value.mips,
+      abiFlags: abiFlags.value.abiFlags,
+      ...(abiFlags.value.limitations.length === 0
+        ? {}
+        : { limitations: abiFlags.value.limitations }),
+    },
+  });
 };
 
 /**
@@ -365,7 +511,9 @@ const readBoundLinearExecutable = async (
 const readPeMetadata = async (
   handle: FileHandle,
   offset: number,
+  signal?: AbortSignal,
 ): Promise<Result<ExecutableMetadata, string>> => {
+  throwIfTargetResolutionCancelled(signal);
   const fileHeader = Buffer.alloc(24);
   const fileHeaderRead = await handle.read(
     fileHeader,
@@ -373,6 +521,7 @@ const readPeMetadata = async (
     fileHeader.length,
     offset,
   );
+  throwIfTargetResolutionCancelled(signal);
   if (fileHeaderRead.bytesRead !== fileHeader.length)
     return err("invalid or truncated PE header");
   const signature = fileHeader.toString("ascii", 0, 2);
@@ -382,6 +531,7 @@ const readPeMetadata = async (
   if (optionalHeaderSize > 4096) return err("invalid PE optional header size");
   const record = Buffer.alloc(24 + optionalHeaderSize);
   const recordRead = await handle.read(record, 0, record.length, offset);
+  throwIfTargetResolutionCancelled(signal);
   return recordRead.bytesRead === record.length
     ? parsePeRecord(record)
     : err("invalid or truncated PE header");

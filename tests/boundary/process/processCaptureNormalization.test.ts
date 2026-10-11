@@ -8,9 +8,10 @@ import { captureProcessScenario } from "../../../src/process/capture/ProcessHarn
 import { createProcessCaptureEvidence } from "../../../src/application/process/ProcessEvidence.js";
 import {
   digestProcessCommitment,
-  parseProcessCapture,
   parseProcessScenario,
-} from "../../../src/domain/process/processCapture.js";
+} from "../../../src/domain/process/processScenario.js";
+import { parseProcessCapture } from "../../../src/domain/process/processCaptureParsing.js";
+import { compareProcessCaptures } from "../../../src/domain/process/processComparison.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 import { itWithCaptureCapability } from "./processCaptureCapability.js";
 
@@ -26,6 +27,117 @@ const identitySchema = z.object({
 
 const itWithLinuxCaptureCapability =
   process.platform === "linux" ? itWithCaptureCapability : it.skip;
+
+itWithCaptureCapability(
+  "preserves numeric reports and original normalized PTY text in Evidence",
+  async () => {
+    const root = await createTestTempDirectory("rea-process-numeric-report-");
+    const report = JSON.stringify({
+      pid: 32,
+      size: 108,
+      height: 480,
+      width: 640,
+      score: 20,
+    });
+    const original = `${report}\nlisten:8080\n`;
+    const scenario = parseProcessScenario({
+      executable: process.execPath,
+      working_directory: root,
+      arguments: ["-e", `process.stdout.write(${JSON.stringify(original)})`],
+      settle_ms: 100,
+    });
+    const result = await captureProcessScenario(scenario);
+    if (!result.ok) throw result.error;
+    const capture = parseProcessCapture(
+      createProcessCaptureEvidence(scenario, result.value).normalized_result,
+    );
+    expect(capture.frames.map(({ data }) => data).join("")).toContain(report);
+    expect(capture.frames.map(({ data }) => data).join("")).toContain(
+      "listen:<port>",
+    );
+    expect(
+      capture.frames.map(({ data, raw_data }) => raw_data ?? data).join(""),
+    ).toBe(original.replaceAll("\n", "\r\n"));
+    expect(
+      capture.rendered_frames.some(({ serialized_state }) =>
+        serialized_state.includes(report),
+      ),
+    ).toBe(true);
+    expect(capture.manifest.comparison_contract).toMatchObject({
+      port_normalization_version: "contextual-endpoints-v2",
+      rendered_line_format: "trailing-spaces-trimmed-v1",
+    });
+    expect(capture.manifest.comparison_contract).not.toHaveProperty(
+      "pattern_normalization_version",
+    );
+    expect(capture.exit).toMatchObject({ code: 0, reason: "exited" });
+    expect(capture.cleanup).toMatchObject({
+      owned_process_group: "verified",
+      temporary_root: "removed",
+    });
+  },
+);
+
+itWithCaptureCapability.each([
+  { pattern: "AB", replacement: "$&$&", expected: "$&$&" },
+  {
+    pattern: "AB",
+    replacement: "$$ $` $' $1",
+    expected: "$$ $` $' $1",
+  },
+  { pattern: "", replacement: "-", expected: "-A-B-" },
+])(
+  "preserves literal replacement $replacement and rejects legacy comparison semantics",
+  async ({ pattern, replacement, expected }) => {
+    const root = await createTestTempDirectory("rea-process-literal-");
+    const scenario = parseProcessScenario({
+      executable: process.execPath,
+      arguments: ["-e", 'process.stdout.write("AB")'],
+      working_directory: root,
+      normalization: {
+        paths: false,
+        pids: false,
+        ports: false,
+        patterns: [{ pattern, replacement }],
+      },
+      settle_ms: 100,
+    });
+    const result = await captureProcessScenario(scenario);
+    if (!result.ok) throw result.error;
+    const capture = parseProcessCapture(
+      createProcessCaptureEvidence(scenario, result.value).normalized_result,
+    );
+    expect(capture.frames.map(({ data }) => data).join("")).toBe(expected);
+    expect(
+      capture.frames.map(({ raw_data, data }) => raw_data ?? data).join(""),
+    ).toBe("AB");
+    expect(capture.cleanup).toMatchObject({
+      owned_process_group: "verified",
+      temporary_root: "removed",
+    });
+    expect(compareProcessCaptures(capture, capture).terminal).toBe("unchanged");
+    const legacyContract = { ...capture.manifest.comparison_contract };
+    delete legacyContract.pattern_normalization_version;
+    const legacy = parseProcessCapture({
+      ...capture,
+      manifest: {
+        ...capture.manifest,
+        comparison_contract: legacyContract,
+        comparison_contract_sha256: digestProcessCommitment(legacyContract),
+      },
+    });
+    expect(() => compareProcessCaptures(legacy, capture)).toThrow(
+      expect.objectContaining({
+        issues: [
+          expect.objectContaining({
+            expected: ["pattern_normalization_version"],
+          }),
+        ],
+      }),
+    );
+  },
+  20_000,
+);
 
 itWithLinuxCaptureCapability.each([false, true])(
   "honors pids=%s in owned Linux capture samples and committed Evidence",
@@ -83,7 +195,7 @@ itWithLinuxCaptureCapability.each([false, true])(
       state: "quiesced",
       cleanup_outcome: "not_required",
     });
-    expect(capture.cleanup).toEqual({
+    expect(capture.cleanup).toMatchObject({
       owned_process_group: "verified",
       temporary_root: "removed",
     });

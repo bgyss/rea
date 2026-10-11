@@ -1,3 +1,4 @@
+import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { functionDossierSchema } from "../../../src/domain/hopperValues.js";
@@ -26,7 +27,39 @@ describe("analyze_function MCP producer validation", () => {
     expect(result.isError).toBe(true);
     expect(result.content).toContainEqual({
       type: "text",
-      text: JSON.stringify(result.structuredContent),
+      text: JSON.stringify(parseMcpToolError(result)),
+    });
+  });
+
+  it.each([
+    "procedure.classification",
+    "procedure.body",
+    "native_api",
+    "native_value_flow",
+    "limitations",
+  ])("rejects a complete dossier missing %s", async (field) => {
+    const dossier = functionDossierSchema.parse(ghidraFunctionDossier());
+    const value = structuredClone(dossier) as unknown as Record<
+      string,
+      unknown
+    >;
+    if (field.startsWith("procedure.")) {
+      const procedure = value.procedure as Record<string, unknown>;
+      delete procedure[field.slice("procedure.".length)];
+    } else delete value[field];
+
+    const client = await connect({
+      execute: () => Promise.resolve(observed(value)),
+    });
+    const result = await client.callTool({
+      name: "analyze_function",
+      arguments: { procedure: "0x1" },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContainEqual({
+      type: "text",
+      text: JSON.stringify(parseMcpToolError(result)),
     });
   });
 
@@ -55,7 +88,7 @@ describe("analyze_function MCP producer validation", () => {
     expect(result.isError).toBe(true);
     expect(result.content).toContainEqual({
       type: "text",
-      text: JSON.stringify(result.structuredContent),
+      text: JSON.stringify(parseMcpToolError(result)),
     });
   });
 });

@@ -14,7 +14,10 @@ describe("MCP result encoding budget", () => {
     { result: ["中文", "😀", "\ud800", '"\\\n'] },
     { result: "x".repeat(8191) + "😀" + '中文\n"'.repeat(20000) },
   ])("counts actual UTF-8 structured and escaped text bytes", (candidate) => {
-    const encoded = encodeToolResult(candidate);
+    const encoded = encodeToolResult(
+      candidate,
+      Buffer.byteLength(JSON.stringify(projectedResult(candidate))),
+    );
     if (!encoded.ok) throw new Error("Expected complete encoding");
     expect(encoded.text).toBe(JSON.stringify(candidate));
     expect(encoded.bytes).toBe(
@@ -22,11 +25,11 @@ describe("MCP result encoding budget", () => {
     );
   });
 
-  it("accounts for repeated Evidence representations", () => {
+  it("accounts for complete Evidence in structured and text representations", () => {
     const normalized = { value: '中文"'.repeat(30000) };
     const candidate = {
-      result: normalized,
-      evidence: { normalized_result: normalized },
+      normalized_result: normalized,
+      raw_result: { observation: "distinct provider representation" },
     };
     const completeBytes = Buffer.byteLength(
       JSON.stringify(projectedResult(candidate)),
@@ -35,6 +38,25 @@ describe("MCP result encoding budget", () => {
     expect(encodeToolResult(candidate, completeBytes - 1)).toMatchObject({
       ok: false,
       bytesAtLeast: completeBytes,
+    });
+  });
+
+  it.each([
+    { error: { code: "invalid_request", message: '中文"\n'.repeat(30000) } },
+    { error: { message: "😀\ud800" } },
+  ])("counts only escaped text for text-only error delivery", (candidate) => {
+    const textBytes = Buffer.byteLength(
+      JSON.stringify({
+        content: [{ type: "text", text: JSON.stringify(candidate) }],
+      }),
+    );
+    const encoded = encodeToolResult(candidate, textBytes, "text");
+    if (!encoded.ok) throw new Error("Expected complete encoding");
+    expect(encoded.text).toBe(JSON.stringify(candidate));
+    expect(encoded.bytes).toBe(textBytes);
+    expect(encodeToolResult(candidate, textBytes - 1, "text")).toMatchObject({
+      ok: false,
+      bytesAtLeast: textBytes,
     });
   });
 

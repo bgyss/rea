@@ -1,4 +1,5 @@
 import { jsonValueSchema, type JsonValue } from "./jsonValue.js";
+import { isImmutableJsonSnapshot } from "./immutableJson.js";
 
 import {
   analysisErrorCategory,
@@ -18,7 +19,10 @@ import {
   AnalysisResourceConstraintError,
 } from "./analysisErrorCore.js";
 import { ArtifactOperationError } from "./artifactOperationError.js";
-import { BinaryTargetError } from "./configurationErrors.js";
+import {
+  BinaryTargetError,
+  ConfigurationError,
+} from "./configurationErrors.js";
 import { BrowserObservationError } from "./browserObservationError.js";
 import {
   EvidenceFileError,
@@ -36,10 +40,7 @@ import { ProviderAdapterError } from "./providerAdapterError.js";
 import { ProviderSelectionError } from "./providerSelectionError.js";
 import { UnknownRegistryError } from "./unknownRegistryError.js";
 import { providerRetryAction } from "./providerOperationHealth.js";
-import {
-  type AnalysisError,
-  type AnalysisErrorTag,
-} from "./analysisErrorBase.js";
+import type { AnalysisError, AnalysisErrorTag } from "./analysisErrorBase.js";
 
 /** Project expected failures into exhaustive, secret-safe caller fields. */
 export const projectAnalysisError = (
@@ -68,7 +69,9 @@ export const projectAnalysisError = (
     ...(error.partialObservation === undefined
       ? {}
       : {
-          partial_observation: jsonValueSchema.parse(error.partialObservation),
+          partial_observation: isImmutableJsonSnapshot(error.partialObservation)
+            ? error.partialObservation
+            : jsonValueSchema.parse(error.partialObservation),
         }),
   };
   return {
@@ -96,9 +99,15 @@ const underlyingErrorCode = (
       ? "provider_unavailable"
       : "capability_unavailable";
   if (error instanceof BrowserObservationError)
-    return browserErrorCode(error.reason);
+    return error.userCategory === "cancelled"
+      ? "cancelled"
+      : browserErrorCode(error.reason);
   if (error instanceof ArtifactOperationError)
     return artifactOperationCode(error);
+  if (error instanceof BinaryTargetError)
+    return error.systemCode === undefined
+      ? "target_unavailable"
+      : "access_denied";
   if (error instanceof EvidenceFileError) return evidenceFileCode(error.reason);
   if (error instanceof UnknownRegistryError)
     return unknownRegistryCode(error.reason);
@@ -109,6 +118,8 @@ const underlyingErrorCode = (
 const browserErrorCode = (
   reason: BrowserObservationError["reason"],
 ): AnalysisErrorProjection["code"] => {
+  if (reason === "cancelled") return "cancelled";
+  if (reason === "timeout") return "provider_timeout";
   if (reason === "payload_limit") return "truncated";
   if (
     reason === "target_not_found" ||
@@ -133,10 +144,12 @@ const artifactOperationCode = (
 
 const evidenceFileCode = (
   reason: EvidenceFileError["reason"],
-): AnalysisErrorProjection["code"] =>
-  reason === "invalid-json"
-    ? "evidence_integrity_mismatch"
-    : "execution_failure";
+): AnalysisErrorProjection["code"] => {
+  if (reason === "invalid-json") return "evidence_integrity_mismatch";
+  // A missing, non-file or already-existing path is the caller's selection.
+  if (reason === "io") return "execution_failure";
+  return "invalid_request";
+};
 
 const unknownRegistryCode = (
   reason: UnknownRegistryError["reason"],
@@ -158,6 +171,7 @@ const processCaptureCode = (
 
 type SpecializedErrorTag =
   | "ArtifactOperationError"
+  | "BinaryTargetError"
   | "BrowserObservationError"
   | "EvidenceFileError"
   | "ProcessCaptureError"
@@ -182,7 +196,6 @@ const STATIC_ERROR_CODES = {
   HopperStartError: "provider_unavailable",
   ConfigurationError: "configuration_invalid",
   NoBinaryOpenError: "target_unavailable",
-  BinaryTargetError: "target_unavailable",
   EvidenceIntegrityError: "evidence_integrity_mismatch",
   ProviderAdapterError: "execution_failure",
   HopperRemoteError: "execution_failure",
@@ -198,6 +211,7 @@ const staticErrorCode = (
 ): AnalysisErrorProjection["code"] => {
   switch (tag) {
     case "ArtifactOperationError":
+    case "BinaryTargetError":
     case "BrowserObservationError":
     case "EvidenceFileError":
     case "ProcessCaptureError":
@@ -478,6 +492,13 @@ const lifecycleErrorDetails = (
     };
     return Object.keys(details).length === 0 ? undefined : details;
   }
+  if (error instanceof ConfigurationError && error.settings.length > 0)
+    return {
+      settings: error.settings.map(({ setting, constraint }) => ({
+        setting,
+        constraint,
+      })),
+    };
   if (error instanceof BinaryTargetError)
     return {
       path: error.path,
@@ -485,6 +506,9 @@ const lifecycleErrorDetails = (
       ...(error.constraint === undefined
         ? {}
         : { constraint: error.constraint }),
+      ...(error.systemCode === undefined
+        ? {}
+        : { system_code: error.systemCode, boundary: "filesystem-read" }),
     };
   return undefined;
 };

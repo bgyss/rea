@@ -1,20 +1,23 @@
 import canonicalize from "canonicalize";
 import { z } from "zod";
+import { processSourceTruncated } from "./processCaptureCoverage.js";
+import type { ProcessObservationSource } from "./processObservation.js";
 
-import type { ProcessCapture } from "./processCapture.js";
+import type { ProcessCapture } from "./processCaptureParsing.js";
+import { comparableTerminalFrame } from "./processObservation.js";
 import { AnalysisInputError } from "../analysisErrorCore.js";
 import { jsonValueSchema } from "../jsonValue.js";
-import {
-  compareProcessTraces,
-  processTraceOutcomesDiffer,
-  processTraceComparisonResultSchema,
-  type ProcessTraceSpecification,
-} from "./processTraceComparison.js";
+import type { ProcessTraceSpecification } from "./processTraceSpecification.js";
+import { processTraceComparisonResultSchema } from "./processTraceEvaluation.js";
 import {
   dimensionsForTraceSources,
   traceCoversObservedDimension,
 } from "./processTraceDimensionProjection.js";
 
+import {
+  compareProcessTraces,
+  processTraceOutcomesDiffer,
+} from "./processTraceComparison.js";
 const OPERATION = "compare_process_captures";
 
 /** Comparison classification that never equates incomplete evidence. */
@@ -100,7 +103,10 @@ export type ProcessCaptureComparison = z.infer<
 
 const terminalObservations = (capture: ProcessCapture): readonly unknown[] =>
   [
-    ...capture.frames.map((frame) => ({ kind: "raw" as const, ...frame })),
+    ...capture.frames.map((frame) => ({
+      kind: "raw" as const,
+      ...comparableTerminalFrame(frame),
+    })),
     ...capture.rendered_frames.map((frame) => ({
       kind: "rendered" as const,
       ...frame,
@@ -285,20 +291,6 @@ const differingContractFields = (
     )
     .sort();
 
-const truncatedComparison = (): ProcessCaptureComparison => ({
-  status: "truncated",
-  terminal: "truncated",
-  interaction: "truncated",
-  exit: "truncated",
-  filesystem: "truncated",
-  process: "truncated",
-  first_divergence: {
-    status: "unknown",
-    reason: "At least one capture is truncated.",
-  },
-  limitations: ["At least one capture is truncated."],
-});
-
 const applyTraceVerdict = (
   dimensions: ComparisonDimensions,
   specification: ProcessTraceSpecification,
@@ -359,8 +351,13 @@ const compareDimensions = (
     scope: ProcessCapture["residual_unknowns"][number]["scope"],
     leftValues: readonly unknown[],
     rightValues: readonly unknown[],
+    source: ProcessObservationSource,
   ): ComparisonStatus =>
-    !sameNormalization || hasUnknown(left, scope) || hasUnknown(right, scope)
+    !sameNormalization ||
+    hasUnknown(left, scope) ||
+    hasUnknown(right, scope) ||
+    processSourceTruncated(left, source) ||
+    processSourceTruncated(right, source)
       ? "unknown"
       : classifyCollection(leftValues, rightValues);
   return {
@@ -368,11 +365,13 @@ const compareDimensions = (
       "terminal",
       terminalObservations(left),
       terminalObservations(right),
+      "terminal_rendered",
     ),
     interaction: classify(
       "interaction",
       left.interaction_events,
       right.interaction_events,
+      "interaction",
     ),
     exit:
       hasUnknown(left, "exit") || hasUnknown(right, "exit")
@@ -387,8 +386,14 @@ const compareDimensions = (
       "filesystem",
       filesystemObservations(left),
       filesystemObservations(right),
+      "filesystem",
     ),
-    process: classify("process", left.process_samples, right.process_samples),
+    process: classify(
+      "process",
+      left.process_samples,
+      right.process_samples,
+      "process",
+    ),
   };
 };
 
@@ -408,15 +413,6 @@ export const compareProcessCaptures = (
   } = {},
 ): ProcessCaptureComparison => {
   assertComparable(left, right, options);
-  if (left.truncated || right.truncated) {
-    const truncated = truncatedComparison();
-    return options.traceSpecification === undefined
-      ? truncated
-      : {
-          ...truncated,
-          trace: compareProcessTraces(left, right, options.traceSpecification),
-        };
-  }
   const sameNormalization = sameJsonValue(
     left.normalization,
     right.normalization,
@@ -434,11 +430,13 @@ export const compareProcessCaptures = (
           right,
         ]);
   const divergenceCandidates = PROCESS_COMPARISON_DIMENSIONS.map((dimension) =>
-    firstCollectionDivergence(
-      dimension,
-      processDimensionObservations(left, dimension),
-      processDimensionObservations(right, dimension),
-    ),
+    dimensions[dimension] === "unknown"
+      ? null
+      : firstCollectionDivergence(
+          dimension,
+          processDimensionObservations(left, dimension),
+          processDimensionObservations(right, dimension),
+        ),
   );
   const observedFirstDivergence = chooseFirstDivergence(
     divergenceCandidates.map((candidate) =>
@@ -450,22 +448,30 @@ export const compareProcessCaptures = (
     ),
   );
   const firstDivergence =
-    trace?.verdict === "equivalent" &&
-    deriveProcessComparisonStatus(
-      PROCESS_COMPARISON_DIMENSIONS.map((dimension) => dimensions[dimension]),
-    ) === "unchanged"
-      ? ({ status: "none" } as const)
-      : observedFirstDivergence.status === "found"
-        ? observedFirstDivergence
-        : !sameNormalization ||
-            left.residual_unknowns.length > 0 ||
-            right.residual_unknowns.length > 0
-          ? ({
-              status: "unknown",
-              reason:
-                "Residual unknowns prevent proving that no divergence occurred.",
-            } as const)
-          : observedFirstDivergence;
+    left.truncated || right.truncated
+      ? ({
+          status: "unknown",
+          reason:
+            "Incomplete observations prevent locating the first divergence; unaffected dimensions retain their comparisons.",
+        } as const)
+      : trace?.verdict === "equivalent" &&
+          deriveProcessComparisonStatus(
+            PROCESS_COMPARISON_DIMENSIONS.map(
+              (dimension) => dimensions[dimension],
+            ),
+          ) === "unchanged"
+        ? ({ status: "none" } as const)
+        : observedFirstDivergence.status === "found"
+          ? observedFirstDivergence
+          : !sameNormalization ||
+              left.residual_unknowns.length > 0 ||
+              right.residual_unknowns.length > 0
+            ? ({
+                status: "unknown",
+                reason:
+                  "Residual unknowns prevent proving that no divergence occurred.",
+              } as const)
+            : observedFirstDivergence;
   const observedStatus = deriveProcessComparisonStatus(
     PROCESS_COMPARISON_DIMENSIONS.map((dimension) => dimensions[dimension]),
   );

@@ -51,9 +51,9 @@ export interface AnalysisCleanupObservation {
 
 /** Optional provider-neutral context that must survive typed error projection. */
 export interface AnalysisErrorOptions extends ErrorOptions {
-  readonly capturedOutput?: AnalysisCapturedOutput;
-  readonly cleanup?: AnalysisCleanupObservation;
-  readonly partialObservation?: AnalysisPartialObservation;
+  readonly capturedOutput?: AnalysisCapturedOutput | undefined;
+  readonly cleanup?: AnalysisCleanupObservation | undefined;
+  readonly partialObservation?: AnalysisPartialObservation | undefined;
 }
 
 /** Base class for expected analysis, provider, and session failures. */
@@ -77,16 +77,54 @@ export abstract class AnalysisError extends Error {
   readonly userMessage: string | undefined = undefined;
   readonly userCategory: "cancelled" | undefined = undefined;
   readonly executionFailure: string | undefined = undefined;
-  readonly partialObservation: AnalysisPartialObservation | undefined;
+  partialObservation: AnalysisPartialObservation | undefined;
   readonly cleanupReport: ProcessCaptureCleanupReport | undefined = undefined;
+
+  /** Retain a completed observation when a later step fails. */
+  retainPartialObservation(observation: AnalysisPartialObservation): this {
+    this.partialObservation ??= observation;
+    return this;
+  }
 }
 import type {
   PartialProcessCaptureObservation,
   ProcessCaptureCleanupReport,
 } from "./process/processCapture.js";
+import type { FileOffsetPartialObservation } from "./native/fileOffsetPartialObservation.js";
 import type { NativeCallPartialObservation } from "./native/nativeCallPartialObservation.js";
+import type { ElectronActivePartialObservation } from "./javascript/electronActiveObservation.js";
+import type { JavaScriptRuntimeObservation } from "./javascript/javascriptRuntimeObservation.js";
+import type {
+  ArtifactInventoryPartialObservation,
+  ArtifactExtractionPartialObservation,
+} from "./artifactPartialObservation.js";
+import type { WebScriptExportPartialObservation } from "./webScriptExport.js";
+import type { JavaScriptRecoveryPartialObservation } from "./javascript/javascriptRecovery.js";
+import type { BrowserScenarioPartialObservation } from "./browserScenarioCapture.js";
+import type { Evidence } from "./evidence.js";
+import type { AndroidPartialObservation } from "./android/androidPartialObservation.js";
+import type { FirmwarePartialObservation } from "./firmware/firmwareAnalysis.js";
+import type {
+  AdbAcquiredFilePartialObservation,
+  AdbPackagePullPartialObservation,
+} from "./adb/adbDeviceAnalysis.js";
+import type { NativeUiObservationResult } from "./native/nativeUiObservation.js";
 
 /** Provider-neutral evidence collected before a typed analysis failure. */
 export type AnalysisPartialObservation =
   | PartialProcessCaptureObservation
-  | NativeCallPartialObservation;
+  | NativeCallPartialObservation
+  | FileOffsetPartialObservation
+  | ElectronActivePartialObservation
+  | BrowserScenarioPartialObservation
+  | JavaScriptRuntimeObservation
+  | ArtifactInventoryPartialObservation
+  | ArtifactExtractionPartialObservation
+  | WebScriptExportPartialObservation
+  | JavaScriptRecoveryPartialObservation
+  | Evidence
+  | AndroidPartialObservation
+  | FirmwarePartialObservation
+  | NativeUiObservationResult
+  | AdbAcquiredFilePartialObservation
+  | AdbPackagePullPartialObservation;

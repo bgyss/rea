@@ -1,43 +1,72 @@
-import type { McpServer } from "@modelcontextprotocol/server";
+import type { EvidenceMcpServer } from "./EvidenceMcpServer.js";
 
-import type { BinarySessionPort } from "../application/binary/BinarySession.js";
+import type { BinarySessionPort } from "../application/binary/BinarySessionPort.js";
+import type { ProviderAvailability } from "../application/AnalysisProvider.js";
+import { AnalysisCancelledError } from "../domain/analysisErrorCore.js";
 import { buildCapabilityInventory } from "../application/CapabilityInventory.js";
 import { toolContract } from "../contracts/toolContracts.js";
 import type { ClientFeatureAvailability } from "../contracts/toolOutputSchemaPrimitives.js";
 import { jsonObjectSchema } from "../domain/jsonValue.js";
 import { createServerIdentity } from "../serverIdentity.js";
 import { mcpClientMetadata } from "./mcpClientMetadata.js";
-import type { SessionAvailability } from "./sessionAvailabilityPolicy.js";
+import type { AvailabilityPolicy } from "../application/CapabilityInventory.js";
 import { toolRegistrationOptions } from "./toolRegistrationOptions.js";
-import { toCallToolResult } from "./toolResult.js";
+import { err } from "../domain/result.js";
 
 type ToolAvailability = ReturnType<typeof buildCapabilityInventory>[number];
 
 /** Inputs required to register the binary session status tool. */
 export interface SessionStatusToolOptions {
-  readonly server: McpServer;
+  readonly server: EvidenceMcpServer;
   readonly session: BinarySessionPort;
   readonly contract: ReturnType<typeof toolContract<"binary_session">>;
   readonly startedAt: string;
-  readonly availabilityPolicy: () => SessionAvailability;
+  readonly availabilityPolicy: () => AvailabilityPolicy;
+  readonly androidAnalysisAvailability: (
+    signal: AbortSignal,
+  ) => Promise<ProviderAvailability>;
 }
 
 /** Register the read-only provider and target status operation. */
 export const registerSessionStatusTool = (
   options: SessionStatusToolOptions,
 ): void => {
-  const { server, session, contract, startedAt, availabilityPolicy } = options;
+  const {
+    server,
+    session,
+    contract,
+    startedAt,
+    availabilityPolicy,
+    androidAnalysisAvailability,
+  } = options;
   server.registerTool(
     contract.name,
     toolRegistrationOptions(contract),
-    (input, context) => {
-      const { client, clientFeatures, protocolVersion } =
-        mcpClientMetadata(context);
+    async (input, context) => {
+      const { client, clientFeatures, protocolVersion } = mcpClientMetadata(
+        context,
+        server.server,
+      );
+      let androidAvailability: ProviderAvailability;
+      try {
+        androidAvailability = await androidAnalysisAvailability(
+          context.mcpReq.signal,
+        );
+      } catch (cause) {
+        if (!context.mcpReq.signal.aborted) throw cause;
+        return server.delivery.toCallToolResult(
+          err(new AnalysisCancelledError("binary_session")),
+          contract,
+        );
+      }
       const status = session.status();
       const statusObject = jsonObjectSchema.parse(status);
       const toolAvailability = buildCapabilityInventory(
         status,
-        availabilityPolicy(),
+        {
+          ...availabilityPolicy(),
+          androidAnalysisAvailability: androidAvailability,
+        },
         clientFeatures,
       );
       const serverIdentity = createServerIdentity({
@@ -56,7 +85,7 @@ export const registerSessionStatusTool = (
         ...(client === undefined ? {} : { client }),
         ...(protocolVersion === undefined ? {} : { protocolVersion }),
       });
-      return toCallToolResult(
+      return server.delivery.toCallToolResult(
         {
           ok: true,
           value: projectSessionStatus({

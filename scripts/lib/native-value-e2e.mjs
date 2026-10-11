@@ -16,6 +16,9 @@ import { verifyGhidraBoundaries } from "./real-ghidra-boundaries.mjs";
 const defaultEntrypoint = fileURLToPath(new URL("../rea.mjs", import.meta.url));
 const environment = () => ({
   PATH: process.env.PATH ?? "/usr/bin:/bin",
+  ...(process.env.NODE_OPTIONS === undefined
+    ? {}
+    : { NODE_OPTIONS: process.env.NODE_OPTIONS }),
   REA_LOG_LEVEL: "silent",
   REA_ANALYSIS_PROVIDER: "ghidra",
   HOPPER_LAUNCHER_PATH: "/rea-unconfigured-deep-provider/hopper",
@@ -25,6 +28,15 @@ const environment = () => ({
   ...(process.env.JAVA_HOME === undefined
     ? {}
     : { JAVA_HOME: process.env.JAVA_HOME }),
+  ...(process.env.GHIDRA_HEADLESS_MAXMEM === undefined
+    ? {}
+    : { GHIDRA_HEADLESS_MAXMEM: process.env.GHIDRA_HEADLESS_MAXMEM }),
+  ...(process.env.GHIDRA_MAXMEM === undefined
+    ? {}
+    : { GHIDRA_MAXMEM: process.env.GHIDRA_MAXMEM }),
+  ...(process.env._JAVA_OPTIONS === undefined
+    ? {}
+    : { _JAVA_OPTIONS: process.env._JAVA_OPTIONS }),
 });
 
 const verifyGraph = (input, target, procedure, globalAddress) => {
@@ -80,7 +92,7 @@ export async function verifyNativeValueE2e(
   const workspace = await mkdtemp(join(tmpdir(), "rea-native-values-e2e-"));
   const runtime = join(
     workspace,
-    `runtime${process.platform === "darwin" ? " with spaces" : ""}-${"x".repeat(100)}`,
+    `runtime${process.platform === "win32" ? "" : " with spaces"}-${"x".repeat(100)}`,
   );
   await mkdir(runtime);
   const env = { ...environment(), TMPDIR: runtime };
@@ -179,12 +191,12 @@ async function verifyNativeValueAdapters(
       { timeout: 180000 },
     );
     assert.notEqual(result.isError, true, JSON.stringify(result));
-    const mcpEvidence = parseEvidence(result.structuredContent?.evidence);
+    const mcpEvidence = parseEvidence(result.structuredContent);
     assert.equal(mcpEvidence.operation, "trace_native_values");
     assert.equal(mcpEvidence.provider.id, "rea-workflow");
     assert.deepEqual(mcpEvidence.analysis_profile, workflowProfile);
     const mcpGraph = verifyGraph(
-      result.structuredContent?.result,
+      result.structuredContent?.normalized_result,
       target,
       procedure,
       globalAddress,
@@ -196,9 +208,7 @@ async function verifyNativeValueAdapters(
       { timeout: 180000 },
     );
     assert.notEqual(analyzed.isError, true, JSON.stringify(analyzed));
-    const functionEvidence = parseEvidence(
-      analyzed.structuredContent?.evidence,
-    );
+    const functionEvidence = parseEvidence(analyzed.structuredContent);
     assert.equal(functionEvidence.operation, "analyze_function");
     assert.equal(functionEvidence.provider.id, "ghidra");
     const functionProfile = analysisProfileSchema.parse(
@@ -207,26 +217,24 @@ async function verifyNativeValueAdapters(
     assert.deepEqual(functionProfile, upstreamProfile);
     assert.deepEqual(
       functionEvidence.normalized_result,
-      analyzed.structuredContent?.result,
+      analyzed.structuredContent?.normalized_result,
     );
     const comparison = await client.callTool(
       {
         name: "compare_functions",
         arguments: {
-          left: analyzed.structuredContent.evidence,
-          right: analyzed.structuredContent.evidence,
+          left: analyzed.structuredContent,
+          right: analyzed.structuredContent,
         },
       },
       { timeout: 180000 },
     );
     assert.notEqual(comparison.isError, true, JSON.stringify(comparison));
-    const comparisonEvidence = parseEvidence(
-      comparison.structuredContent?.evidence,
-    );
+    const comparisonEvidence = parseEvidence(comparison.structuredContent);
     assert.equal(comparisonEvidence.normalized_result.status, "unchanged");
     assert.deepEqual(
       comparisonEvidence.normalized_result,
-      comparison.structuredContent?.result,
+      comparison.structuredContent?.normalized_result,
     );
     assert.ok(
       comparisonEvidence.evidence_links.includes(functionEvidence.evidence_id),

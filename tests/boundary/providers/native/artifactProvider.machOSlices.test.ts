@@ -1,7 +1,7 @@
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
 
 import { createTestTempDirectory } from "../../../fixtures/temporaryDirectory.js";
 
@@ -39,7 +39,8 @@ describe("artifact Mach-O slices", () => {
           }),
         ),
     };
-    const reader = new MachOSliceArtifactReader(binary, runner);
+    const reader = new MachOSliceArtifactReader(binary, {}, runner);
+    onTestFinished(() => reader.close());
     const enumerate = async (): Promise<void> => {
       for await (const _entry of reader.entries()) {
         // Enumeration must reject out-of-bounds lipo metadata before yielding.
@@ -77,13 +78,15 @@ describe("artifact Mach-O slices", () => {
           }),
         ),
     };
-    const reader = new MachOSliceArtifactReader(binary, runner);
+    const reader = new MachOSliceArtifactReader(binary, {}, runner);
+    onTestFinished(() => reader.close());
     const entries = [];
     for await (const entry of reader.entries()) entries.push(entry);
     expect(entries).toHaveLength(2);
+    const firstEntry = entries[0];
     const secondEntry = entries[1];
-    expect(secondEntry).toBeDefined();
-    if (secondEntry === undefined) return;
+    if (firstEntry === undefined || secondEntry === undefined)
+      throw new Error("Expected both universal Mach-O slice entries");
     expect(secondEntry).toMatchObject({
       path: "slices/arm64",
       byteOffset: 8192,
@@ -93,8 +96,26 @@ describe("artifact Mach-O slices", () => {
       await expect(
         reader.open({ ...secondEntry, adapterKey }),
       ).rejects.toMatchObject({ reason: "integrity" });
+    await expect(
+      reader.open({ ...secondEntry, adapterKey: firstEntry.adapterKey }),
+    ).rejects.toMatchObject({ reason: "integrity" });
+    await expect(
+      reader.open({ ...secondEntry, path: firstEntry.path }),
+    ).rejects.toMatchObject({ reason: "integrity" });
+    await expect(
+      reader.open({ ...secondEntry, byteOffset: firstEntry.byteOffset }),
+    ).rejects.toMatchObject({ reason: "integrity" });
+    await expect(
+      reader.open({ ...secondEntry, declaredSize: arm.length + 1 }),
+    ).rejects.toMatchObject({ reason: "integrity" });
+    const originalKey = secondEntry.adapterKey;
+    Reflect.set(secondEntry, "adapterKey", firstEntry.adapterKey);
+    await expect(reader.open(secondEntry)).rejects.toMatchObject({
+      reason: "integrity",
+    });
+    Reflect.set(secondEntry, "adapterKey", originalKey);
     const chunks: Buffer[] = [];
-    const stream = await reader.open(secondEntry);
+    const stream = await reader.open({ ...secondEntry });
     for await (const chunk of stream) chunks.push(Buffer.from(chunk));
     expect(Buffer.concat(chunks)).toEqual(Buffer.from(arm));
     expect(reader.provenance()).toEqual([
@@ -105,7 +126,9 @@ describe("artifact Mach-O slices", () => {
       Reflect.set(provenance[0], "tool", "forged");
     expect(reader.provenance()[0]?.tool).toBe("lipo");
   });
+});
 
+describe("artifact Mach-O slice integrity", () => {
   it.each([
     ["CPU type", "cputype 16777223"],
     ["CPU subtype", "cpusubtype 2"],
@@ -136,8 +159,10 @@ describe("artifact Mach-O slices", () => {
       details[index] = ` ${field}`;
       const reader = new MachOSliceArtifactReader(
         binary,
+        {},
         lipoRunner(`${details.join("\n")}\n`),
       );
+      onTestFinished(() => reader.close());
       await expect(async () => {
         for await (const _entry of reader.entries()) {
           // The structural comparison runs before the reader yields a slice.
@@ -155,10 +180,12 @@ describe("artifact Mach-O slices", () => {
     await writeFile(binary, image);
     const reader = new MachOSliceArtifactReader(
       binary,
+      {},
       lipoRunner(
         `architecture arm64\n cputype 16777228\n cpusubtype 0\n offset 4096\n size ${thin.length}\n align 2^12 (4096)\n`,
       ),
     );
+    onTestFinished(() => reader.close());
     await expect(async () => {
       for await (const _entry of reader.entries()) {
         // Malformed structural facts must fail before any slice is yielded.
@@ -185,4 +212,82 @@ const lipoRunner = (stdout: string): NativeCommandRunner => ({
         signal: null,
       }),
     ),
+});
+
+// Newer lipo names arm64e ABI variants `arm64e.<variant>`; the FAT table names
+// the same slice `arm64e`, and its physical identity must still match.
+describe("artifact Mach-O arm64e variant slices", () => {
+  const ARM64E_V1 = { type: 0x0100000c, subtype: 0x81000002 } as const;
+  // CPU_SUBTYPE_ARM64E_X1 (12) with the pointer-auth ABI bit, as in macOS 27 /bin/ls.
+  const ARM64E_X1 = { type: 0x0100000c, subtype: 0x8000000c } as const;
+  const variantSlices = async (
+    cpu: { readonly type: number; readonly subtype: number },
+    lipo: (size: number) => string,
+  ) => {
+    const root = await createTestTempDirectory("rea-slices-arm64e-");
+    const binary = join(root, "fat");
+    const x86 = machoImage({ cpu: CPU.x86_64 });
+    const arm = machoImage({ cpu });
+    await writeFile(
+      binary,
+      fatImage([
+        { cpu: CPU.x86_64, bytes: x86 },
+        { cpu, bytes: arm },
+      ]),
+    );
+    const reader = new MachOSliceArtifactReader(
+      binary,
+      {},
+      lipoRunner(
+        `architecture x86_64\n cputype CPU_TYPE_X86_64\n cpusubtype CPU_SUBTYPE_X86_64_ALL\n offset 4096\n size ${String(x86.length)}\n align 2^12 (4096)\n${lipo(arm.length)}`,
+      ),
+    );
+    onTestFinished(() => reader.close());
+    const entries = [];
+    for await (const entry of reader.entries()) entries.push(entry);
+    return entries.map(({ path, byteOffset }) => [path, byteOffset]);
+  };
+
+  it.each([
+    [
+      "arm64e.v1",
+      ARM64E_V1,
+      " cputype CPU_TYPE_ARM64\n cpusubtype CPU_SUBTYPE_ARM64E\n capabilities PTR_AUTH_VERSION USERSPACE 1",
+    ],
+    [
+      "arm64e.x1",
+      ARM64E_X1,
+      " cputype CPU_TYPE_ARM64\n cpusubtype unknown arm64 cpusubtype",
+    ],
+  ])(
+    "accepts lipo's %s name for the FAT arm64e slice",
+    async (name, fatCpu, cpu) => {
+      expect(
+        await variantSlices(
+          fatCpu,
+          (size) =>
+            `architecture ${name}\n${cpu}\n offset 8192\n size ${String(size)}\n align 2^12 (4096)\n`,
+        ),
+      ).toEqual([
+        ["slices/x86_64", 4096],
+        [`slices/${name}`, 8192],
+      ]);
+    },
+  );
+
+  it.each([
+    ["a plain arm64 slice", CPU.arm64, "8192"],
+    ["a different offset", ARM64E_V1, "8193"],
+  ])(
+    "still rejects an arm64e variant name for %s",
+    async (_label, cpu, offset) => {
+      await expect(
+        variantSlices(
+          cpu,
+          (size) =>
+            `architecture arm64e.v1\n cputype CPU_TYPE_ARM64\n cpusubtype unknown arm64 cpusubtype\n offset ${offset}\n size ${String(size)}\n align 2^12 (4096)\n`,
+        ),
+      ).rejects.toMatchObject({ reason: "integrity" });
+    },
+  );
 });

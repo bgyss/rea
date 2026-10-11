@@ -6,13 +6,18 @@ import {
   resolveExecutableFormatHint,
   type ExecutableFormatSelector,
 } from "../domain/dosCom.js";
+import type { BinaryArchitecture } from "../domain/binaryTargetTypes.js";
+import {
+  binaryArchitectureSchema,
+  rawBinaryEntryPointSchema,
+} from "../domain/rawBinary.js";
 import {
   rawImageProfileSchema,
   type RawImageProfile,
 } from "../domain/rawImage.js";
 import { analysisProviderSelectorSchema } from "../contracts/providerSelection.js";
 import type { AnalysisProviderSelector } from "../contracts/providerSelection.js";
-import type { Logger } from "../logger.js";
+import type { Logger } from "pino";
 import { err, ok, type Result } from "../domain/result.js";
 
 export const providerSelectionOption = analysisProviderSelectorSchema
@@ -50,6 +55,25 @@ const readRawImageProfile = (path: string): Result<RawImageProfile, string> => {
       );
 };
 
+/** Explicit interpretation for headerless native executable formats. */
+export const formatSelectionOption = executableFormatHintSchema
+  .optional()
+  .describe(
+    "Explicit headerless interpretation: dos-com; raw-binary with --architecture and --entry-point; or raw-image with --raw-image-profile. Omission preserves header-based detection",
+  );
+
+export const architectureSelectionOption = binaryArchitectureSchema
+  .optional()
+  .describe(
+    "Caller-supplied CPU family; required with --target-format raw-binary",
+  );
+
+export const entryPointSelectionOption = rawBinaryEntryPointSchema
+  .optional()
+  .describe(
+    "Caller-supplied load and entry address (0xhex); required with --target-format raw-binary",
+  );
+
 // A plain path: the CLI catalog renders options as JSON Schema, which cannot
 // represent a parsing transform, so the file is read in directAnalysisOptions.
 const rawImageProfileOption = z
@@ -59,16 +83,6 @@ const rawImageProfileOption = z
   .describe(
     "Path to a dcomp.ghidra-profile.v1 (flat: load_address, entry_address) or v2 (blocks) JSON file with processor_language_id and compiler_spec_id; required with --target-format raw-image",
   );
-
-/** Explicit interpretation for headerless executable bytes, shared by analysis commands. */
-export const formatSelectionOptions = {
-  "target-format": executableFormatHintSchema
-    .optional()
-    .describe(
-      "Explicit headerless interpretation: dos-com, or raw-image with --raw-image-profile",
-    ),
-  "raw-image-profile": rawImageProfileOption,
-};
 
 /** Annotation ledger replayed after opening; the annotate commands also append. */
 export const annotationLedgerOptions = {
@@ -81,12 +95,29 @@ export const annotationLedgerOptions = {
     ),
 };
 
-/** Parsed values of {@link formatSelectionOptions} and {@link annotationLedgerOptions}. */
-export interface FormatSelection {
+/** Shared CLI flags that bind a native target interpretation. */
+export const nativeOpenOptionFields = {
+  "target-format": formatSelectionOption,
+  "raw-image-profile": rawImageProfileOption,
+  architecture: architectureSelectionOption,
+  "entry-point": entryPointSelectionOption,
+  provider: providerSelectionOption,
+  ...annotationLedgerOptions,
+};
+
+/** Native CLI flags consumed when opening a target for one-shot analysis. */
+export interface NativeOpenCliFlags {
+  readonly snapshot?: string | undefined;
+  readonly provider?: AnalysisProviderSelector | undefined;
   readonly "target-format"?: ExecutableFormatSelector | undefined;
   readonly "raw-image-profile"?: string | undefined;
+  readonly architecture?: BinaryArchitecture | undefined;
+  readonly "entry-point"?: string | undefined;
   readonly "annotation-ledger"?: string | undefined;
 }
+
+/** Parsed values of the format, architecture, entry and ledger options. */
+export type FormatSelection = Omit<NativeOpenCliFlags, "snapshot" | "provider">;
 
 /**
  * Shared direct-analysis options. An inconsistent format selection is carried
@@ -106,6 +137,8 @@ export const directAnalysisOptions = (
   const formatHint = profile.ok
     ? resolveExecutableFormatHint(selection["target-format"], profile.value)
     : profile;
+  const architecture = selection.architecture;
+  const entryPoint = selection["entry-point"];
   return {
     logger,
     snapshotPath,
@@ -119,9 +152,17 @@ export const directAnalysisOptions = (
       : formatHint.value === undefined
         ? {}
         : { formatHint: formatHint.value }),
+    ...(architecture === undefined ? {} : { architecture }),
+    ...(entryPoint === undefined ? {} : { entryPoint }),
     ...(providerId === undefined ? {} : { providerId }),
     ...(selection["annotation-ledger"] === undefined
       ? {}
       : { annotationLedgerPath: resolve(selection["annotation-ledger"]) }),
   };
 };
+
+/** Map native CLI flags onto the shared one-shot analysis options. */
+export const directAnalysisOptionsFromCli = (
+  logger: Logger,
+  options: NativeOpenCliFlags,
+) => directAnalysisOptions(logger, options.snapshot, options.provider, options);

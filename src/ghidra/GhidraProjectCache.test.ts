@@ -12,6 +12,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { spawnOwnedProviderProcess } from "../process/ProviderProcess.js";
 import { GhidraHeadlessLauncher } from "./GhidraLauncher.js";
 import {
   createGhidraProjectCacheStaging,
@@ -28,14 +29,14 @@ const key = {
 
 // Stands in for analyzeHeadless: an import pass logs Ghidra's save reports
 // (or an error) and exits; a -process session records its argv and idles.
-const fakeHeadless = `#!/usr/bin/env node
-const { appendFileSync, mkdirSync, writeFileSync } = require("node:fs");
+const fakeHeadless = `#!${process.execPath}
+const { appendFileSync, existsSync, mkdirSync, writeFileSync } = require("node:fs");
 const { dirname, join } = require("node:path");
 const args = process.argv.slice(2);
 const log = args[args.indexOf("-log") + 1];
 if (args.includes("-import")) {
   appendFileSync(join(dirname(dirname(log)), "imports.txt"), JSON.stringify(args) + "\\n");
-  if (process.env.FAKE_IMPORT_FAIL === "1") {
+  if (existsSync(join(dirname(process.argv[1]), "fail-import"))) {
     writeFileSync(log, "ERROR (HeadlessAnalyzer) Abort due to Headless analyzer error: fake\\n");
     process.exit(1);
   }
@@ -61,11 +62,30 @@ const setup = async () => {
   const headless = join(parent, "analyzeHeadless.cjs");
   await writeFile(headless, fakeHeadless);
   await chmod(headless, 0o700);
+  // LaunchSupport probing only needs a JDK whose java prints no configuration.
+  const javaHome = join(parent, "jdk");
+  await mkdir(join(javaHome, "bin"), { recursive: true });
+  await writeFile(join(javaHome, "bin", "java"), "#!/bin/sh\nexit 0\n");
+  await chmod(join(javaHome, "bin", "java"), 0o700);
   const cacheRoot = join(parent, "cache");
   const launcher = new GhidraHeadlessLauncher({
+    environment: {},
     analyzeHeadlessPath: headless,
+    // POSIX launches the inspected JVM; run the stand-in script with the
+    // analyzeHeadless arguments that follow the JVM options instead.
+    spawnProcess: (launch) => {
+      const start = launch.arguments.findIndex(
+        (value) => value === "-import" || value === "-process",
+      );
+      return spawnOwnedProviderProcess({
+        ...launch,
+        command: headless,
+        arguments: launch.arguments.slice(start - 2),
+        expectedCommand: headless,
+      });
+    },
     platform: "linux",
-    javaHome: "/opt/jdk-21",
+    javaHome,
     bridgeScriptPath: "/package/bridge/ReaGhidraBridge.java",
     rawImage: {
       mode: "flat",
@@ -99,7 +119,8 @@ const setup = async () => {
     (await readFile(join(parent, "imports.txt"), "utf8").catch(() => ""))
       .split("\n")
       .filter((line) => line.length > 0);
-  return { parent, cacheRoot, launch, imports };
+  const failImports = () => writeFile(join(parent, "fail-import"), "");
+  return { parent, cacheRoot, launch, imports, failImports };
 };
 
 describe.skipIf(process.platform === "win32")("Ghidra project cache", () => {
@@ -141,8 +162,11 @@ describe.skipIf(process.platform === "win32")("Ghidra project cache", () => {
       "-scriptPath",
       "/package/bridge",
       "-preScript",
-      join("/package/bridge", "ReaGhidraPrepareRaw.java"),
+      join("/package/bridge", "ReaGhidraPrepareRawImage.java"),
       "0x8000",
+      // The no-return repair is part of the analysis the cache saves.
+      "-postScript",
+      join("/package/bridge", "ReaGhidraNoReturnFix.java"),
     ]);
     expect(await readdir(join(cacheRoot, key.targetSha256))).toEqual([
       key.profileDigest,
@@ -169,8 +193,8 @@ describe.skipIf(process.platform === "win32")("Ghidra project cache", () => {
   });
 
   it("reports Ghidra's error and leaves no entry or staging when the import fails", async () => {
-    vi.stubEnv("FAKE_IMPORT_FAIL", "1");
-    const { cacheRoot, launch } = await setup();
+    const { cacheRoot, launch, failImports } = await setup();
+    await failImports();
     const { launched } = await launch();
     if (launched.ok) throw new Error("Expected the import pass to fail");
     expect(launched.error.message).toMatch(

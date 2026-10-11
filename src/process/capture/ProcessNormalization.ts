@@ -1,8 +1,8 @@
-import type {
-  ProcessSample,
-  ProcessScenario,
-} from "../../domain/process/processCapture.js";
+import { isIP } from "node:net";
 
+import type { ProcessScenario } from "../../domain/process/processScenario.js";
+
+import type { ProcessSample } from "../../domain/process/processCapture.js";
 /** Bucket one elapsed process-capture timestamp under scenario normalization. */
 export const normalizeProcessElapsedTime = (
   elapsedMs: number,
@@ -30,13 +30,42 @@ export const normalizeProcessText = (
         `<filesystem-root-${String(index)}>`,
       );
   }
+  if (scenario.normalization.ports)
+    normalized = normalizePortTokens(normalized);
   if (scenario.normalization.pids)
     normalized = normalizePidTokens(normalized, [pid]);
-  if (scenario.normalization.ports)
-    normalized = normalized.replaceAll(/(?<=[:=])\d{2,5}\b/g, "<port>");
+  // A callback keeps replacement text literal while preserving replaceAll's
+  // empty-pattern boundaries, which the process scenario contract permits.
   for (const pattern of scenario.normalization.patterns)
-    normalized = normalized.replaceAll(pattern.pattern, pattern.replacement);
+    normalized = normalized.replaceAll(
+      pattern.pattern,
+      () => pattern.replacement,
+    );
   return normalized;
+};
+
+// A port may end a sentence, but a period followed by a letter, digit, or
+// underscore in any script continues a decimal, version, or host name and is
+// not a port boundary.
+// PTY chunks are normalized independently, so a period that ends the chunk
+// stays unnormalized: its continuation may arrive in the next chunk.
+const normalizePortTokens = (value: string): string => {
+  const endpointNormalized = value.replaceAll(
+    /(\b[a-z][a-z0-9+.-]*:\/\/[^\s/?#"'<>]+|\blocalhost|\b(?:\d{1,3}\.){3}\d{1,3}|\[[\da-f:.%]+\]):(\d{1,5})(?![\p{L}\p{N}_@:]|\.(?:[\p{L}\p{N}_]|$))/giu,
+    (match: string, endpoint: string, port: string) => {
+      if (Number(port) > 65_535) return match;
+      const isEndpoint = endpoint.includes("://")
+        ? URL.canParse(`${endpoint}:${port}`)
+        : endpoint.toLowerCase() === "localhost" ||
+          isIP(endpoint.replace(/^\[|\]$/gu, "")) !== 0;
+      return isEndpoint ? `${endpoint}:<port>` : match;
+    },
+  );
+  return endpointNormalized.replaceAll(
+    /(\b(?:port|tcp_port|udp_port|listen)\b["']?\s*[:=]\s*)(\d{1,5})(?![\p{L}\p{N}_]|\.(?:[\p{L}\p{N}_]|$))/giu,
+    (match: string, prefix: string, port: string) =>
+      Number(port) <= 65_535 ? `${prefix}<port>` : match,
+  );
 };
 
 /** Project sampled observations under the caller-selected normalization rules. */

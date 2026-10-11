@@ -18,22 +18,31 @@ export const workflowAnalysisProfile = (
 ): AnalysisProfileCommitment =>
   createAnalysisProfile(REA_WORKFLOW_PROVIDER, {
     upstream_analysis_profile: upstream,
-    ...(operation === "binary_overview" ? { workflow_revision: 2 } : {}),
+    ...(operation === "binary_overview" || operation === "batch_decompile"
+      ? { workflow_revision: 2 }
+      : {}),
   });
 
 /** Provider identity for deterministic artifact inventories. */
-export const ARTIFACT_GRAPH_PROVIDER = {
+export const ARTIFACT_GRAPH_PROVIDER = Object.freeze({
   id: "rea-artifact-graph",
   name: "REA safe artifact graph provider",
   version: "1",
-} as const;
+} as const);
 
 /** Provider identity for execution-free managed PE/CLI analysis. */
-export const MANAGED_STATIC_PROVIDER = {
+export const MANAGED_STATIC_PROVIDER = Object.freeze({
   id: "rea-dotnet-static",
   name: "REA managed static analysis provider",
   version: "1",
-} as const;
+} as const);
+
+/** Provider identity for portable, execution-free PE resource decoding. */
+export const PE_RESOURCES_PROVIDER = Object.freeze({
+  id: "rea-pe-resources",
+  name: "REA PE resource parser",
+  version: "1",
+} as const);
 
 /** Provider identity for deterministic managed-code comparison workflows. */
 export const MANAGED_WORKFLOW_PROVIDER = {
@@ -56,6 +65,13 @@ export const ANDROID_APPLICATION_PROVIDER = {
   version: "1",
 } as const;
 
+/** Provider identity for deterministic HarmonyOS application projections. */
+export const HARMONY_APPLICATION_PROVIDER = {
+  id: "rea-harmony-application",
+  name: "REA HarmonyOS application workflows",
+  version: "1",
+} as const;
+
 /** Provider identity for verified publication of retained website scripts. */
 export const WEB_SCRIPT_EXPORT_PROVIDER = {
   id: "rea-web-script-export",
@@ -74,6 +90,13 @@ export const JAVASCRIPT_APPLICATION_PROVIDER = {
 export const JAVASCRIPT_RUNTIME_RECONCILIATION_PROVIDER = {
   id: "rea-javascript-runtime-reconciliation",
   name: "REA JavaScript runtime reconciliation",
+  version: "1",
+} as const;
+
+/** Provider identity for selected views of retained analysis Evidence. */
+export const ANALYSIS_VIEW_PROVIDER = {
+  id: "rea-analysis-view",
+  name: "REA analysis view projection",
   version: "1",
 } as const;
 

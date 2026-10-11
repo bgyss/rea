@@ -86,6 +86,7 @@ struct Runtime : Resource {
   std::vector<Handle> parents;
   Handle directory;
   std::vector<Handle> immutableFiles;
+  bool closing = false;
   // Main-thread admission is single-flight; only the accepted copy owns the
   // atomic cancellation flag consumed by its async worker. ERROR_BUSY rejects
   // another copy before it can reset that flag or replace pending ownership.
@@ -94,7 +95,12 @@ struct Runtime : Resource {
   Runtime() : Resource(Kind::Runtime) {}
 };
 struct Process : Resource {
-  Handle job, process, stdoutRead, stderrRead;
+  Handle job, process, stdoutRead, stderrRead, stdinWrite;
+  // Present only for a job with a commit limit; receives the job's notifications.
+  Handle notifications;
+  ULONGLONG memoryLimit = 0;
+  bool memoryLimitReached = false;
+  bool inputPending = false;
   DWORD pid = 0;
   Process() : Resource(Kind::Process) {}
 };
@@ -122,9 +128,10 @@ void closeRuntime(Runtime& runtime);
 napi_value filesystemCall(napi_env env, const std::wstring& operation,
                           const std::vector<napi_value>& args);
 std::unique_ptr<Process> spawnProcess(const std::wstring& command, const std::wstring& commandLine,
-                                    const std::wstring& cwd, const std::vector<std::wstring>& environment);
+                                    const std::wstring& cwd, const std::vector<std::wstring>& environment,
+                                    bool protocolStdin = false, ULONGLONG memoryLimit = 0);
 napi_value processCall(napi_env env, const std::wstring& operation,
                        const std::vector<napi_value>& args);
-napi_value inspect(napi_env env);
+napi_value inspect(napi_env env, std::unique_ptr<Runtime>& probe);
 
 } // namespace rea

@@ -38,16 +38,12 @@ export async function verifyPackagePack({ root, workspace }) {
     throw new Error("package did not expose both rea command entry points");
   if (packedManifest.mcpName !== "io.github.morluto/rea")
     throw new Error("package did not retain its MCP Registry ownership marker");
-  if (packedFiles.some((path) => path.startsWith("package/skill-src/")))
+  if (packedFiles.some((path) => path.startsWith("package/.agents/")))
     throw new Error(
       "package included authored skill sources instead of only the generated bundle",
     );
-  if (
-    packedFiles.some((path) =>
-      /^package\/(?:dist|src)\/generatedMcpToolCatalog\./u.test(path),
-    )
-  )
-    throw new Error("package included the test-only generated MCP catalog");
+  if (packedFiles.some((path) => path.startsWith("package/.cache/")))
+    throw new Error("package included development cache or test metadata");
   const skill = (
     await exec("tar", [
       "-xOf",
@@ -71,6 +67,6 @@ export async function verifyPackagePack({ root, workspace }) {
   ) {
     throw new Error("package contained generated Python bytecode");
   }
-  await verifyPackedBridge({ root, workspace, tarball, packedFiles });
+  await verifyPackedBridge({ workspace, tarball, packedFiles });
   return { tarball };
 }

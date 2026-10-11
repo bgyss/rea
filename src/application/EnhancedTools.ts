@@ -3,15 +3,17 @@ import { z } from "zod";
 import type {
   AnalysisOperation,
   AnalysisOperationPort,
+  ExecutionOptions,
 } from "./AnalysisProvider.js";
 import type { EnhancedToolName } from "../contracts/enhancedInputs.js";
 import { enhancedInputSchemas } from "../contracts/enhancedInputs.js";
 import {
   AnalysisCancelledError,
+  AnalysisCapabilityUnavailableError,
   AnalysisOutputError,
 } from "../domain/analysisErrorCore.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
-import { type AnalysisError } from "../domain/analysisErrorBase.js";
+import type { AnalysisError } from "../domain/analysisErrorBase.js";
 import {
   addressDistance,
   functionDossierSchema,
@@ -42,8 +44,6 @@ import { traceCallPath } from "./CallPathTracing.js";
 import { resolveProcedureAddress } from "./ProcedureAddressResolution.js";
 import { traceLiteralFeature } from "./EnhancedLiteralTracing.js";
 import { projectNativeApiInspection } from "./native/NativeApiInspection.js";
-export type { ValidatedEnhancedCall } from "./EnhancedToolTypes.js";
-
 /**
  * Composes direct provider operations into bounded reverse-engineering tools.
  * Direct callers use `execute`; adapters that own validation use
@@ -165,8 +165,8 @@ export class EnhancedTools {
         );
       case "trace_call_path":
         return traceCallPath(
-          (name, arguments_, operationSignal) =>
-            this.#call(name, arguments_, operationSignal),
+          (name, arguments_, operationSignal, selectorOrigin) =>
+            this.#call(name, arguments_, operationSignal, selectorOrigin),
           call.input,
           signal,
         );
@@ -265,20 +265,34 @@ export class EnhancedTools {
   ): EnhancedResult {
     const items = await Promise.all(
       addresses.map(async (address) => {
+        const resolved = await resolveProcedureAddress(
+          this.#call.bind(this),
+          address,
+          signal,
+        );
+        const procedure = resolved.ok
+          ? await this.#batchProcedureIdentity(resolved.value, signal)
+          : {
+              status: "unknown" as const,
+              error: projectAnalysisError(resolved.error),
+            };
         const result = await this.#call(
           "procedure_pseudo_code",
-          { procedure: address },
+          { procedure: resolved.ok ? resolved.value : address },
           signal,
+          resolved.ok ? "provider" : undefined,
         );
         if (!result.ok)
           return {
             address,
+            procedure,
             status: "error" as const,
             error: projectAnalysisError(result.error),
           };
         if (typeof result.value !== "string" || result.value.length === 0)
           return {
             address,
+            procedure,
             status: "error" as const,
             error: projectAnalysisError(
               new AnalysisOutputError(
@@ -287,7 +301,12 @@ export class EnhancedTools {
               ),
             ),
           };
-        return { address, status: "ok" as const, pseudocode: result.value };
+        return {
+          address,
+          procedure,
+          status: "ok" as const,
+          pseudocode: result.value,
+        };
       }),
     );
     const succeeded = items.filter(({ status }) => status === "ok").length;
@@ -297,6 +316,30 @@ export class EnhancedTools {
       succeeded,
       failed: items.length - succeeded,
     });
+  }
+
+  async #batchProcedureIdentity(address: string, signal?: AbortSignal) {
+    const observed = await this.#call("address_name", { address }, signal);
+    const named =
+      observed.ok &&
+      (typeof observed.value === "string" || observed.value === null);
+    return {
+      status: "resolved" as const,
+      address,
+      name: named ? observed.value : null,
+      ...(named
+        ? {}
+        : {
+            name_error: projectAnalysisError(
+              observed.ok
+                ? new AnalysisOutputError(
+                    "address_name",
+                    "provider returned an invalid entry label",
+                  )
+                : observed.error,
+            ),
+          }),
+    };
   }
 
   async #callGraph(
@@ -332,6 +375,7 @@ export class EnhancedTools {
         tool,
         { procedure: current.address },
         signal,
+        "provider",
       );
       if (!result.ok) {
         graph[level].push({
@@ -370,9 +414,30 @@ export class EnhancedTools {
     signal?: AbortSignal,
   ): EnhancedResult {
     const procedures = await this.#allAddressed("list_procedures", signal);
-    return procedures.ok
-      ? ok(categorizeSwiftTypes(procedures.value, input))
-      : procedures;
+    if (!procedures.ok) return procedures;
+    const symbols = await this.#allAddressed("list_names", signal);
+    if (
+      !symbols.ok &&
+      !(symbols.error instanceof AnalysisCapabilityUnavailableError)
+    )
+      return symbols;
+    const result = categorizeSwiftTypes(
+      procedures.value,
+      input,
+      symbols.ok ? symbols.value : [],
+    );
+    return ok(
+      symbols.ok
+        ? result
+        : {
+            ...result,
+            symbol_inventory_error: projectAnalysisError(symbols.error),
+            limitations: [
+              ...result.limitations,
+              "The provider's symbol inventory is unavailable; demangled procedures could not be joined to their Swift aliases.",
+            ],
+          },
+    );
   }
 
   async #findXrefs(name: string, signal?: AbortSignal): EnhancedResult {
@@ -468,13 +533,13 @@ export class EnhancedTools {
     name: AnalysisOperation,
     arguments_: Readonly<Record<string, JsonValue>>,
     signal?: AbortSignal,
+    selectorOrigin?: ExecutionOptions["selectorOrigin"],
   ): Promise<Result<JsonValue, AnalysisError>> {
     if (isAborted(signal)) return err(new AnalysisCancelledError(name));
-    const execution = await this.analysis.execute(
-      name,
-      arguments_,
-      signal === undefined ? {} : { signal },
-    );
+    const execution = await this.analysis.execute(name, arguments_, {
+      ...(signal === undefined ? {} : { signal }),
+      ...(selectorOrigin === undefined ? {} : { selectorOrigin }),
+    });
     if (isAborted(signal)) return err(new AnalysisCancelledError(name));
     return execution.ok ? ok(execution.value.result) : execution;
   }

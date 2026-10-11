@@ -3,21 +3,16 @@ import { z } from "zod";
 import { browserCompletenessSchema } from "./browserCompleteness.js";
 import { browserScenarioCompletenessSchema } from "./browserScenarioCaptureValues.js";
 import { digestSchema, prefixedDigestSchema } from "./digests.js";
+import { localPathStringSchema } from "./localPath.js";
 
 /** Export already captured scripts into one absent, caller-selected directory. */
 export const exportWebScriptsInputSchema = z.strictObject({
-  capture_path: z
-    .string()
-    .min(1)
-    .describe(
-      "Absolute filesystem path to saved inspect_web_page or capture_browser_scenario JSON, normalized result or complete Evidence",
-    ),
-  output_directory: z
-    .string()
-    .min(1)
-    .describe(
-      "Absolute absent filesystem directory for verified scripts and manifest; parent directory must exist",
-    ),
+  capture_path: localPathStringSchema.describe(
+    "Absolute filesystem path to saved inspect_web_page or capture_browser_scenario JSON, normalized result or complete Evidence",
+  ),
+  output_directory: localPathStringSchema.describe(
+    "Absolute absent filesystem directory for verified scripts and manifest; parent directory must exist",
+  ),
 });
 export type ExportWebScriptsInput = z.output<
   typeof exportWebScriptsInputSchema
@@ -28,13 +23,13 @@ const sourceSchema = z.discriminatedUnion("kind", [
     kind: z.literal("page-script"),
     script_key: z.string().min(1),
     frame_id: z.string().nullable(),
-    is_module: z.boolean(),
+    is_module: z.boolean().nullable(),
     language: z.string().nullable(),
     source_map_url: z.string().nullable(),
   }),
   z.strictObject({
     kind: z.literal("scenario-response"),
-    transaction_id: z.string().nullable(),
+    transaction_id: z.string().min(1),
     request_sequence: z.number().int().min(1),
     response_sequence: z.number().int().min(1).nullable(),
     status: z.number().nullable(),
@@ -103,6 +98,12 @@ export const webScriptExportResultSchema = webScriptExportManifestSchema.extend(
 export type WebScriptExportResult = z.output<
   typeof webScriptExportResultSchema
 >;
+
+/** Completed publication retained when cleanup fails after durable commit. */
+export interface WebScriptExportPartialObservation {
+  readonly kind: "web-script-export";
+  readonly result: WebScriptExportResult;
+}
 
 /** Adapter input to the provider-neutral path planner and publisher. */
 export interface CapturedWebScript {

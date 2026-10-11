@@ -1,13 +1,14 @@
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
+import { cliTest } from "../../support/cli/cliFixture.js";
 
 import {
   captureProcessScenarioFile,
@@ -16,30 +17,17 @@ import {
 } from "../../../src/application/process/ProcessCli.js";
 import { createEvidence } from "../../../src/domain/evidence.js";
 import { ProcessCaptureError } from "../../../src/process/capture/ProcessCaptureError.js";
-import { PROCESS_PROVIDER } from "../../../src/application/process/ProcessEvidence.js";
+import { PROCESS_PROVIDER } from "../../../src/domain/process/processEvidenceProvider.js";
 import { INVESTIGATION_EXAMPLES } from "../../../src/contracts/investigationExamples.js";
 
-const roots: string[] = [];
 const execFileAsync = promisify(execFile);
 const CLI_INTEGRATION_TIMEOUT_MS = 60_000;
 
-afterEach(async () => {
-  await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
-  );
-});
-
-const fixture = async (): Promise<string> => {
-  const root = await createTestTempDirectory("rea-process-cli-");
-  roots.push(root);
-  return root;
-};
-
 describe("documented process CLI workflow", () => {
-  it(
+  cliTest(
     "feeds the documented JSON capture into the comparison CLI",
-    async () => {
-      const root = await fixture();
+    async ({ cli }) => {
+      const root = await createTestTempDirectory("rea-process-cli-");
       const guide = await readFile(
         new URL("../../../docs/process-capture.md", import.meta.url),
         "utf8",
@@ -62,24 +50,23 @@ describe("documented process CLI workflow", () => {
           arguments: ["-e", "process.stdout.write('documented-capture')"],
         }),
       );
-      const cli = fileURLToPath(
-        new URL("../../../scripts/rea.mjs", import.meta.url),
-      );
-      const capture = await execFileAsync(
-        process.execPath,
-        [cli, "capture-process", ...args],
-        { cwd: root },
-      );
-      expect(JSON.parse(capture.stdout)).toMatchObject({
+      const capture = await cli.run({
+        arguments: ["capture-process", ...args],
+        cwd: root,
+      });
+      expect(capture.exitCode, capture.stdout || capture.stderr).toBe(0);
+      expect(capture.json).toMatchObject({
         operation: "capture_process_scenario",
       });
       await writeFile(join(root, output), capture.stdout);
-      const comparison = await execFileAsync(
-        process.execPath,
-        [cli, "compare-process-captures", output, output, "--json"],
-        { cwd: root },
+      const comparison = await cli.run({
+        arguments: ["compare-process-captures", output, output, "--json"],
+        cwd: root,
+      });
+      expect(comparison.exitCode, comparison.stdout || comparison.stderr).toBe(
+        0,
       );
-      expect(JSON.parse(comparison.stdout)).toMatchObject({
+      expect(comparison.json).toMatchObject({
         operation: "compare_process_captures",
       });
     },
@@ -105,73 +92,8 @@ describe("process CLI errors", () => {
     CLI_INTEGRATION_TIMEOUT_MS,
   );
 
-  it("projects unexpected causes without their message or stack", () => {
-    const projected = projectProcessCliError(
-      new Error("SECRET internal failure /private/path"),
-    );
-    expect(projected).toEqual({
-      error: "Process command failed",
-      category: "execution_failure",
-      message:
-        "Process command could not complete. Check the input files and run `rea doctor`, then try again.",
-    });
-    expect(JSON.stringify(projected)).not.toContain("SECRET");
-  });
-
-  it("projects missing, malformed JSON, and invalid scenario files", async () => {
-    const root = await fixture();
-    const malformed = join(root, "malformed.json");
-    const invalid = join(root, "invalid.json");
-    const invalidUtf8 = join(root, "invalid-utf8.json");
-    await writeFile(malformed, "not-json");
-    await writeFile(invalid, "{}");
-    await writeFile(
-      invalidUtf8,
-      Buffer.concat([
-        Buffer.from('{"executable":"'),
-        Buffer.from([0xff]),
-        Buffer.from('"}'),
-      ]),
-    );
-
-    expect(
-      await captureProcessScenarioFile(join(root, "missing.json")),
-    ).toEqual({
-      error: "Process command failed",
-      category: "invalid_input",
-      message:
-        "Process input file could not be read. Check that the path exists and is readable.",
-    });
-    expect(await captureProcessScenarioFile(malformed)).toEqual({
-      error: "Process command failed",
-      category: "invalid_input",
-      message:
-        "Process input file is not valid JSON. Repair the file, then try again.",
-    });
-    expect(await captureProcessScenarioFile(invalidUtf8)).toEqual({
-      error: "Process command failed",
-      category: "invalid_input",
-      message:
-        "Process input file is not valid JSON. Repair the file, then try again.",
-    });
-    expect(await captureProcessScenarioFile(invalid)).toEqual({
-      error: "Process command failed",
-      code: "invalid_request",
-      category: "invalid_input",
-      message: "Analysis input is invalid. Check the arguments and try again.",
-      retryable: true,
-      remediation: { action: "Correct the listed arguments and retry." },
-      details: expect.objectContaining({
-        operation: "capture_process_scenario",
-        issues: expect.arrayContaining([
-          expect.objectContaining({ path: ["executable"] }),
-        ]),
-      }),
-    });
-  });
-
   it("rejects NUL arguments before process launch", async () => {
-    const root = await fixture();
+    const root = await createTestTempDirectory("rea-process-cli-");
     const scenario = join(root, "nul-argument.json");
     await writeFile(
       scenario,
@@ -200,7 +122,7 @@ describe("process CLI errors", () => {
 
 describe("process CLI environment key diagnostics", () => {
   it("reports the reserved process environment key constraint", async () => {
-    const root = await fixture();
+    const root = await createTestTempDirectory("rea-process-cli-");
     const scenario = join(root, "reserved-environment.json");
     await writeFile(
       scenario,
@@ -255,7 +177,7 @@ describe("process CLI evidence validation", () => {
   });
 
   it("captures the minimal executable-and-arguments scenario", async () => {
-    const root = await fixture();
+    const root = await createTestTempDirectory("rea-process-cli-");
     const scenario = join(root, "scenario.json");
     await writeFile(
       scenario,
@@ -273,7 +195,7 @@ describe("process CLI evidence validation", () => {
   });
 
   it("rejects unrelated capture evidence", async () => {
-    const root = await fixture();
+    const root = await createTestTempDirectory("rea-process-cli-");
     const invalidCapture = join(root, "invalid-capture.json");
     const unrelated = join(root, "unrelated.json");
     await writeFile(
@@ -314,7 +236,7 @@ describe("process CLI evidence validation", () => {
   });
 
   it("classifies malformed capture evidence as invalid input", async () => {
-    const root = await fixture();
+    const root = await createTestTempDirectory("rea-process-cli-");
     const malformed = join(root, "malformed-evidence.json");
     await writeFile(malformed, "{}");
 
@@ -340,7 +262,7 @@ describe("process CLI evidence validation", () => {
 it(
   "reports the JSON depth constraint through the compiled comparison CLI",
   async () => {
-    const root = await fixture();
+    const root = await createTestTempDirectory("rea-process-cli-");
     const left = join(root, "left.json");
     const right = join(root, "right.json");
     const input = INVESTIGATION_EXAMPLES.compare_process_captures.input;

@@ -1,7 +1,5 @@
-import type {
-  InspectWebPageInput,
-  WebPageInspection,
-} from "../domain/browserObservation.js";
+import type { InspectWebPageInput } from "../domain/browserObservation.js";
+import type { WebPageInspection } from "../domain/browserObservationSchemas.js";
 import type { CdpEvent } from "./CdpConnection.js";
 import { CdpCaptureCompleteness } from "./CdpCaptureCompleteness.js";
 import * as bodyShapes from "./CdpCaptureEventBodyShapes.js";
@@ -11,18 +9,24 @@ import * as handlers from "./CdpCaptureEventHandlers.js";
 import { isJsonMediaType } from "./CdpCaptureEventHelpers.js";
 import { recordValue } from "./CdpCaptureValues.js";
 
-export { type CapturedScript } from "./CdpCaptureEventTypes.js";
-
 /** Event accumulator that validates and normalizes payloads at ingestion. */
 export class CdpCaptureEvents implements CdpCaptureEventsState {
+  #scriptMetadataBudgetExclusionsRecorded = false;
   readonly scripts = new Map<string, CapturedScript>();
+  readonly scriptMetadataBudgetOmissionsById = new Map<string, true>();
+  rejectedScriptMetadataBudgetCount = 0;
+  rejectedSourceMapMetadataBudgetCount = 0;
+  readonly scriptMetadataBytesById = new Map<string, number>();
+  retainedScriptMetadataBytes = 0;
   readonly executionContextFrames = new Map<string, string>();
   readonly network = new Map<string, NetworkState>();
   readonly networkRequestTimestamps = new Map<string, number>();
   readonly malformedRedirectRequestIds = new Set<string>();
-  readonly allowedWebSockets = new Set<string>();
+  readonly webSocketConnectionsById = new Map<
+    string,
+    WebPageInspection["network"]["websocket_connections"][number]
+  >();
   console: WebPageInspection["console"]["events"] = [];
-  websockets: WebPageInspection["network"]["websocket_events"] = [];
   responseMetadata: WebPageInspection["metadata"]["responses"] = [];
   agentHints: WebPageInspection["metadata"]["agent_hints"] = [];
   readonly completeness = new CdpCaptureCompleteness([
@@ -51,13 +55,18 @@ export class CdpCaptureEvents implements CdpCaptureEventsState {
     this.navigationDuringCapture = false;
     this.committedDocument = undefined;
     this.scripts.clear();
+    this.scriptMetadataBudgetOmissionsById.clear();
+    this.rejectedScriptMetadataBudgetCount = 0;
+    this.rejectedSourceMapMetadataBudgetCount = 0;
+    this.scriptMetadataBytesById.clear();
+    this.retainedScriptMetadataBytes = 0;
+    this.#scriptMetadataBudgetExclusionsRecorded = false;
     this.executionContextFrames.clear();
     this.network.clear();
     this.networkRequestTimestamps.clear();
     this.malformedRedirectRequestIds.clear();
-    this.allowedWebSockets.clear();
+    this.webSocketConnectionsById.clear();
     this.console.length = 0;
-    this.websockets.length = 0;
     this.responseMetadata.length = 0;
     this.agentHints.length = 0;
     this.completeness.reset();
@@ -79,6 +88,28 @@ export class CdpCaptureEvents implements CdpCaptureEventsState {
     // `committedDocument` is dropped so the new document's frame events are
     // compared against itself rather than the document we just left.
     this.committedDocument = undefined;
+  }
+
+  /** Record final script metadata omissions after all scriptParsed replacements. */
+  recordScriptMetadataBudgetExclusions(): void {
+    if (this.#scriptMetadataBudgetExclusionsRecorded) return;
+    this.#scriptMetadataBudgetExclusionsRecorded = true;
+    const omittedScripts = this.rejectedScriptMetadataBudgetCount;
+    const omittedSourceMaps =
+      this.rejectedSourceMapMetadataBudgetCount +
+      this.scriptMetadataBudgetOmissionsById.size;
+    if (omittedScripts > 0)
+      this.completeness.exclude(
+        "scripts",
+        "resource_budget_exhausted",
+        omittedScripts,
+      );
+    if (omittedSourceMaps > 0)
+      this.completeness.exclude(
+        "source_maps",
+        "resource_budget_exhausted",
+        omittedSourceMaps,
+      );
   }
 
   ingest(event: CdpEvent): void {
@@ -129,10 +160,8 @@ export class CdpCaptureEvents implements CdpCaptureEventsState {
     script: CapturedScript,
     allowedFrameIds: ReadonlySet<string>,
   ): string | null {
-    if (script.executionContextKey === null) return null;
-    const frameId = this.executionContextFrames.get(script.executionContextKey);
-    return frameId !== undefined && allowedFrameIds.has(frameId)
-      ? frameId
+    return script.frameId !== null && allowedFrameIds.has(script.frameId)
+      ? script.frameId
       : null;
   }
 

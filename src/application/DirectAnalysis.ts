@@ -4,15 +4,14 @@ import {
   appendAnnotationFromEvidence,
   replayAnnotationLedger,
 } from "./AnnotationLedger.js";
-import { parseConfig } from "../config.js";
+import type { BinaryArchitecture } from "../domain/binaryTargetTypes.js";
 import type { JsonValue } from "../domain/jsonValue.js";
-import { EnhancedTools } from "./EnhancedTools.js";
-import { executeFunctionAnalysisEvidence } from "./FunctionAnalysisEvidence.js";
 import type { DirectAnalysisDependencies } from "./DirectAnalysisDependencies.js";
 import type { BinarySession } from "./binary/BinarySession.js";
 import type { SessionProviderRoute } from "./binary/SessionProviderRouter.js";
 import type { ResolvedSessionOpen } from "./binary/BinarySessionOpen.js";
-import { silentLogger, type Logger } from "../logger.js";
+import { silentLogger } from "../logger.js";
+import type { Logger } from "pino";
 import { createEvidence } from "../domain/evidence.js";
 import type { Evidence } from "../domain/evidence.js";
 import type { NativeToolName } from "../contracts/native/nativeToolContracts.js";
@@ -23,7 +22,7 @@ import {
 } from "../contracts/managed/managedToolContracts.js";
 import { EvidenceIntegrityError } from "../domain/evidenceErrors.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
-import { type AnalysisError } from "../domain/analysisErrorBase.js";
+import type { AnalysisError } from "../domain/analysisErrorBase.js";
 import { AnalysisInputError } from "../domain/analysisErrorCore.js";
 import { access } from "node:fs/promises";
 import {
@@ -31,7 +30,7 @@ import {
   writeAnalysisSnapshot,
 } from "./binary/AnalysisSnapshotFiles.js";
 import { parseBinaryTarget } from "./BinaryTargetResolver.js";
-import type { BinaryTarget } from "../domain/binaryTarget.js";
+import type { BinaryTarget } from "../domain/binaryTargetTypes.js";
 import {
   snapshotEvidenceForQuery,
   snapshotMatchesTarget,
@@ -54,6 +53,12 @@ import {
 } from "./WorkflowEvidence.js";
 import type { AnalysisProviderSelector } from "../contracts/providerSelection.js";
 import { artifactInspectionResultSchema } from "../domain/artifactInspection.js";
+import { resolveXrefsAddress } from "./XrefsAddressResolution.js";
+import {
+  directAnalysisCleanupFailure,
+  managedAnalysisCleanupFailure,
+  withSessionCleanup,
+} from "./DirectAnalysisCleanup.js";
 
 type DirectAnalysisTool =
   | "annotate_native_function"
@@ -99,6 +104,8 @@ export const runDirectAnalysis = async (
     readonly signal?: AbortSignal;
     readonly providerId?: AnalysisProviderSelector;
     readonly formatHint?: ExecutableFormatHint;
+    readonly architecture?: BinaryArchitecture;
+    readonly entryPoint?: string;
     /** An unusable CLI option or argument, reported before any I/O. */
     readonly optionError?: {
       readonly option: string;
@@ -128,6 +135,12 @@ export const runDirectAnalysis = async (
           ...(options.formatHint === undefined
             ? {}
             : { formatHint: options.formatHint }),
+          ...(options.architecture === undefined
+            ? {}
+            : { architecture: options.architecture }),
+          ...(options.entryPoint === undefined
+            ? {}
+            : { entryPoint: options.entryPoint }),
           ...(options.providerId === undefined
             ? {}
             : { providerId: options.providerId }),
@@ -160,20 +173,22 @@ export const runProviderAnalysis = async (
 
 /** Execute managed metadata inspection in an isolated managed-only session. */
 export const runManagedProviderExecution = async (
-  dependencies: DirectAnalysisDependencies,
+  dependencies: Pick<DirectAnalysisDependencies, "createManagedBinarySession">,
   path: string,
   tool: ManagedToolName,
   signal?: AbortSignal,
 ): Promise<Result<AnalysisExecution, AnalysisError>> =>
   withProcessCancellation(signal, async (operationSignal) => {
-    const session = dependencies.createManagedBinarySession();
-    try {
-      const opened = await session.open(path, { signal: operationSignal });
-      if (!opened.ok) return opened;
-      return await session.execute(tool, {}, { signal: operationSignal });
-    } finally {
-      await session.close();
-    }
+    const session = await dependencies.createManagedBinarySession();
+    return withSessionCleanup(
+      session,
+      async () => {
+        const opened = await session.open(path, { signal: operationSignal });
+        if (!opened.ok) return opened;
+        return await session.execute(tool, {}, { signal: operationSignal });
+      },
+      managedAnalysisCleanupFailure,
+    );
   });
 
 const runManagedProviderAnalysis = async (
@@ -215,160 +230,183 @@ const runAnalysis = async (
     readonly signal: AbortSignal;
     readonly providerId?: AnalysisProviderSelector;
     readonly formatHint?: ExecutableFormatHint;
+    readonly architecture?: BinaryArchitecture;
+    readonly entryPoint?: string;
     readonly annotationLedgerPath?: string;
-    /**
-     * Environment the configuration is read from. Defaults to the process
-     * environment so existing callers are unchanged, but a caller may supply
-     * one — which is what lets the MCP path's injected environment reach this
-     * code, and what makes configuration-driven behaviour testable without
-     * mutating `process.env`.
-     */
-    readonly environment?: Readonly<Record<string, string | undefined>>;
   },
 ): Promise<JsonValue> => {
   const { logger, signal, snapshotPath } = options;
-  const config = parseConfig(options.environment ?? process.env);
+  const config = dependencies.readConfiguration();
   if (!config.ok) return cliError(config.error);
-  const session = dependencies.createBinarySession(config.value, logger);
-  try {
-    const prepared = await prepareSnapshot({
-      path,
-      snapshotPath,
-      ...(options.formatHint === undefined
-        ? {}
-        : { formatHint: options.formatHint }),
-    });
-    if (!prepared.ok) return cliError(prepared.error);
-    const { snapshot } = prepared.value;
-    let resolvedTarget: ResolvedSessionOpen | undefined;
-    if (snapshot !== undefined && prepared.value.target !== undefined) {
-      const preview = await session.previewTarget(prepared.value.target, {
+  const session = await dependencies.createBinarySession(config.value, logger);
+  return withSessionCleanup(
+    session,
+    async () => {
+      const prepared = await prepareSnapshot({
+        path,
+        snapshotPath,
         signal,
-        snapshot,
         ...(options.formatHint === undefined
           ? {}
           : { formatHint: options.formatHint }),
+        ...(options.architecture === undefined
+          ? {}
+          : { architecture: options.architecture }),
+        ...(options.entryPoint === undefined
+          ? {}
+          : { entryPoint: options.entryPoint }),
+      });
+      if (!prepared.ok) return cliError(prepared.error);
+      const { snapshot } = prepared.value;
+      let resolvedTarget: ResolvedSessionOpen | undefined;
+      if (snapshot !== undefined && prepared.value.target !== undefined) {
+        const preview = await session.previewTarget(prepared.value.target, {
+          signal,
+          snapshot,
+          ...(options.formatHint === undefined
+            ? {}
+            : { formatHint: options.formatHint }),
+          ...(options.architecture === undefined
+            ? {}
+            : { architecture: options.architecture }),
+          ...(options.entryPoint === undefined
+            ? {}
+            : { entryPoint: options.entryPoint }),
+          ...(options.providerId === undefined
+            ? {}
+            : { providerId: options.providerId }),
+        });
+        if (!preview.ok) return cliError(preview.error);
+        resolvedTarget = preview.value;
+        const route = preview.value.route;
+        const bindingProfile = route.profile ?? undefined;
+        const evidenceProfile = analysisProfileForRoute(route, tool);
+        if (
+          bindingProfile !== undefined &&
+          evidenceProfile !== undefined &&
+          allowsSnapshotReplay(route, tool)
+        ) {
+          const cached = snapshotEvidenceForQuery(snapshot, {
+            target: preview.value.target,
+            bindingProfile,
+            operation: tool,
+            parameters: arguments_,
+            provider: isWorkflowEvidenceTool(tool)
+              ? REA_WORKFLOW_PROVIDER
+              : providerIdentityForRoute(route, tool),
+            evidenceProfile,
+          });
+          if (cached !== undefined) return cached;
+        }
+      }
+      const openOptions = {
+        signal,
+        ...(options.formatHint === undefined
+          ? {}
+          : { formatHint: options.formatHint }),
+        ...(options.architecture === undefined
+          ? {}
+          : { architecture: options.architecture }),
+        ...(options.entryPoint === undefined
+          ? {}
+          : { entryPoint: options.entryPoint }),
+        ...(snapshot === undefined ? {} : { snapshot }),
         ...(options.providerId === undefined
           ? {}
           : { providerId: options.providerId }),
+      };
+      const opened =
+        resolvedTarget === undefined
+          ? await session.open(path, openOptions)
+          : await session.openResolvedTarget(resolvedTarget, openOptions);
+      if (!opened.ok) return cliError(opened.error);
+      const ledger =
+        options.annotationLedgerPath === undefined
+          ? undefined
+          : {
+              path: options.annotationLedgerPath,
+              targetSha256: opened.value.sha256,
+              profileDigest: session.analysisProfile()?.digest ?? null,
+            };
+      if (ledger !== undefined) {
+        const replay = await replayAnnotationLedger(session, ledger, {
+          signal,
+        });
+        if (!replay.ok) return cliError(replay.error);
+        if (replay.value.failed.length > 0)
+          logger.warn(
+            { annotation_ledger: replay.value },
+            "Some annotation ledger entries could not be replayed",
+          );
+      }
+      const evidenceProfile = analysisProfileForEvidence(session, tool);
+      const { output, evidence } = await executeAnalysisTool({
+        session,
+        openedTarget: opened.value,
+        tool,
+        arguments: arguments_,
+        signal,
+        evidenceProfile,
       });
-      if (!preview.ok) return cliError(preview.error);
-      resolvedTarget = preview.value;
-      const route = preview.value.route;
-      const bindingProfile = route.profile ?? undefined;
-      const evidenceProfile = analysisProfileForRoute(route, tool);
+      if (evidence !== undefined) {
+        const recorded = session.recordEvidence(evidence);
+        if (!recorded.ok)
+          return cliError(recorded.error.retainPartialObservation(evidence));
+        if (ledger !== undefined && isAnnotationOperation(tool)) {
+          const appended = await appendAnnotationFromEvidence(
+            ledger,
+            tool,
+            arguments_,
+            evidence,
+          );
+          if (!appended.ok)
+            return cliError(appended.error.retainPartialObservation(evidence));
+        }
+        if (isWorkflowEvidenceTool(tool)) {
+          const unknowns = recordWorkflowUnknowns({
+            name: tool,
+            result: evidence.normalized_result,
+            evidenceId: evidence.evidence_id,
+            recordUnknown: (unknown) => session.recordUnknown(unknown),
+          });
+          if (!unknowns.ok)
+            return cliError(unknowns.error.retainPartialObservation(evidence));
+        }
+      }
       if (
-        bindingProfile !== undefined &&
-        evidenceProfile !== undefined &&
-        allowsSnapshotReplay(route, tool)
+        isWorkflowEvidenceTool(tool) &&
+        tool !== "trace_native_ui_action" &&
+        snapshotPath !== undefined &&
+        evidence !== undefined &&
+        session.allowsSnapshotReplay(tool)
       ) {
-        const cached = snapshotEvidenceForQuery(snapshot, {
-          target: preview.value.target,
-          bindingProfile,
-          operation: tool,
-          parameters: arguments_,
-          provider: isWorkflowEvidenceTool(tool)
-            ? REA_WORKFLOW_PROVIDER
-            : providerIdentityForRoute(route, tool),
-          evidenceProfile,
-        });
-        if (cached !== undefined) return cached;
+        const workflowRecord = workflowSnapshotRecord(evidence, tool);
+        if (workflowRecord !== undefined) {
+          const recorded = session.recordWorkflowSnapshot(workflowRecord);
+          if (!recorded.ok)
+            return cliError(recorded.error.retainPartialObservation(evidence));
+        }
       }
-    }
-    const openOptions = {
-      signal,
-      ...(options.formatHint === undefined
-        ? {}
-        : { formatHint: options.formatHint }),
-      ...(snapshot === undefined ? {} : { snapshot }),
-      ...(options.providerId === undefined
-        ? {}
-        : { providerId: options.providerId }),
-    };
-    const opened =
-      resolvedTarget === undefined
-        ? await session.open(path, openOptions)
-        : await session.openResolvedTarget(resolvedTarget, openOptions);
-    if (!opened.ok) return cliError(opened.error);
-    const ledger =
-      options.annotationLedgerPath === undefined
-        ? undefined
-        : {
-            path: options.annotationLedgerPath,
-            targetSha256: opened.value.sha256,
-            profileDigest: session.analysisProfile()?.digest ?? null,
-          };
-    if (ledger !== undefined) {
-      const replay = await replayAnnotationLedger(session, ledger, { signal });
-      if (!replay.ok) return cliError(replay.error);
-      if (replay.value.failed.length > 0)
-        logger.warn(
-          { annotation_ledger: replay.value },
-          "Some annotation ledger entries could not be replayed",
+      if (
+        tool !== "trace_native_ui_action" &&
+        snapshotPath !== undefined &&
+        evidence !== undefined
+      ) {
+        const snapshot = session.exportAnalysisSnapshot();
+        if (!snapshot.ok)
+          return cliError(snapshot.error.retainPartialObservation(evidence));
+        const written = await writeAnalysisSnapshot(
+          snapshot.value,
+          snapshotPath,
+          true,
         );
-    }
-    const evidenceProfile = analysisProfileForEvidence(session, tool);
-    const { output, evidence } = await executeAnalysisTool({
-      session,
-      openedTarget: opened.value,
-      tool,
-      arguments: arguments_,
-      signal,
-      evidenceProfile,
-    });
-    if (evidence !== undefined) {
-      const recorded = session.recordEvidence(evidence);
-      if (!recorded.ok) return cliError(recorded.error);
-      if (ledger !== undefined && isAnnotationOperation(tool)) {
-        const appended = await appendAnnotationFromEvidence(
-          ledger,
-          tool,
-          arguments_,
-          evidence,
-        );
-        if (!appended.ok) return cliError(appended.error);
+        if (!written.ok)
+          return cliError(written.error.retainPartialObservation(evidence));
       }
-      if (isWorkflowEvidenceTool(tool)) {
-        const unknowns = recordWorkflowUnknowns({
-          name: tool,
-          result: evidence.normalized_result,
-          evidenceId: evidence.evidence_id,
-          recordUnknown: (unknown) => session.recordUnknown(unknown),
-        });
-        if (!unknowns.ok) return cliError(unknowns.error);
-      }
-    }
-    if (
-      isWorkflowEvidenceTool(tool) &&
-      tool !== "trace_native_ui_action" &&
-      snapshotPath !== undefined &&
-      evidence !== undefined &&
-      session.allowsSnapshotReplay(tool)
-    ) {
-      const workflowRecord = workflowSnapshotRecord(evidence, tool);
-      if (workflowRecord !== undefined) {
-        const recorded = session.recordWorkflowSnapshot(workflowRecord);
-        if (!recorded.ok) return cliError(recorded.error);
-      }
-    }
-    if (
-      tool !== "trace_native_ui_action" &&
-      snapshotPath !== undefined &&
-      evidence !== undefined
-    ) {
-      const snapshot = session.exportAnalysisSnapshot();
-      if (!snapshot.ok) return cliError(snapshot.error);
-      const written = await writeAnalysisSnapshot(
-        snapshot.value,
-        snapshotPath,
-        true,
-      );
-      if (!written.ok) return cliError(written.error);
-    }
-    return output;
-  } finally {
-    await session.close();
-  }
+      return output;
+    },
+    directAnalysisCleanupFailure,
+  );
 };
 
 const executeAnalysisTool = async (input: {
@@ -385,6 +423,8 @@ const executeAnalysisTool = async (input: {
 }): Promise<{ readonly output: JsonValue; readonly evidence?: Evidence }> => {
   const { session, tool, signal, evidenceProfile } = input;
   if (tool === "analyze_function") {
+    const { executeFunctionAnalysisEvidence } =
+      await import("./FunctionAnalysisEvidence.js");
     const result = await executeFunctionAnalysisEvidence(
       session,
       input.arguments,
@@ -403,6 +443,7 @@ const executeAnalysisTool = async (input: {
     tool === "trace_native_values" ||
     tool === "trace_native_ui_action"
   ) {
+    const { EnhancedTools } = await import("./EnhancedTools.js");
     const result = await new EnhancedTools(session).execute(
       tool,
       input.arguments,
@@ -418,7 +459,34 @@ const executeAnalysisTool = async (input: {
     });
     return { output: evidence, evidence };
   }
-  const result = await session.execute(tool, input.arguments, { signal });
+  let result = await session.execute(tool, input.arguments, { signal });
+  if (
+    tool === "xrefs" &&
+    typeof input.arguments.address === "string" &&
+    !result.ok &&
+    result.error instanceof AnalysisInputError &&
+    !result.error.cleanupIncomplete &&
+    result.error.issues.length > 0 &&
+    result.error.issues.every(
+      ({ path, reason }) =>
+        path.length === 1 &&
+        path[0] === "address" &&
+        reason === "invalid_format",
+    )
+  ) {
+    const address = await resolveXrefsAddress(
+      session,
+      input.arguments.address,
+      signal,
+    );
+    if (!address.ok) return { output: cliError(address.error) };
+    if (address.value !== input.arguments.address)
+      result = await session.execute(
+        tool,
+        { ...input.arguments, address: address.value },
+        { signal },
+      );
+  }
   if (!result.ok) return { output: cliError(result.error) };
   const evidence = createEvidence(
     result.value.subject ?? input.openedTarget,
@@ -450,18 +518,25 @@ const withProcessCancellation = async <Value>(
   if (suppliedSignal !== undefined) return operation(suppliedSignal);
   const controller = new AbortController();
   const cancel = (): void => controller.abort();
-  process.once("SIGINT", cancel);
+  // Package runners can forward a terminal interrupt after REA already received
+  // it directly. Keep both guards installed until provider cleanup has settled.
+  process.on("SIGINT", cancel);
+  process.on("SIGTERM", cancel);
   try {
     return await operation(controller.signal);
   } finally {
     process.off("SIGINT", cancel);
+    process.off("SIGTERM", cancel);
   }
 };
 
 const prepareSnapshot = async (options: {
   readonly path: string;
   readonly formatHint?: ExecutableFormatHint;
+  readonly architecture?: BinaryArchitecture;
+  readonly entryPoint?: string;
   readonly snapshotPath: string | undefined;
+  readonly signal: AbortSignal;
 }): Promise<
   Result<
     { readonly snapshot?: AnalysisSnapshot; readonly target?: BinaryTarget },
@@ -471,15 +546,20 @@ const prepareSnapshot = async (options: {
   const { path, snapshotPath } = options;
   if (snapshotPath === undefined || !(await fileExists(snapshotPath)))
     return ok({});
-  const loaded = await readAnalysisSnapshot(snapshotPath);
+  const loaded = await readAnalysisSnapshot(snapshotPath, options.signal);
   if (!loaded.ok) return loaded;
-  const target = await parseBinaryTarget(
-    path,
-    process.cwd(),
-    process.arch,
-    undefined,
-    options.formatHint,
-  );
+  const target = await parseBinaryTarget(path, {
+    signal: options.signal,
+    ...(options.formatHint === undefined
+      ? {}
+      : { formatHint: options.formatHint }),
+    ...(options.architecture === undefined
+      ? {}
+      : { architecture: options.architecture }),
+    ...(options.entryPoint === undefined
+      ? {}
+      : { entryPoint: options.entryPoint }),
+  });
   if (!target.ok) return target;
   if (!snapshotMatchesTarget(loaded.value.target, target.value))
     return err(

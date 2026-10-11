@@ -2,11 +2,11 @@ import { createHash } from "node:crypto";
 
 import { describe, expect, it } from "vitest";
 
+import { compareBrowserScenarios } from "./browserScenarioDiff.js";
 import {
-  compareBrowserScenarios,
   compareBrowserScenariosInputSchema,
   browserScenarioDiffSchema,
-} from "./browserScenarioDiff.js";
+} from "./browserScenarioDiffValues.js";
 import {
   browserScenarioCaptureSchema,
   type BrowserScenarioCapture,
@@ -28,6 +28,7 @@ const networkCapture = (sourceSequence: number, receiptStep: number) => {
       },
       resource_type: "fetch",
       transaction_id: "request-1",
+      redirected_from_transaction_id: null,
       header_names: [],
       status: null,
       failure: null,
@@ -130,27 +131,19 @@ it("reports content-selection mismatch as unknown instead of a website change", 
       reason: expect.stringContaining("content selections differ"),
     }),
   );
-  const legacy = browserScenarioCaptureSchema.parse({
-    ...metadataOnly,
-    scenario: { ...metadataOnly.scenario, network_content: undefined },
-  });
-  expect(legacy.scenario.network_content).toBeUndefined();
-  const legacyComparison = compareBrowserScenarios(
-    compareBrowserScenariosInputSchema.parse({
-      before_scenario: legacy,
-      after_scenario: metadataOnly,
-    }),
-  );
-  expect(legacyComparison.overall_status).toBe("unknown");
-  expect(
-    legacyComparison.steps.flatMap((step) => step.artifact_diffs),
-  ).toContainEqual(
-    expect.objectContaining({
-      artifact: "events",
-      status: "unknown",
-      reason: expect.stringContaining("unknown in a legacy capture"),
-    }),
-  );
+  for (const networkContent of [undefined, {}, { request_body: false }])
+    expect(
+      compareBrowserScenariosInputSchema.safeParse({
+        before_scenario: {
+          ...metadataOnly,
+          scenario: {
+            ...metadataOnly.scenario,
+            network_content: networkContent,
+          },
+        },
+        after_scenario: withBody,
+      }).success,
+    ).toBe(false);
 });
 
 describe("browser scenario comparison", () => {
@@ -487,6 +480,11 @@ const scenarioCapture = (
       start_origin: "https://app.example.test",
       action_count: 1,
       secret_references: [],
+      network_content: {
+        request_body: false,
+        response_body: false,
+        header_values: false,
+      },
     },
     duration_ms: options.elapsedMs ?? 10,
     steps: [

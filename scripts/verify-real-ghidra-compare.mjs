@@ -238,11 +238,10 @@ async function listing(path, procedure) {
   const reply = await call("inspect_native_function_instructions", {
     procedure,
   });
-  const evidence = parseEvidence(reply.evidence);
-  assert.deepEqual(evidence.normalized_result, reply.result);
+  const evidence = parseEvidence(reply);
   await call("close_binary");
   opened = false;
-  return { evidence: reply.evidence, result: reply.result };
+  return { evidence: reply, result: evidence.normalized_result };
 }
 async function compare(left, right, masking) {
   // A comparison reads only the Evidence passed in; it needs no open session.
@@ -251,14 +250,13 @@ async function compare(left, right, masking) {
     right: right.evidence,
     ...(masking === undefined ? {} : { masking }),
   });
-  const evidence = parseEvidence(reply.evidence);
+  const evidence = parseEvidence(reply);
   assert.equal(evidence.operation, "compare_compiled_function");
-  assert.deepEqual(evidence.normalized_result, reply.result);
   assert.deepEqual(evidence.evidence_links, [
     left.evidence.evidence_id,
     right.evidence.evidence_id,
   ]);
-  return reply.result;
+  return evidence.normalized_result;
 }
 async function cliListingEvidence(path, procedure) {
   const { stdout } = await promisify(execFile)(

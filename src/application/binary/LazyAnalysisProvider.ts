@@ -1,10 +1,10 @@
 import type { AnalysisProfileCommitment } from "../../domain/analysisProfile.js";
-import type { BinaryTarget } from "../../domain/binaryTarget.js";
+import type { BinaryTarget } from "../../domain/binaryTargetTypes.js";
 import { AnalysisCancelledError } from "../../domain/analysisErrorCore.js";
 import { AnalysisError } from "../../domain/analysisErrorBase.js";
 import { ProviderAdapterError } from "../../domain/providerAdapterError.js";
 import type { ProviderOperationHealth } from "../../domain/providerOperationHealth.js";
-import { err } from "../../domain/result.js";
+import { err, ok } from "../../domain/result.js";
 import { ABORTED, waitForAbortable } from "./AbortablePromise.js";
 import type {
   AnalysisClient,
@@ -120,12 +120,12 @@ class LazyAnalysisClient implements AnalysisClient {
     return this.#client?.operationHealthSnapshot?.();
   }
 
-  async close(): Promise<void> {
+  close: AnalysisClient["close"] = async (options) => {
     this.#closed = true;
-    if (this.#loading === undefined) return;
+    if (this.#loading === undefined) return ok(null);
     const client = await this.#loading;
-    await client.close();
-  }
+    return client.close(options);
+  };
 
   async #load(operation: string): Promise<AnalysisClient> {
     if (this.#closed)

@@ -3,18 +3,24 @@ import type { RawImageProfile } from "./rawImage.js";
 import { err, ok, type Result } from "./result.js";
 
 /** Caller-selected interpretation for executable bytes with no identifying header. */
-export const executableFormatHintSchema = z.enum(["dos-com", "raw-image"]);
+export const executableFormatHintSchema = z.enum([
+  "dos-com",
+  "raw-binary",
+  "raw-image",
+]);
 /** Explicit interpretation selector accepted at the CLI and MCP boundaries. */
 export type ExecutableFormatSelector = z.infer<
   typeof executableFormatHintSchema
 >;
 
 /**
- * Resolved explicit interpretation: headerless DOS COM, or a raw memory image
- * together with its caller-declared processor, base and entry profile.
+ * Resolved explicit interpretation: headerless DOS COM, a raw binary with a
+ * caller-supplied architecture and entry, or a raw memory image together with
+ * its caller-declared processor, base and entry profile.
  */
 export type ExecutableFormatHint =
   | "dos-com"
+  | "raw-binary"
   | { readonly format: "raw-image"; readonly profile: RawImageProfile };
 
 /**

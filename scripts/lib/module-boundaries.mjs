@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const PURE_LAYERS = new Set(["domain", "contracts"]);
 const MIGRATED_PROVIDER_ROOTS = new Set([
   "evm",
+  "wasm",
   "android",
   "firmware",
   "ghidra",
@@ -14,14 +15,6 @@ const MIGRATED_PROVIDER_ROOTS = new Set([
   "inspector",
   "javascript",
 ]);
-const PROVIDER_ROOTS = new Set([
-  ...MIGRATED_PROVIDER_ROOTS,
-  "artifacts",
-  "browser",
-  "dotnet",
-  "native",
-]);
-
 const repositoryPath = (root, path) =>
   relative(root, path).replaceAll("\\", "/");
 
@@ -88,11 +81,6 @@ const failedBoundary = (file, target) => {
       /^src\/(?:cli|main)\./u.test(target))
   )
     return "artifact-acquisition";
-  if (
-    PROVIDER_ROOTS.has(layer) &&
-    /^src\/generatedMcpToolCatalog\.(?:js|ts)$/u.test(target)
-  )
-    return "provider-generated-catalog";
   if (PURE_LAYERS.has(layer)) {
     if (
       (/^src\/[^/]+\//u.test(target) && !PURE_LAYERS.has(targetLayer)) ||

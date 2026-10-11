@@ -9,6 +9,7 @@ import {
 } from "../process/WindowsAuthority.js";
 import { GHIDRA_FUNCTION_OPERATIONS } from "./GhidraFunctionValues.js";
 import { GHIDRA_INVENTORY_OPERATIONS } from "./GhidraInventoryValues.js";
+import { GHIDRA_MUTATING_OPERATIONS } from "./GhidraSessionValues.js";
 
 /** Public identity committed by every Ghidra-backed observation. */
 export const GHIDRA_PROVIDER_IDENTITY: ProviderIdentity = Object.freeze({
@@ -32,10 +33,16 @@ export const healthLimitations = Object.freeze([
 
 /** Additional limitations applied to the experimental Windows x64 P0 boundary. */
 export const windowsP0Limitations = Object.freeze([
-  "Windows Ghidra P0 accepts approved native x86 and x86-64 PE applications only; DLL, managed, hostile, sensitive, and mutable-path targets are unsupported.",
+  "Windows Ghidra P0 accepts approved native x86 and x86-64 PE applications and DLLs; managed, hostile, sensitive, and mutable-path targets are unsupported.",
   "The Windows bridge uses authenticated IPv4 loopback because Node path-based IPC does not expose Java AF_UNIX sockets; the endpoint file contains no bearer token.",
   "Windows sessions require the matching packaged Windows x64 native addon, local NTFS targets and runtimes, and Windows 10 or later. Native handles enforce path admission, private DACLs, and Job Object ownership automatically.",
 ]);
+
+const stringInventoryLimitation =
+  "Only Ghidra-defined string Data is observed; packed or undefined string bytes may be absent. Completeness applies to that inventory, and an empty search does not establish that text is absent from the artifact. If an address is known, use read_bytes and xrefs to inspect bytes and references.";
+
+const searchLimitation =
+  "Regex mode uses Java Pattern semantics. Matcher or compiler stack exhaustion returns a resource constraint without closing the session; literal mode avoids regex recursion and returns complete matching values.";
 
 /** Limitation text for one admitted operation, including the common base. */
 export const limitationsFor = (operation: string): readonly string[] => {
@@ -72,6 +79,14 @@ export const limitationsFor = (operation: string): readonly string[] => {
         "Memory blocks are uninitialized, readable and writable, and are added only where no memory is mapped; a range already fully mapped is kept as it is, and a partial overlap is rejected. Volatile blocks make the decompiler keep each register access. A processors list is compared with Ghidra's processor name, e.g. 6502 or MIPS.",
         "Built-in label packs are versioned rea.label-pack.v1 data; the ledger records the resolved set, so replay is unaffected by later pack versions. Metadata edits invalidate immutable analysis snapshots and are discarded on close unless the persistent project cache is enabled.",
       ];
+    case "set_address_name":
+    case "set_addresses_names":
+      return [
+        ...common,
+        "Names use Ghidra USER_DEFINED source. A local function entry renames that function; any other mapped address receives a new or renamed primary label. Existing symbols retain their namespace and accept leaf names or qualified names within that namespace; qualified readback can be reused without adding namespace prefixes. Readback compares the primary symbol name.",
+        "set_addresses_names applies each address in its own transaction and reports per-address success; invalid names, unmapped addresses, and readback mismatches roll back only that address.",
+        "Metadata edits invalidate immutable analysis snapshots and are discarded on close; this is not a saved Ghidra project.",
+      ];
     case "inspect_native_load_image":
       return [
         ...common,
@@ -106,7 +121,8 @@ export const limitationsFor = (operation: string): readonly string[] => {
     case "list_strings":
       return [
         ...common,
-        "Only Ghidra-defined string Data is observed; charset is reported, while a non-missing terminator cannot distinguish a present terminator from a fixed or Pascal layout.",
+        stringInventoryLimitation,
+        "Charset is reported, while a non-missing terminator cannot distinguish a present terminator from a fixed or Pascal layout.",
       ];
     case "resolve_containing_procedure":
       return [
@@ -119,11 +135,9 @@ export const limitationsFor = (operation: string): readonly string[] => {
         "Memory-block end addresses are exclusive; permissions come from Ghidra MemoryBlock flags rather than inference from section names.",
       ];
     case "search_procedures":
+      return [...common, searchLimitation];
     case "search_strings":
-      return [
-        ...common,
-        "Regex mode uses Java Pattern semantics. Matcher or compiler stack exhaustion returns a resource constraint without closing the session; literal mode avoids regex recursion and returns complete matching values.",
-      ];
+      return [...common, stringInventoryLimitation, searchLimitation];
     case "procedure_pseudo_code":
       return [
         ...common,
@@ -205,8 +219,14 @@ export const CAPABILITIES: readonly CapabilityDescriptor[] = Object.freeze(
       operation,
       available: true,
       reason: null,
+      // Project writes are private import machinery. Analysis reads are bound
+      // to the artifact/profile; session annotations disable snapshot replay.
+      ...(GHIDRA_MUTATING_OPERATIONS.has(operation) ||
+      operation === "list_documents"
+        ? {}
+        : { cachePolicy: "snapshot" as const }),
       effects: Object.freeze({
-        mutatesArtifact: isAnnotationOperation(operation),
+        mutatesArtifact: GHIDRA_MUTATING_OPERATIONS.has(operation),
         launchesProcess: true,
         mayShowUi: false,
         mayAccessNetwork: false,

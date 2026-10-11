@@ -4,6 +4,7 @@ let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let window = NSWindow(contentRect: NSRect(x: 120, y: 120, width: 360, height: 320), styleMask: [.titled, .closable], backing: .buffered, defer: false)
 window.title = "REA source-owned UI verification"
+window.animationBehavior = .none
 final class FixtureController: NSObject {
   @objc func increment(_ sender: NSButton) { sender.title = "REA fixture incremented" }
   var pointerClicks = 0
@@ -77,7 +78,8 @@ canvas.setAccessibilityRole(.group)
 canvas.setAccessibilityIdentifier("rea-canvas")
 canvas.setAccessibilityValue("")
 window.contentView?.addSubview(canvas)
-window.orderFront(nil)
+window.makeKeyAndOrderFront(nil)
+app.activate(ignoringOtherApps: true)
 window.makeFirstResponder(canvas)
 // Floating window over the canvas's right edge: it stays above the raised
 // main window, so pointer targets beneath it must be refused as occluded.

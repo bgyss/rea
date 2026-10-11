@@ -1,3 +1,4 @@
+import { snapshotEnvironment } from "../process/snapshotEnvironment.js";
 import {
   createAnalysisExecution,
   type AnalysisClient,
@@ -20,35 +21,42 @@ import {
   artifactExtractionExecutionSchema,
   type ArtifactAnalysisOperation,
 } from "../contracts/artifactToolContracts.js";
-import type { BinaryTarget } from "../domain/binaryTarget.js";
+import type { BinaryTarget } from "../domain/binaryTargetTypes.js";
 import {
   AnalysisCapabilityUnavailableError,
   AnalysisInputError,
+  AnalysisUnsupportedTargetError,
 } from "../domain/analysisErrorCore.js";
 import { ArtifactOperationError } from "../domain/artifactOperationError.js";
-import { type AnalysisError } from "../domain/analysisErrorBase.js";
+import type { AnalysisError } from "../domain/analysisErrorBase.js";
 import type { JsonValue } from "../domain/jsonValue.js";
 import { interfaceBuilderLimitsSchema } from "../domain/apple/interfaceBuilderGraph.js";
-import { err, ok } from "../domain/result.js";
+import { err, ok, type Result } from "../domain/result.js";
 import { ArtifactReaderFailure } from "./ArtifactReader.js";
-import {
-  ARTIFACT_PROVIDER_IDENTITY as IDENTITY,
-  artifactCapabilities,
-} from "./ArtifactProviderMetadata.js";
+import { ArtifactResourceScope } from "./ArtifactResourceScope.js";
+import { artifactCapabilities } from "./ArtifactProviderMetadata.js";
+import { ARTIFACT_GRAPH_PROVIDER } from "../application/InvestigationProviders.js";
 import { createEvidence } from "../domain/evidence.js";
 import { createArtifactInspection } from "../domain/artifactInspection.js";
-import { resolveArtifactIntegrityPolicy } from "./inventory/policy.js";
+import { ProviderCleanupError } from "../domain/providerCleanupError.js";
 
 /** Read-only inventory and exclusively owned extraction provider. */
 export class ArtifactProvider implements AnalysisProvider {
   readonly #capabilities: readonly CapabilityDescriptor[];
+  readonly #platform: NodeJS.Platform;
+  private readonly environment: Readonly<NodeJS.ProcessEnv>;
 
-  constructor(platform: NodeJS.Platform = process.platform) {
+  constructor(
+    environment: Readonly<NodeJS.ProcessEnv>,
+    platform: NodeJS.Platform = process.platform,
+  ) {
+    this.environment = snapshotEnvironment(environment, platform);
     this.#capabilities = artifactCapabilities(platform);
+    this.#platform = platform;
   }
 
   identity(): ProviderIdentity {
-    return IDENTITY;
+    return ARTIFACT_GRAPH_PROVIDER;
   }
 
   capabilities(): readonly CapabilityDescriptor[] {
@@ -56,12 +64,18 @@ export class ArtifactProvider implements AnalysisProvider {
   }
 
   createClient(target: BinaryTarget): AnalysisClient {
-    return new ArtifactClient(target);
+    return new ArtifactClient(target, this.environment, this.#platform);
   }
 }
 
 class ArtifactClient implements AnalysisClient {
-  constructor(private readonly target: BinaryTarget) {}
+  readonly #resourceScope = new ArtifactResourceScope();
+
+  constructor(
+    private readonly target: BinaryTarget,
+    private readonly environment: Readonly<NodeJS.ProcessEnv>,
+    private readonly platform: NodeJS.Platform,
+  ) {}
 
   async execute(
     operation: AnalysisOperation,
@@ -69,11 +83,11 @@ class ArtifactClient implements AnalysisClient {
     options?: ExecutionOptions,
   ) {
     if (operation === "health")
-      return ok(createAnalysisExecution(null, IDENTITY));
+      return ok(createAnalysisExecution(null, ARTIFACT_GRAPH_PROVIDER));
     if (!isArtifactOperation(operation))
       return err(
         new AnalysisCapabilityUnavailableError(
-          IDENTITY.id,
+          ARTIFACT_GRAPH_PROVIDER.id,
           operation,
           "Operation is not implemented by artifact graph provider.",
         ),
@@ -89,8 +103,8 @@ class ArtifactClient implements AnalysisClient {
           this.target.sourcePath === undefined ||
           !this.target.sourcePath.toLowerCase().endsWith(".app")
         )
-          throw new ArtifactReaderFailure(
-            "unavailable",
+          throw this.unsupportedTarget(
+            operation,
             "decode_interface_builder requires an active .app bundle target",
           );
         const limits = interfaceBuilderLimitsSchema.parse(parameters);
@@ -101,7 +115,7 @@ class ArtifactClient implements AnalysisClient {
           ...(options?.signal === undefined ? {} : { signal: options.signal }),
         });
         return ok(
-          createAnalysisExecution(result, IDENTITY, {
+          createAnalysisExecution(result, ARTIFACT_GRAPH_PROVIDER, {
             limitations: result.limitations,
             locations: result.documents.map(({ relative_path: path }) => ({
               kind: "artifact-path" as const,
@@ -135,8 +149,8 @@ class ArtifactClient implements AnalysisClient {
           bundlePath === undefined ||
           (!standalone && !bundlePath.toLowerCase().endsWith(".app"))
         )
-          throw new ArtifactReaderFailure(
-            "unavailable",
+          throw this.unsupportedTarget(
+            operation,
             "inspect_keyed_archive requires an active plist or .app bundle",
           );
         const result = await inspectBundleKeyedArchive({
@@ -145,6 +159,7 @@ class ArtifactClient implements AnalysisClient {
           parameters: standalone
             ? { ...parameters, path: basename(this.target.path) }
             : parameters,
+          platform: this.platform,
           ...(options?.signal === undefined ? {} : { signal: options.signal }),
         });
         if (standalone && result.archive_sha256 !== this.target.sha256)
@@ -153,7 +168,7 @@ class ArtifactClient implements AnalysisClient {
             `Active archive digest changed: expected ${this.target.sha256}, observed ${result.archive_sha256}`,
           );
         return ok(
-          createAnalysisExecution(result, IDENTITY, {
+          createAnalysisExecution(result, ARTIFACT_GRAPH_PROVIDER, {
             limitations: result.limitations,
             locations: [{ kind: "artifact-path", path: result.archive_path }],
           }),
@@ -171,47 +186,76 @@ class ArtifactClient implements AnalysisClient {
             inputPath: this.target.sourcePath ?? this.target.path,
             inputFormat: this.target.format,
             outputRoot: parsed.output_root,
+            environment: this.environment,
+            integrityPolicy: parsed.integrity_policy,
+            resourceScope: this.#resourceScope,
           },
           options?.signal,
         );
         return ok(
-          createAnalysisExecution(result, IDENTITY, {
+          createAnalysisExecution(result, ARTIFACT_GRAPH_PROVIDER, {
             rawResult: null,
             limitations: result.limitations,
             subject: subjectFor(
               this.target.sourcePath ?? this.target.path,
               result.manifest,
             ),
-            locations: result.artifacts.map(({ relative_path: path }) => ({
-              kind: "artifact-path" as const,
-              path,
-            })),
+            // Each extracted file's path is already in artifacts.
+            locations: [],
           }),
         );
       }
       const parsed = artifactInventoryInputSchema.parse(parameters);
       const result = await this.inventory(parsed, options);
       return ok(
-        createAnalysisExecution(result, IDENTITY, {
+        createAnalysisExecution(result, ARTIFACT_GRAPH_PROVIDER, {
           rawResult: null,
           limitations: result.limitations,
           subject: subjectFor(
             this.target.sourcePath ?? this.target.path,
             result.manifest,
           ),
-          locations: result.occurrences.map(({ logical_path: path }) => ({
-            kind: "artifact-path" as const,
-            path,
-          })),
+          // Each occurrence's logical path is already in the result.
+          locations: [],
         }),
       );
     } catch (cause: unknown) {
-      return err(translateFailure(operation, cause));
+      return err(translateArtifactFailure(operation, cause));
     }
   }
 
-  close(): Promise<void> {
-    return Promise.resolve();
+  close(): Promise<Result<null, AnalysisError>> {
+    return this.#resourceScope.close().then(
+      () => ok(null),
+      (cause: unknown) => {
+        const failure =
+          cause instanceof ArtifactReaderFailure ? cause : undefined;
+        return err(
+          new ProviderCleanupError(
+            ARTIFACT_GRAPH_PROVIDER.id,
+            failure?.cleanup?.resources ?? ["artifact resources"],
+            {
+              reason:
+                failure?.cleanup?.reason ??
+                (cause instanceof Error ? cause.message : String(cause)),
+            },
+            { cause, operation: "close_binary" },
+          ),
+        );
+      },
+    );
+  }
+
+  /** The active target's kind is outside this operation's supported targets. */
+  private unsupportedTarget(
+    operation: string,
+    reason: string,
+  ): AnalysisUnsupportedTargetError {
+    return new AnalysisUnsupportedTargetError(
+      operation,
+      this.target.sourcePath ?? this.target.path,
+      reason,
+    );
   }
 
   private async inspectAssetCatalog(
@@ -224,18 +268,19 @@ class ArtifactClient implements AnalysisClient {
       bundlePath === undefined ||
       !bundlePath.toLowerCase().endsWith(".app")
     )
-      throw new ArtifactReaderFailure(
-        "unavailable",
+      throw this.unsupportedTarget(
+        "inspect_asset_catalog",
         "inspect_asset_catalog requires an active .app bundle target",
       );
     const result = await analyzeAppleAssetCatalogs({
+      environment: this.environment,
       bundlePath,
       targetSha256: this.target.sha256,
       page: parameters,
       ...(options?.signal === undefined ? {} : { signal: options.signal }),
     });
     return ok(
-      createAnalysisExecution(result, IDENTITY, {
+      createAnalysisExecution(result, ARTIFACT_GRAPH_PROVIDER, {
         limitations: result.limitations,
         locations: result.catalogs.map(({ path }) => ({
           kind: "artifact-path" as const,
@@ -250,8 +295,8 @@ class ArtifactClient implements AnalysisClient {
     options?: ExecutionOptions,
   ) {
     if (this.target.kind !== "executable" || this.target.format !== "mach-o")
-      throw new ArtifactReaderFailure(
-        "unavailable",
+      throw this.unsupportedTarget(
+        "trace_dylib_resolution",
         "trace_dylib_resolution requires an active Mach-O or .app bundle target",
       );
     // Only a target opened from an app bundle directory carries its Info.plist;
@@ -269,7 +314,7 @@ class ArtifactClient implements AnalysisClient {
       ...(options?.signal === undefined ? {} : { signal: options.signal }),
     });
     return ok(
-      createAnalysisExecution(result, IDENTITY, {
+      createAnalysisExecution(result, ARTIFACT_GRAPH_PROVIDER, {
         limitations: result.limitations,
         locations: result.images.map(({ path }) => ({
           kind: "artifact-path" as const,
@@ -298,17 +343,14 @@ class ArtifactClient implements AnalysisClient {
       this.target.sourcePath ?? this.target.path,
       inventory.manifest,
     );
-    const locations = inventory.occurrences.map(({ logical_path: path }) => ({
-      kind: "artifact-path" as const,
-      path,
-    }));
-    const inventoryEvidence = createEvidence(subject, IDENTITY, {
+    const inventoryEvidence = createEvidence(subject, ARTIFACT_GRAPH_PROVIDER, {
       operation: "inventory_artifact",
       parameters: inventoryParameters,
       result: inventory,
       rawResult: null,
       limitations: inventory.limitations,
-      locations,
+      // The nested inventory already names every occurrence's logical path.
+      locations: [],
     });
     const result = createArtifactInspection(inventoryEvidence);
     await options?.progress?.report({
@@ -318,11 +360,11 @@ class ArtifactClient implements AnalysisClient {
       message: "inventory substep completed",
     });
     return ok(
-      createAnalysisExecution(result, IDENTITY, {
+      createAnalysisExecution(result, ARTIFACT_GRAPH_PROVIDER, {
         rawResult: null,
         limitations: result.limitations,
         subject,
-        locations,
+        locations: [],
       }),
     );
   }
@@ -334,10 +376,10 @@ class ArtifactClient implements AnalysisClient {
     options?: ExecutionOptions,
   ) {
     return inventoryArtifact(this.target.sourcePath ?? this.target.path, {
+      resourceScope: this.#resourceScope,
+      environment: this.environment,
       ...(options?.signal === undefined ? {} : { signal: options.signal }),
-      integrity: resolveArtifactIntegrityPolicy({
-        mode: parsed.integrity_policy,
-      }),
+      integrity: { mode: parsed.integrity_policy },
     });
   }
 }
@@ -349,7 +391,8 @@ const isArtifactOperation = (
     operation as (typeof ARTIFACT_ANALYSIS_OPERATIONS)[number],
   );
 
-const translateFailure = (
+/** Translate one artifact boundary failure while retaining cleanup evidence. */
+export const translateArtifactFailure = (
   operation: ArtifactAnalysisOperation,
   cause: unknown,
 ): AnalysisError => {
@@ -359,9 +402,20 @@ const translateFailure = (
       cause.reason,
       cause.details,
       cause.message,
+      {
+        ...(cause.cleanup === undefined ? {} : { cleanup: cause.cleanup }),
+        ...(cause.partialObservation === undefined
+          ? {}
+          : { partialObservation: cause.partialObservation }),
+      },
     );
-  // Caller-selection failures are already typed; keep their correction details.
-  if (cause instanceof AnalysisInputError) return cause;
+  // Caller-selection and unsupported-target failures are already typed; keep
+  // their correction details instead of reducing them to an I/O failure.
+  if (
+    cause instanceof AnalysisInputError ||
+    cause instanceof AnalysisUnsupportedTargetError
+  )
+    return cause;
   return new ArtifactOperationError(operation, "io");
 };
 
@@ -369,7 +423,7 @@ const subjectFor = (
   path: string,
   manifest: {
     readonly root_sha256: string;
-    readonly root_format: import("../domain/artifactGraph.js").ArtifactNode["format"];
+    readonly root_format: import("../domain/artifactGraph.js").ArtifactInventoryResult["manifest"]["root_format"];
   },
 ) => ({
   path,

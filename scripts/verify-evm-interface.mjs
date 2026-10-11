@@ -118,7 +118,7 @@ try {
       undefined,
       `Unexpected public failure: ${JSON.stringify(value)}`,
     );
-    const evidence = parseEvidence(mode === "cli" ? value : value.evidence);
+    const evidence = parseEvidence(value);
     const report = evidence.normalized_result;
     assert.equal(report.diagnostics.truncated, false);
     assert.equal(evidence.provider.version, "evmole@0.9.3");
@@ -157,9 +157,27 @@ try {
       })),
       evidence.raw_result.functions ?? [],
     );
-    if (mode === "mcp") assert.deepEqual(value.result, report);
+    if (mode === "mcp") assert.deepEqual(value.normalized_result, report);
     return report;
   };
+  const ownershipProbe = join(root.path, "ownership-prerequisite.hex");
+  await writeFile(ownershipProbe, "0x00");
+  const missingInspection = await inspect(
+    "cli",
+    ownershipProbe,
+    "hex",
+    "unsupported_provider",
+    {
+      command: process.execPath,
+      prefix: [],
+      client,
+      environment: { ...environment, PATH: root.path },
+    },
+  );
+  assert.equal(missingInspection.code, "capability_unavailable");
+  assert.match(missingInspection.message, /procps-compatible ps/u);
+  assert.equal(missingInspection.details.operation, "prepare_owned_process");
+  cases++;
   for (const [name, optimizer, viaIR] of [
     ["plain", false, false],
     ["optimized", true, false],

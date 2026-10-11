@@ -1,10 +1,13 @@
 import { posix, relative, win32 } from "node:path";
 
+import type { ApplicationNode } from "./javascriptApplicationGraphSchemas.js";
+import type { JavaScriptApplicationGraph } from "./javascriptApplicationGraph.js";
 import {
-  type ApplicationNode,
-  type JavaScriptApplicationGraph,
-} from "./javascriptApplicationGraph.js";
-import { compareCodePoints, uniqueSorted } from "../canonicalOrdering.js";
+  logicalPathEscapesRoot,
+  normalizeJoinedLogicalPath,
+} from "../artifactIdentity.js";
+import { uniqueSorted } from "../canonicalOrdering.js";
+import { compareUnicodeCodePoints } from "../unicodeCodePointOrder.js";
 import type { ParsedStaticLayer } from "./javascriptRuntimeReconciliationParsing.js";
 import type { RuntimeReconciliationEntity } from "./javascriptRuntimeReconciliationRuntime.js";
 
@@ -41,8 +44,8 @@ export const collectStaticRuntimeCandidates = (
     .flatMap((layer) => candidatesForLayer(layer))
     .sort(
       (left, right) =>
-        compareCodePoints(left.layer.layerId, right.layer.layerId) ||
-        compareCodePoints(left.node.node_id, right.node.node_id),
+        compareUnicodeCodePoints(left.layer.layerId, right.layer.layerId) ||
+        compareUnicodeCodePoints(left.node.node_id, right.node.node_id),
     );
 
 /** Translate one already-authorized runtime location into artifact paths. */
@@ -175,7 +178,7 @@ const nodePaths = (node: ApplicationNode): string[] => {
       paths.push(observation.evidence.location.value.path);
   }
   return paths
-    .map(normalizeArtifactPath)
+    .map(relativeLogicalPath)
     .filter(
       (path): path is string => path !== null && path !== "artifact-root",
     );
@@ -222,7 +225,7 @@ const pathBelowRoot = (root: string, value: string): string | null => {
     portableRemainder.startsWith("../")
   )
     return null;
-  return normalizeArtifactPath(portableRemainder);
+  return relativeLogicalPath(portableRemainder);
 };
 
 const absoluteFilePathStyle = (path: string): "posix" | "windows" | null => {
@@ -251,7 +254,7 @@ const pathBelowUrlPrefix = (prefix: string, value: string): string | null => {
   )
     return null;
   try {
-    return normalizeArtifactPath(
+    return relativeLogicalPath(
       decodeURIComponent(candidate.pathname.slice(base.pathname.length)),
     );
   } catch (cause: unknown) {
@@ -286,24 +289,20 @@ const activeArtifactPrefixes = (
       )
     )
       prefixes.add(mapping.artifact_prefix);
-  return [...prefixes].sort(compareCodePoints);
+  return [...prefixes].sort(compareUnicodeCodePoints);
 };
 
 const pathWithinPrefix = (path: string, prefix: string): boolean =>
   prefix === "" || path === prefix || path.startsWith(`${prefix}/`);
 
 const safeArtifactPath = (prefix: string, suffix: string): string | null =>
-  normalizeArtifactPath(prefix === "" ? suffix : posix.join(prefix, suffix));
+  relativeLogicalPath(prefix === "" ? suffix : posix.join(prefix, suffix));
 
-const normalizeArtifactPath = (value: string): string | null => {
-  const normalized = posix
-    .normalize(value.replaceAll("\\", "/"))
-    .replace(/^\.\//u, "");
+const relativeLogicalPath = (value: string): string | null => {
+  const normalized = normalizeJoinedLogicalPath(value);
   return normalized !== "" &&
     normalized !== "." &&
-    normalized !== ".." &&
-    !normalized.startsWith("/") &&
-    !normalized.startsWith("../")
+    !logicalPathEscapesRoot(normalized)
     ? normalized
     : null;
 };
@@ -317,6 +316,6 @@ const uniqueMappedPaths = (
     ).values(),
   ].sort(
     (left, right) =>
-      compareCodePoints(left.path, right.path) ||
-      compareCodePoints(left.basis, right.basis),
+      compareUnicodeCodePoints(left.path, right.path) ||
+      compareUnicodeCodePoints(left.basis, right.basis),
   );

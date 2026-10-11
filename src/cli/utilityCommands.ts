@@ -1,13 +1,13 @@
 import { z } from "incur";
 
-import {
-  runCapabilityStatus,
-  runProviderAnalysis,
-  runProviderStatus,
-} from "../composition/directAnalysis.js";
+import type { DirectAnalysis } from "../composition/directAnalysis.js";
+import type { ReferenceSourcePolicy } from "../domain/referenceSourcePolicy.js";
+import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
+import { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 import { importReferenceSource } from "../application/ReferenceSourceImport.js";
 import { projectReferenceSourceImportError } from "../application/ReferenceSourceImportTypes.js";
-import { parseConfig } from "../config.js";
+import type { AnalysisCleanupObservation } from "../domain/analysisErrorBase.js";
+import { parseConfig } from "../config/parseConfig.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import { AnalysisInputError } from "../domain/analysisErrorCore.js";
 import { projectInputIssues } from "../domain/inputIssueProjection.js";
@@ -17,7 +17,7 @@ import { PRODUCT_IDENTITY } from "../identity.js";
 import { logCliCommand } from "../cliLogging.js";
 import { CLI_COMMANDS } from "../cliCommandNames.js";
 import { swiftSymbolsSchema } from "../contracts/native/nativeToolContracts.js";
-import type { Logger } from "../logger.js";
+import type { Logger } from "pino";
 import { isReferenceSourceImportCliFailure } from "./referenceSourceImportStatus.js";
 import type { CliInstance } from "./types.js";
 import { registerNativeCallCommands } from "./nativeCallCommands.js";
@@ -25,11 +25,13 @@ import { registerNativeCallCommands } from "./nativeCallCommands.js";
 export const registerUtilityCommands = (
   cli: CliInstance,
   logger: Logger,
-  environment: Readonly<Record<string, string | undefined>> = process.env,
+  environment: Readonly<Record<string, string | undefined>>,
+  analysis: Pick<DirectAnalysis, "runProviderAnalysis" | "runSessionStatus">,
 ): void => {
-  registerCapabilityCommands(cli, logger);
-  registerNativeCommands(cli, logger);
-  registerNativeCallCommands(cli, logger);
+  const { runProviderAnalysis } = analysis;
+  registerCapabilityCommands(cli, logger, analysis);
+  registerNativeCommands(cli, logger, runProviderAnalysis);
+  registerNativeCallCommands(cli, logger, runProviderAnalysis);
   for (const [command, operation] of [
     [CLI_COMMANDS.observeNativeUi, "observe_native_ui"],
     [CLI_COMMANDS.captureNativeUiScenario, "capture_native_ui_scenario"],
@@ -67,10 +69,6 @@ export const registerUtilityCommands = (
           .default(500)
           .describe("Maximum accessibility nodes per capture"),
       }),
-      alias: {
-        windowId: "window-id",
-        maxNodes: "max-nodes",
-      },
       run: ({ args, options }) =>
         logCliCommand(logger, command, async () => {
           const parameters = {
@@ -125,7 +123,11 @@ const invalidNativeUiScenarioInput = (
   ...projectAnalysisError(new AnalysisInputError(operation, undefined, issues)),
 });
 
-const registerCapabilityCommands = (cli: CliInstance, logger: Logger): void => {
+const registerCapabilityCommands = (
+  cli: CliInstance,
+  logger: Logger,
+  { runSessionStatus }: Pick<DirectAnalysis, "runSessionStatus">,
+): void => {
   for (const command of [
     CLI_COMMANDS.capabilities,
     CLI_COMMANDS.providers,
@@ -135,17 +137,16 @@ const registerCapabilityCommands = (cli: CliInstance, logger: Logger): void => {
         command === "capabilities"
           ? "List provider capabilities and side effects"
           : "List configured analysis providers",
-      run: () =>
-        logCliCommand(logger, command, () =>
-          command === CLI_COMMANDS.providers
-            ? runProviderStatus(logger)
-            : runCapabilityStatus(logger),
-        ),
+      run: () => logCliCommand(logger, command, () => runSessionStatus(logger)),
     });
   }
 };
 
-const registerNativeCommands = (cli: CliInstance, logger: Logger): void => {
+const registerNativeCommands = (
+  cli: CliInstance,
+  logger: Logger,
+  runProviderAnalysis: DirectAnalysis["runProviderAnalysis"],
+): void => {
   for (const [command, tool] of [
     [CLI_COMMANDS.inspectMacho, "inspect_macho"],
     [CLI_COMMANDS.inspectSignature, "inspect_signature"],
@@ -168,10 +169,9 @@ const registerNativeCommands = (cli: CliInstance, logger: Logger): void => {
         .string()
         .optional()
         .describe(
-          "Plist path relative to the app root (default: Contents/Info.plist)",
+          "Plist path relative to the app root, or an absolute path (default: the bundle's Info.plist)",
         ),
     }),
-    alias: { relativePath: "relative-path" },
     run: ({ args, options }) =>
       logCliCommand(logger, "inspect-plist", () =>
         runProviderAnalysis(
@@ -205,7 +205,7 @@ const registerNativeCommands = (cli: CliInstance, logger: Logger): void => {
 const registerReferenceSourceCommand = (
   cli: CliInstance,
   logger: Logger,
-  environment: Readonly<Record<string, string | undefined>> = process.env,
+  environment: Readonly<Record<string, string | undefined>>,
 ): void => {
   cli.command(CLI_COMMANDS.importReferenceSource, {
     description: "Import a source tree as historical reference only",
@@ -225,21 +225,110 @@ const registerReferenceSourceCommand = (
               error: "Import failed",
               ...projectAnalysisError(config.error),
             };
-          const imported = await importReferenceSource({
-            root: args.root,
-            caller: "rea-cli",
-            policy: config.value.referenceSourcePolicy,
-            importer: PRODUCT_IDENTITY.packageName,
-            importerVersion: null,
-          });
-          return imported.ok
-            ? imported.value
-            : {
-                error: "Import failed",
-                ...projectReferenceSourceImportError(imported.error),
-              };
+          return runReferenceSourceImport(
+            args.root,
+            config.value.referenceSourcePolicy,
+          );
         },
         isReferenceSourceImportCliFailure,
       ),
   });
 };
+
+const runReferenceSourceImport = async (
+  root: string,
+  policy: ReferenceSourcePolicy,
+): Promise<unknown> => {
+  const resources = new ArtifactResourceScope();
+  let outcome:
+    | {
+        readonly kind: "result";
+        readonly imported: Awaited<ReturnType<typeof importReferenceSource>>;
+      }
+    | { readonly kind: "thrown"; readonly cause: unknown };
+  try {
+    outcome = {
+      kind: "result",
+      imported: await importReferenceSource(
+        {
+          root,
+          caller: "rea-cli",
+          policy,
+          importer: PRODUCT_IDENTITY.packageName,
+          importerVersion: null,
+        },
+        resources,
+      ),
+    };
+  } catch (cause: unknown) {
+    outcome = { kind: "thrown", cause };
+  }
+
+  let closeOutcome:
+    | { readonly kind: "closed" }
+    | { readonly kind: "failed"; readonly cause: unknown };
+  try {
+    await resources.close();
+    closeOutcome = { kind: "closed" };
+  } catch (cause: unknown) {
+    closeOutcome = { kind: "failed", cause };
+  }
+
+  if (outcome.kind === "thrown") {
+    if (closeOutcome.kind === "failed")
+      throw new AggregateError(
+        [outcome.cause, closeOutcome.cause],
+        "Reference source import and cleanup both failed",
+        { cause: outcome.cause },
+      );
+    throw outcome.cause;
+  }
+
+  const imported = outcome.imported;
+  if (!imported.ok) {
+    const cleanup =
+      closeOutcome.kind === "closed"
+        ? imported.error.cleanup
+        : mergeReferenceSourceCleanup(
+            imported.error.cleanup,
+            ArtifactReaderFailure.cleanupObservation(
+              closeOutcome.cause,
+              "reference source",
+            ),
+          );
+    return {
+      error: "Import failed",
+      ...projectReferenceSourceImportError({
+        ...imported.error,
+        ...(cleanup === undefined ? {} : { cleanup }),
+      }),
+    };
+  }
+
+  if (closeOutcome.kind === "failed")
+    return {
+      error: "Import failed",
+      ...projectReferenceSourceImportError({
+        tag: "reference-source-import",
+        code: "io",
+        message: "Reference source cleanup failed after import",
+        cleanup: ArtifactReaderFailure.cleanupObservation(
+          closeOutcome.cause,
+          "reference source",
+        ),
+        cause: closeOutcome.cause,
+      }),
+    };
+  return imported.value;
+};
+
+const mergeReferenceSourceCleanup = (
+  first: AnalysisCleanupObservation | undefined,
+  second: AnalysisCleanupObservation,
+): AnalysisCleanupObservation =>
+  first === undefined
+    ? second
+    : {
+        reason: `${first.reason}; ${second.reason}`,
+        resources: [...new Set([...first.resources, ...second.resources])],
+      };

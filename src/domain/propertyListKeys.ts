@@ -10,8 +10,10 @@ export interface PropertyListWithoutPrototypeKeys {
 }
 
 /** Limitation for results whose source plist held `__proto__` entries. */
-export const omittedPrototypeKeysLimitation = (count: number): string =>
-  `${String(count)} dictionary ${count === 1 ? "entry" : "entries"} keyed __proto__ ${count === 1 ? "was" : "were"} omitted because REA results cannot represent that key.`;
+export const omittedPrototypeKeysLimitation = (count: number | null): string =>
+  count === null
+    ? "Dictionary entries keyed __proto__ were omitted because REA results cannot represent that key."
+    : `${String(count)} dictionary ${count === 1 ? "entry" : "entries"} keyed __proto__ ${count === 1 ? "was" : "were"} omitted because REA results cannot represent that key.`;
 
 const withoutKey = (
   value: unknown,
@@ -61,7 +63,7 @@ const XML_ENTITIES: Readonly<Record<string, string>> = {
  * Unicode stays as written: comments and CDATA may hold such text literally,
  * and the XML decoder rejects it anywhere else.
  */
-const decodeXmlText = (text: string): string =>
+export const decodeXmlText = (text: string): string =>
   text.replace(
     /&(?:#x([\da-f]+)|#(\d+)|([a-z]+));/giu,
     (entity, hex?: string, decimal?: string, name?: string) => {

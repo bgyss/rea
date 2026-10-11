@@ -7,10 +7,13 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { execFileOutput } from "../process/ExecFileOutput.js";
+import {
+  downloadHopperPackage,
+  HOPPER_DOWNLOAD_BYTES,
+} from "./HopperDownload.js";
 
 const execFileAsync = promisify(execFile);
 const DOWNLOAD_PREFIX = "https://www.hopperapp.com:443/downloader/public/";
-const MAX_PACKAGE_BYTES = 100_000_000;
 const SUPPORTED_HOPPER_SHA256 = new Set([
   "0294ced141cc373468ee22d8343e7dac41980cb05a937994ca81c9f09afe7ded",
   "1339f9e58377442b0c6fcb0dfc3cec20d593cc557408521fad9a00dbc6b8da13",
@@ -151,8 +154,10 @@ export const parseLinuxDistribution = (text: string): LinuxDistribution => {
     packageFamily !== undefined &&
     (id === "arch" ||
       id === "cachyos" ||
+      (id === "omarchy" && packageFamily === "arch") ||
       (id === "ubuntu" && versionAtLeast(versionId, 24)) ||
-      (id === "fedora" && versionAtLeast(versionId, 41)));
+      (id === "fedora" && versionAtLeast(versionId, 41)) ||
+      (id === "nobara" && versionAtLeast(versionId, 44)));
   const identity = {
     id,
     ...(versionId === undefined ? {} : { versionId }),
@@ -177,7 +182,7 @@ export const readLinuxDistribution = async (): Promise<
 
 /** Download, verify, install, and read back the official Hopper Linux package. */
 export const installLinuxHopper = async (
-  host: LinuxHopperInstallHost = systemLinuxHopperInstallHost(),
+  host: LinuxHopperInstallHost = systemLinuxHopperInstallHost(process.env),
   options: {
     readonly signal?: AbortSignal;
     readonly releases?: Readonly<
@@ -225,25 +230,20 @@ export const installLinuxHopper = async (
 export const linuxHopperLauncherPath = (home: string): string =>
   join(home, ".local/share/rea/hopper/bin/Hopper");
 
-const systemLinuxHopperInstallHost = (): LinuxHopperInstallHost => ({
+/** Compose package-manager and linker checks from the selected caller environment. */
+export const systemLinuxHopperInstallHost = (
+  environment: Readonly<NodeJS.ProcessEnv>,
+): LinuxHopperInstallHost => ({
   distribution: readLinuxDistribution,
-  async download(url, options) {
-    const response = await fetch(url, {
-      headers: { accept: "application/json", "user-agent": "rea-installer" },
-      ...(options.signal === undefined ? {} : { signal: options.signal }),
-    });
-    return {
-      ok: response.ok,
-      bytes: new Uint8Array(await response.arrayBuffer()),
-    };
-  },
+  download: downloadHopperPackage,
   createTemporaryDirectory: () => mkdtemp(join(tmpdir(), "rea-hopper-")),
   writeArchive: (path, bytes) => writeFile(path, bytes, { mode: 0o600 }),
-  installPackage: installSystemPackage,
+  installPackage: (family, archive) =>
+    installSystemPackage(family, archive, environment),
   async launcherStatus(path) {
     try {
       await access(path);
-      const linked = await execFileOutput("ldd", [path]);
+      const linked = await execFileOutput("ldd", [path], { env: environment });
       if (!linuxSharedLibrariesAvailable(`${linked.stdout}\n${linked.stderr}`))
         return "runtime_dependencies";
       return (await linuxHopperBinarySupported(path))
@@ -284,6 +284,7 @@ export const linuxSharedLibrariesAvailable = (output: string): boolean =>
 const installSystemPackage = async (
   family: LinuxPackageFamily,
   archive: string,
+  environment: Readonly<NodeJS.ProcessEnv>,
 ): Promise<boolean> => {
   try {
     for (const command of linuxPackageManagerCommands(
@@ -291,7 +292,9 @@ const installSystemPackage = async (
       archive,
       process.getuid?.() === 0,
     ))
-      await execFileAsync(command.executable, command.args);
+      await execFileAsync(command.executable, command.args, {
+        env: environment,
+      });
     return true;
   } catch (cause: unknown) {
     // Package-manager failure is reported by the false return.
@@ -342,7 +345,7 @@ const packageIntegrityMatches = (
   release: LinuxHopperRelease,
 ): boolean =>
   bytes.byteLength === Number(release.file_length) &&
-  bytes.byteLength <= MAX_PACKAGE_BYTES &&
+  bytes.byteLength <= HOPPER_DOWNLOAD_BYTES &&
   createHash("sha1").update(bytes).digest("hex") === release.file_hash;
 
 const packageFamilyFor = (

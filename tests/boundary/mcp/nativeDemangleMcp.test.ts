@@ -1,3 +1,4 @@
+import { silentLogger } from "../../../src/logger.js";
 import { copyFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -5,13 +6,13 @@ import { describe, expect } from "vitest";
 import { z } from "zod";
 
 import { createBinarySession } from "../../../src/composition/binary.js";
-import { parseConfig } from "../../../src/config.js";
+import { parseConfig } from "../../../src/config/parseConfig.js";
 import { createServer } from "../../../src/server/createServer.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 import { mcpTest } from "../../support/mcp/mcpFixture.js";
 
 const demangledSchema = z.object({
-  result: z.object({
+  normalized_result: z.object({
     symbols: z.array(
       z.object({ input: z.string(), output: z.string(), status: z.string() }),
     ),
@@ -31,11 +32,17 @@ describe.skipIf(process.platform !== "darwin")(
         await copyFile("/usr/bin/true", target);
         const configured = parseConfig({ REA_ANALYSIS_PROVIDER: "auto" });
         if (!configured.ok) throw configured.error;
-        const session = createBinarySession(configured.value);
+        const session = createBinarySession(
+          configured.value,
+          silentLogger,
+          process.env,
+        );
         onTestFinished(async () => {
           await session.close();
         });
-        const client = await mcp.connect(createServer(session, session));
+        const client = await mcp.connect(
+          createServer({ kind: "session", session }),
+        );
         const opened = await client.callTool({
           name: "open_binary",
           arguments: { path: target },
@@ -50,7 +57,8 @@ describe.skipIf(process.platform !== "darwin")(
         });
         expect(called.isError, JSON.stringify(called.content)).not.toBe(true);
         expect(
-          demangledSchema.parse(called.structuredContent).result.symbols,
+          demangledSchema.parse(called.structuredContent).normalized_result
+            .symbols,
         ).toEqual([
           { input: "-help", output: "-help", status: "unchanged" },
           {
@@ -69,6 +77,14 @@ describe.skipIf(process.platform !== "darwin")(
         expect(spanning.isError).toBe(true);
         expect(JSON.stringify(spanning.content)).toContain(
           "Each Swift symbol must be one line.",
+        );
+        const invalidNativeString = await client.callTool({
+          name: "demangle_swift",
+          arguments: { symbols: ["$s4main\0FooV"] },
+        });
+        expect(invalidNativeString.isError).toBe(true);
+        expect(JSON.stringify(invalidNativeString.content)).toContain(
+          "Swift symbols cannot contain NUL.",
         );
       },
     );

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { WEB_SOURCE_MAP_LIMITS } from "../../domain/webSourceLocation.js";
 import { hasValidSourceMapContents } from "../../domain/sourceMapContents.js";
+import { sourceMapJsonText } from "../../domain/sourceMapEnvelope.js";
 
 const leafSchema = z.object({
   version: z.literal(3),
@@ -289,10 +290,7 @@ export const inspectSourceMap = (
   readonly declarations: readonly SourceMapSourceDeclaration[];
   readonly leaves: readonly SourceMapLeaf[];
 } => {
-  const withoutBom = text.replace(/^\uFEFF/u, "");
-  const jsonText = withoutBom.startsWith(")]}'")
-    ? withoutBom.slice(withoutBom.indexOf("\n") + 1)
-    : withoutBom;
+  const jsonText = sourceMapJsonText(text);
   const value: unknown = JSON.parse(jsonText);
   const inspected = inspectSourceMapValue(value);
   const normalized =
@@ -311,18 +309,10 @@ export const inspectSourceMap = (
   };
 };
 
-/** Validate shared source-map structure before a consumer decodes mappings. */
-export const validateSourceMapStructure = (
+/** Return validated leaves when a consumer needs decoded rows after preflight. */
+export const inspectSourceMapValue = (
   value: unknown,
   options: SourceMapStructureOptions = {},
-): void => {
-  inspectSourceMapValue(value, options, false);
-};
-
-const inspectSourceMapValue = (
-  value: unknown,
-  options: SourceMapStructureOptions = {},
-  collect = true,
 ): {
   readonly format: "regular" | "indexed";
   readonly reportedFile: string | null;
@@ -351,20 +341,21 @@ const inspectSourceMapValue = (
       continue;
     }
     const leaf = inspectLeaf(node, budget, options);
-    if (collect)
-      leaves.push({ map: leaf, offset: node.offset, stop: node.stop });
-    for (const [sourceIndex, source] of leaf.sources.entries())
-      if (collect)
+    leaves.push({ map: leaf, offset: node.offset, stop: node.stop });
+    if (options.profile !== "browser-collection") {
+      const ignoredSources = new Set(
+        leaf.ignoreList ?? leaf.x_google_ignoreList ?? [],
+      );
+      for (const [sourceIndex, source] of leaf.sources.entries())
         declarations.push({
           sectionPath: node.path,
           sourceIndex,
           source,
           root: leaf.sourceRoot ?? null,
           content: leaf.sourcesContent?.[sourceIndex] ?? null,
-          ignored: (leaf.ignoreList ?? leaf.x_google_ignoreList ?? []).includes(
-            sourceIndex,
-          ),
+          ignored: ignoredSources.has(sourceIndex),
         });
+    }
   }
   return {
     format: root.sections === undefined ? "regular" : "indexed",

@@ -1,5 +1,5 @@
-import { compareCodePoints } from "../canonicalOrdering.js";
-import type { ApplicationNode } from "./javascriptApplicationGraph.js";
+import { compareUnicodeCodePoints } from "../unicodeCodePointOrder.js";
+import type { ApplicationNode } from "./javascriptApplicationGraphSchemas.js";
 import {
   featureSeedMatchMode,
   type ApplicationFeatureSeed,
@@ -30,7 +30,7 @@ export const findApplicationFeatureSeeds = (
   nodes
     .flatMap((node) => seedMatch(node, seed))
     .sort((left, right) =>
-      compareCodePoints(
+      compareUnicodeCodePoints(
         `${left.node_id}\0${left.basis}\0${left.field}`,
         `${right.node_id}\0${right.basis}\0${right.field}`,
       ),
@@ -107,6 +107,16 @@ const candidateFields = (
               value: observation.label,
             },
           ]),
+      ...(observation.source_map_reference !== null &&
+      observation.source_map_reference.resolution.kind !== "unresolved"
+        ? [
+            {
+              basis: "property" as const,
+              field: `observations[${String(index)}].source_map_reference.resolution.path`,
+              value: observation.source_map_reference.resolution.path,
+            },
+          ]
+        : []),
       ...propertyFields(
         observation.properties,
         `observations[${String(index)}].properties`,
@@ -140,6 +150,7 @@ const relevantFields = {
     ".path",
     ".source",
     ".original_source",
+    ".source_root",
     ".exports",
   ],
   "native-export": [".label", ".key", ".requested_members", ".members"],
@@ -156,6 +167,15 @@ const identityFields = (node: ApplicationNode): CandidateField[] => {
         field: "identity.original_source",
         value: identity.original_source,
       },
+      ...(identity.source_root === null
+        ? []
+        : [
+            {
+              basis: "identity" as const,
+              field: "identity.source_root",
+              value: identity.source_root,
+            },
+          ]),
     ];
   if (identity.strategy === "canonical-path")
     return [
@@ -210,7 +230,9 @@ const propertyFields = (
       continue;
     }
     if (current !== null && typeof current === "object") {
-      for (const key of Object.keys(current).sort(compareCodePoints).reverse())
+      for (const key of Object.keys(current)
+        .sort(compareUnicodeCodePoints)
+        .reverse())
         pending.push({
           current: current[key] ?? null,
           path: `${path}.${key}`,

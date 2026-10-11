@@ -1,20 +1,25 @@
-import type { ArtifactInventorySnapshot } from "../../artifacts/inventory/ArtifactInventory.js";
+import { ELECTRON_IDENTITY_LIMITATION } from "../../domain/javascript/javascriptElectronMemberWrites.js";
+import type { ArtifactInventorySnapshot } from "../../domain/artifactInventorySnapshot.js";
 import {
   createJavaScriptApplicationGraph,
-  createImmutableJavaScriptApplicationGraphSteps,
+  sealTransferredJavaScriptApplicationGraphSteps,
   type JavaScriptApplicationGraph,
 } from "../../domain/javascript/javascriptApplicationGraph.js";
 import type { JavaScriptModuleArtifactAnalysis } from "./JavaScriptArtifactAnalysisTypes.js";
 import type { JavaScriptArtifactFileSet } from "../../domain/javascript/javascriptArtifactFiles.js";
 import { JavaScriptArtifactGraphAccumulator } from "./JavaScriptArtifactGraphAccumulator.js";
-import type { JavaScriptArtifactGraphContext } from "./JavaScriptArtifactGraphContext.js";
+import {
+  selfReferenceOmissions,
+  type JavaScriptArtifactGraphContext,
+} from "./JavaScriptArtifactGraphContext.js";
 import {
   addJavaScriptHtmlRoles,
   addJavaScriptSourceMapOriginals,
 } from "./JavaScriptArtifactGraphDocuments.js";
-import { addJavaScriptStaticFindings } from "./JavaScriptArtifactGraphFindings.js";
+import { addJavaScriptStaticFindingsSteps } from "./JavaScriptArtifactGraphFindings.js";
 import {
-  addJavaScriptModuleRelationships,
+  addJavaScriptModuleRelationshipsSteps,
+  type JavaScriptModuleRelationshipOmissions,
   addJavaScriptSourceModules,
 } from "./JavaScriptModuleRelationships.js";
 import {
@@ -22,20 +27,18 @@ import {
   partialApplicationCoverage,
 } from "../../domain/javascript/javascriptApplicationEvidenceSchemas.js";
 import type { JavaScriptSemanticResourceLimit } from "../../domain/javascript/javascriptSemanticValueTypes.js";
-import { semanticCoverageResourceLimits } from "../../domain/javascript/javascriptSemanticCoverage.js";
 import {
-  SEMANTIC_EXPRESSION_DEPTH_LIMIT,
-  SEMANTIC_PRIMITIVE_CANDIDATE_LIMIT,
-  SEMANTIC_PRIMITIVE_JSON_BYTES_LIMIT,
-  semanticResourceLimitReason,
-} from "../../domain/javascript/javascriptSemanticResourceLimits.js";
+  semanticCoverageResourceLimits,
+  semanticResourceLimitCoverage,
+} from "../../domain/javascript/javascriptSemanticCoverage.js";
+import { semanticResourceLimitReason } from "../../domain/javascript/javascriptSemanticResourceLimits.js";
 import {
   addJavaScriptArtifactContainers,
   addJavaScriptArtifactFiles,
-  addJavaScriptBundlerNodes,
   addJavaScriptPackageNodes,
   createJavaScriptArtifactRootNode,
 } from "./JavaScriptArtifactGraphStructure.js";
+import { addJavaScriptBundlerNodes } from "./JavaScriptArtifactGraphBundlers.js";
 import { addElectronBoundaries } from "./ElectronBoundaryGraph.js";
 import {
   classifyElectronIpcPairings,
@@ -49,24 +52,42 @@ export const buildJavaScriptArtifactGraph = (
   analysis: JavaScriptModuleArtifactAnalysis,
 ): JavaScriptApplicationGraph =>
   createJavaScriptApplicationGraph(
-    buildJavaScriptArtifactGraphInput(snapshot, fileSet, analysis),
+    completeSynchronously(
+      buildJavaScriptArtifactGraphInputSteps(snapshot, fileSet, analysis),
+    ),
   );
 
-/** Build a validated application graph with cooperative immutable ownership. */
-export const buildImmutableJavaScriptArtifactGraphSteps = (
+/**
+ * Build a validated application graph with cooperative immutable ownership.
+ * Constructing the graph input also runs in steps: projecting every module
+ * relationship and finding at once held the event loop for seconds.
+ */
+export function* buildImmutableJavaScriptArtifactGraphSteps(
   snapshot: ArtifactInventorySnapshot,
   fileSet: JavaScriptArtifactFileSet,
   analysis: JavaScriptModuleArtifactAnalysis,
-): Generator<void, JavaScriptApplicationGraph> =>
-  createImmutableJavaScriptApplicationGraphSteps(
-    buildJavaScriptArtifactGraphInput(snapshot, fileSet, analysis),
+): Generator<void, JavaScriptApplicationGraph> {
+  const input = yield* buildJavaScriptArtifactGraphInputSteps(
+    snapshot,
+    fileSet,
+    analysis,
   );
+  // The input was built here and is not retained, so it can be transferred.
+  return yield* sealTransferredJavaScriptApplicationGraphSteps(input);
+}
 
-const buildJavaScriptArtifactGraphInput = (
+const completeSynchronously = <Value>(steps: Iterator<void, Value>): Value => {
+  for (;;) {
+    const step = steps.next();
+    if (step.done === true) return step.value;
+  }
+};
+
+function* buildJavaScriptArtifactGraphInputSteps(
   snapshot: ArtifactInventorySnapshot,
   fileSet: JavaScriptArtifactFileSet,
   analysis: JavaScriptModuleArtifactAnalysis,
-): unknown => {
+): Generator<void, unknown> {
   const accumulator = new JavaScriptArtifactGraphAccumulator();
   const root = createJavaScriptArtifactRootNode(accumulator, snapshot);
   const context: JavaScriptArtifactGraphContext = {
@@ -84,15 +105,37 @@ const buildJavaScriptArtifactGraphInput = (
     containerNodes: new Map([[snapshot.manifest.root_sha256, root]]),
   };
   addJavaScriptArtifactContainers(context);
+  yield;
   addJavaScriptArtifactFiles(context);
-  const packageRoots = addJavaScriptPackageNodes(context);
-  addJavaScriptSourceModules(context);
-  addJavaScriptBundlerNodes(context);
-  addJavaScriptModuleRelationships(context);
-  addJavaScriptStaticFindings(context);
-  addElectronBoundaries(context);
-  addJavaScriptHtmlRoles(context);
-  addJavaScriptSourceMapOriginals(context);
+  yield;
+  // Raw observations remain on the file nodes. Only admitted expansions feed
+  // the relationship builders, including their Electron and bundler callers.
+  const projectionContext = {
+    ...context,
+    analysis: {
+      ...analysis,
+      files: analysis.files.map((file) =>
+        file.application_projection_failure === undefined
+          ? file
+          : { ...file, javascript: null, semantic: null },
+      ),
+    },
+  };
+  const packageRoots = addJavaScriptPackageNodes(projectionContext);
+  yield;
+  addJavaScriptSourceModules(projectionContext);
+  yield;
+  const bundlerLimitations = addJavaScriptBundlerNodes(projectionContext);
+  const relationshipOmissions =
+    yield* addJavaScriptModuleRelationshipsSteps(projectionContext);
+  const findingLimitations =
+    yield* addJavaScriptStaticFindingsSteps(projectionContext);
+  addElectronBoundaries(projectionContext);
+  yield;
+  addJavaScriptHtmlRoles(projectionContext);
+  yield;
+  addJavaScriptSourceMapOriginals(projectionContext);
+  yield;
   const coverage = graphCoverage(context);
   return {
     schema: "JavaScriptApplicationGraph",
@@ -103,9 +146,13 @@ const buildJavaScriptArtifactGraphInput = (
     nodes: accumulator.nodes(),
     edges: accumulator.edges(),
     coverage,
-    limitations: graphLimitations(context, coverage.status),
+    limitations: [
+      ...bundlerLimitations,
+      ...findingLimitations,
+      ...graphLimitations(context, coverage.status, relationshipOmissions),
+    ],
   };
-};
+}
 
 const graphCoverage = (context: JavaScriptArtifactGraphContext) => {
   const resourceLimits = semanticResourceLimits(context);
@@ -121,19 +168,45 @@ const graphCoverage = (context: JavaScriptArtifactGraphContext) => {
       javascript !== null && javascript.parse_status === "partial",
   );
   const unknownGap =
+    (context.fileSet.source_selection?.unselected_files ?? 0) > 0 ||
+    context.analysis.files.some(
+      ({ analysis_failure, application_projection_failure }) =>
+        analysis_failure !== undefined ||
+        application_projection_failure !== undefined,
+    ) ||
     context.analysis.parse_failures > 0 ||
     context.fileSet.invalid_utf8_files > 0 ||
     sourceMapPolicyGap ||
     malformedStructuredData ||
     partialJavaScript;
-  if (context.analysis.truncated_scopes > 0)
-    return partialApplicationCoverage([], null);
-  if (resourceLimits.length > 0)
+  const executionLimits = context.analysis.files.flatMap(
+    ({ analysis_failure, application_projection_failure }) =>
+      [analysis_failure, application_projection_failure].flatMap((failure) =>
+        failure === undefined
+          ? []
+          : javaScriptAnalysisCoverageLimits(failure.limits),
+      ),
+  );
+  if (resourceLimits.length > 0 || executionLimits.length > 0)
     return partialApplicationCoverage(
-      resourceLimits.map(applicationGraphResourceLimit),
+      [
+        ...new Map(
+          [
+            ...semanticResourceLimitCoverage(resourceLimits),
+            ...executionLimits,
+          ].map((limit) => [JSON.stringify(limit), limit]),
+        ).values(),
+      ],
       null,
     );
   if (unknownGap) return partialApplicationCoverage([], null);
+  if (context.snapshot.integrity_contradictions.length > 0) {
+    const nestedArchiveWasOpaque =
+      context.snapshot.integrity_contradictions.some(({ logical_path }) =>
+        logical_path.toLowerCase().endsWith(".asar"),
+      );
+    return partialApplicationCoverage([], nestedArchiveWasOpaque ? null : 0);
+  }
   return completeApplicationCoverage();
 };
 
@@ -150,27 +223,10 @@ const semanticResourceLimits = (
     ),
   ].sort();
 
-const applicationGraphResourceLimit = (
-  resourceLimit: JavaScriptSemanticResourceLimit,
-) => ({
-  name: `javascript_semantic_${resourceLimit.replaceAll("-", "_")}`,
-  value:
-    resourceLimit === "primitive-candidates"
-      ? SEMANTIC_PRIMITIVE_CANDIDATE_LIMIT
-      : resourceLimit === "primitive-bytes"
-        ? SEMANTIC_PRIMITIVE_JSON_BYTES_LIMIT
-        : SEMANTIC_EXPRESSION_DEPTH_LIMIT,
-  unit:
-    resourceLimit === "expression-depth"
-      ? ("depth" as const)
-      : resourceLimit === "primitive-bytes"
-        ? ("bytes" as const)
-        : ("items" as const),
-});
-
 const graphLimitations = (
   context: JavaScriptArtifactGraphContext,
   coverage: "complete" | "partial" | "unknown" | "unavailable",
+  relationshipOmissions: JavaScriptModuleRelationshipOmissions,
 ): string[] => {
   const ipc = collectElectronIpcRecords(context.analysis);
   const pairings = classifyElectronIpcPairings(ipc);
@@ -189,9 +245,28 @@ const graphLimitations = (
   );
   return [
     ...context.analysis.limitations,
+    ...(context.fileSet.source_selection === undefined
+      ? []
+      : [
+          `Caller-selected source analysis leaves ${String(context.fileSet.source_selection.unselected_files)} inventoried files outside analysis scope. Inventory identity covers the complete artifact; relationships through unselected sources remain unknown.`,
+        ]),
+    ...context.snapshot.integrity_contradictions.map(
+      ({ logical_path: path }) =>
+        `Artifact integrity metadata contradicts observed bytes at ${path}; the observed bytes are untrusted.`,
+    ),
+    ...selfReferenceOmissions(
+      relationshipOmissions.selfImports,
+      ["import specifier", "import specifiers"],
+      "the importing module",
+    ),
     "CommonJS and ESM binding relationships were recovered from inert syntax and resolved only within the inventoried artifact container.",
     "Webpack/Rspack factories were recovered from AST literals; REA did not invoke push handlers or bundle bootstrap code.",
     "Static imports, entrypoints, workers, endpoints, and storage relationships do not prove runtime execution.",
+    ...(context.analysis.files.some(({ javascript }) =>
+      javascript?.limitations.includes(ELECTRON_IDENTITY_LIMITATION),
+    )
+      ? [ELECTRON_IDENTITY_LIMITATION]
+      : []),
     ...(electronFindings === 0
       ? []
       : [
@@ -231,3 +306,4 @@ const graphLimitations = (
         ]),
   ];
 };
+import { javaScriptAnalysisCoverageLimits } from "../../domain/javascript/javascriptAnalysisResourceControls.js";

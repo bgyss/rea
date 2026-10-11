@@ -1,3 +1,4 @@
+import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/server";
@@ -59,10 +60,12 @@ const boot = async (factories: OptionalObservationFactories) => {
     await run({
       env: {},
       loadOptionalProviders: async () => loaded,
-      createServer: (analysis, selectedSession, options) => {
-        session = selectedSession;
+      createServer: (source, options) => {
+        if (source.kind !== "session")
+          throw new Error("Expected a session-owned server source");
+        session = source.session;
         // A configured policy cannot hide an actual adapter loading failure.
-        return createServer(analysis, selectedSession, {
+        return createServer(source, {
           ...options,
           availabilityPolicy: () => ({
             processCaptureEnabled: true,
@@ -138,7 +141,7 @@ mcpTest.for(failedAdapters)(
       arguments: example.input,
     });
     expect(unavailable.isError).toBe(true);
-    expect(unavailable.structuredContent).toMatchObject({
+    expect(parseMcpToolError(unavailable)).toMatchObject({
       error: {
         details: {
           provider_id: providerId,
@@ -191,8 +194,8 @@ mcpTest.for(failedAdapters)(
     });
     expect(listed.isError).not.toBe(true);
     const evidenceId = z
-      .object({ evidence: z.object({ evidence_id: z.string() }) })
-      .parse(listed.structuredContent).evidence.evidence_id;
+      .object({ evidence_id: z.string() })
+      .parse(listed.structuredContent).evidence_id;
     expect(connected.session.evidenceById(evidenceId)?.operation).toBe(healthy);
     expect(calls).toEqual([
       port === "javascriptRuntimeObservation" ? "browser" : "runtime",
@@ -219,7 +222,7 @@ mcpTest.for(failedAdapters)(
       });
       expect(analyzed.isError).not.toBe(true);
       expect(analyzed.structuredContent).toMatchObject({
-        evidence: { operation: "analyze_javascript_application" },
+        operation: "analyze_javascript_application",
       });
     }
     const malformed = await client.callTool({

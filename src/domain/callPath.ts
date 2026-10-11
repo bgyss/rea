@@ -10,9 +10,7 @@ import {
   parseFunctionEvidence,
   type FunctionSnapshot,
 } from "./functionDossierEvidence.js";
-
-export { callPathInputSchema, callPathResultSchema };
-export type { CallPathInput, CallPathResult };
+import { compareUnicodeCodePoints } from "./unicodeCodePointOrder.js";
 
 /** Minimal directed caller-to-callee adjacency for call-path search. */
 class CallGraph {
@@ -107,9 +105,7 @@ export const buildCallPath = (input: CallPathInput): CallPathResult => {
     goal: parsed.goal.address,
     explored: summarizeSearch(graph, search.reached),
     evidence_links: uniqueEvidence(snapshots.values()),
-    limitations: [...new Set(limitations)].sort((left, right) =>
-      left.localeCompare(right),
-    ),
+    limitations: [...new Set(limitations)].sort(compareUnicodeCodePoints),
   };
   const searchScope = { exhaustive };
   if (found)
@@ -160,9 +156,9 @@ const parseSnapshots = (
   const snapshots = new Map<string, FunctionSnapshot>();
   for (const group of groups) {
     const snapshot = parseFunctionEvidence(group);
-    const address = normalizeAddress(snapshot.procedure.address);
-    for (const callee of snapshot.collections.callees.items)
-      normalizeAddress(callee.address);
+    const address = parseCallPathAddress(snapshot.dossier.procedure.address);
+    for (const callee of snapshot.dossier.callees)
+      parseCallPathAddress(callee.address);
     if (snapshots.has(address))
       throw new TypeError(`Duplicate function Evidence for ${address}`);
     snapshots.set(address, snapshot);
@@ -184,9 +180,9 @@ const assertCompatible = (
     )
       throw new TypeError("Call-path Evidence mixes artifact subjects");
     if (
-      snapshot.provider.id !== first.provider.id ||
-      snapshot.provider.name !== first.provider.name ||
-      snapshot.provider.version !== first.provider.version
+      snapshot.evidence.provider.id !== first.evidence.provider.id ||
+      snapshot.evidence.provider.name !== first.evidence.provider.name ||
+      snapshot.evidence.provider.version !== first.evidence.provider.version
     )
       throw new TypeError("Call-path Evidence mixes providers");
   }
@@ -198,8 +194,8 @@ const createGraph = (
   const graph = new CallGraph();
   for (const [address, snapshot] of snapshots) {
     graph.mergeNode(address);
-    for (const callee of snapshot.collections.callees.items) {
-      const calleeAddress = normalizeAddress(callee.address);
+    for (const callee of snapshot.dossier.callees) {
+      const calleeAddress = parseCallPathAddress(callee.address);
       graph.mergeNode(calleeAddress);
       graph.mergeDirectedEdge(address, calleeAddress);
     }
@@ -245,9 +241,7 @@ const inspectSearch = ({
       );
       continue;
     }
-    const neighbors = graph
-      .outNeighbors(node)
-      .sort((left, right) => left.localeCompare(right));
+    const neighbors = graph.outNeighbors(node).sort(compareUnicodeCodePoints);
     for (const neighbor of neighbors)
       if (!reached.has(neighbor)) {
         reached.set(neighbor, depth + 1);
@@ -292,7 +286,7 @@ const enumeratePaths = ({
             distance !== undefined &&
             goalDistances.get(neighbor) === distance - 1,
         )
-        .sort((left, right) => left.localeCompare(right));
+        .sort(compareUnicodeCodePoints);
       neighbors.set(node, candidates);
     }
     return { neighbors: candidates, nextIndex: 0 };
@@ -346,7 +340,7 @@ const citePath = (
       (index > 0 ? snapshots.get(addresses[index - 1] ?? "") : undefined);
     return {
       address,
-      name: snapshot?.procedure.name ?? null,
+      name: snapshot?.dossier.procedure.name ?? null,
       evidence_links: snapshotLinks(supporting),
     };
   });
@@ -367,12 +361,10 @@ const citePath = (
 const snapshotLinks = (snapshot: FunctionSnapshot | undefined): string[] => {
   if (snapshot === undefined)
     throw new TypeError("Every call-path claim requires supporting Evidence");
-  return snapshot.evidence.map(({ evidence_id }) => evidence_id);
+  return [snapshot.evidence.evidence_id];
 };
 
 const uniqueEvidence = (snapshots: Iterable<FunctionSnapshot>): string[] =>
   [
     ...new Set([...snapshots].flatMap((snapshot) => snapshotLinks(snapshot))),
-  ].sort((left, right) => left.localeCompare(right));
-
-const normalizeAddress = (input: string): string => parseCallPathAddress(input);
+  ].sort(compareUnicodeCodePoints);

@@ -28,7 +28,7 @@ intentionally not included. -->
 - Provider, bridge, target-format, or platform compatibility:
 - Evidence, artifact, provenance, or reconstruction contract:
 - Process execution, authorization, cleanup, or containment impact:
-- Generated metadata (`docs/public/product-catalog.json`), package, or installation impact (CI generates and validates ignored catalogs and `skills/`; edit authored instructions in `skill-src/` and never commit build outputs):
+- Generated metadata (`docs/public/product-catalog.json`), package, or installation impact (CI generates and validates ignored catalogs and `skills/`; edit authored instructions in `.agents/skills/reverse-engineer-anything/` and never commit build outputs):
 
 ## Evidence and regression coverage
 
@@ -70,6 +70,7 @@ limits, security/privacy/containment implications, and meaningful proof gaps. --
 
 ## Review checklist
 
+- [ ] This PR addresses a concrete problem or an agreed enhancement.
 - [ ] The PR has one focused outcome and the title follows `type(scope): outcome`.
 - [ ] Related issue is linked, or the reason for not linking one is stated above.
 - [ ] Tests cover changed observable behavior and meaningful failure paths.

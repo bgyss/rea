@@ -5,9 +5,10 @@ import {
   nativeUiScenarioInputSchema,
 } from "../../domain/native/nativeUiObservation.js";
 
-import type { ToolContract } from "../toolContracts.js";
-import { nativeOutputSchemas } from "../toolOutputSchemas.js";
+import type { ToolContract } from "../toolContractTypes.js";
+import { nativeOutputSchemas } from "../toolOutputSchemaGroups.js";
 import { jsonValueSchema } from "../../domain/jsonValue.js";
+import { localPathStringSchema } from "../../domain/localPath.js";
 import { toolContractMetadata } from "../toolEffects.js";
 import { requireOutputSchema } from "../toolOutputSchemaPrimitives.js";
 
@@ -69,7 +70,8 @@ export const swiftSymbolsSchema = z
     z
       .string()
       .min(1)
-      .regex(/^[^\n]*$/u, "Each Swift symbol must be one line."),
+      .regex(/^[^\n]*$/u, "Each Swift symbol must be one line.")
+      .regex(/^[^\x00]*$/u, "Swift symbols cannot contain NUL."),
   )
   .min(1);
 
@@ -104,7 +106,7 @@ export const NATIVE_TOOL_CONTRACTS = [
     "inspect_plist",
     "Parse Info.plist from the active artifact by default, or pass any local plist path. Returns normalized JSON rather than plutil text.",
     z.object({
-      path: z.string().min(1).optional(),
+      path: localPathStringSchema.optional(),
     }),
   ),
   native(

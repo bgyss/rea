@@ -1,8 +1,8 @@
+import { snapshotEnvironment } from "../process/snapshotEnvironment.js";
 import {
   NATIVE_MACOS_PROVIDER_IDENTITY as IDENTITY,
   nativeMacOSCapabilities,
 } from "./NativeMacOSProviderMetadata.js";
-export { NATIVE_MACOS_PROVIDER_IDENTITY } from "./NativeMacOSProviderMetadata.js";
 import { inspectAppleDispatchMetadata } from "./AppleDispatchMetadata.js";
 import { observeNativeUi } from "./NativeUiObservation.js";
 import { LldbCallTracer, type NativeCallTracer } from "./LldbCallTracer.js";
@@ -24,7 +24,9 @@ import {
   NATIVE_TOOL_CONTRACTS,
   type NativeToolName,
 } from "../contracts/native/nativeToolContracts.js";
-import type { BinaryTarget } from "../domain/binaryTarget.js";
+import type { BinaryTarget } from "../domain/binaryTargetTypes.js";
+import { toolContract } from "../contracts/toolContracts.js";
+import { analysisInputErrorFromIssues } from "../domain/inputIssueProjection.js";
 import type { EvidenceLocation } from "../domain/evidence.js";
 import {
   AnalysisCancelledError,
@@ -34,10 +36,13 @@ import {
   AnalysisResourceConstraintError,
   AnalysisTimeoutError,
 } from "../domain/analysisErrorCore.js";
+import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import { BinaryTargetError } from "../domain/configurationErrors.js";
 import { ProviderAdapterError } from "../domain/providerAdapterError.js";
+import { ProviderCleanupError } from "../domain/providerCleanupError.js";
 import { AnalysisError } from "../domain/analysisErrorBase.js";
 import { jsonValueSchema, type JsonValue } from "../domain/jsonValue.js";
+import type { NativeUiObservationResult } from "../domain/native/nativeUiObservation.js";
 import {
   omittedPrototypeKeysLimitation,
   parseXmlPropertyList,
@@ -55,6 +60,7 @@ import {
   NATIVE_COMMAND_OUTPUT_BUDGET_BYTES,
   NativeCommandFailure,
   XcrunCommandRunner,
+  type NativeCommandCleanupFailure,
   type NativeCommandCapture,
   type NativeCommandRunner,
 } from "./CommandRunner.js";
@@ -75,16 +81,29 @@ import {
   architectureLocations,
   inspectNativeMacho,
 } from "./NativeMachoInspection.js";
+import { analysisErrorWithCleanupFailure } from "../domain/analysisErrorCleanup.js";
+import {
+  createNativeUiHelperRuntime,
+  type NativeUiHelperRuntime,
+} from "./NativeUiHelperRuntime.js";
 
 /** Read-only semantic provider composed from Xcode command-line utilities. */
 export class NativeMacOSProvider implements AnalysisProvider {
   readonly #capabilities: readonly CapabilityDescriptor[];
+  readonly #environment: NodeJS.ProcessEnv;
+  readonly #tracerFactory: () => NativeCallTracer;
 
   constructor(
-    private readonly runner: NativeCommandRunner = new XcrunCommandRunner(),
+    environment: Readonly<NodeJS.ProcessEnv>,
+    private readonly runner: NativeCommandRunner = new XcrunCommandRunner(
+      environment,
+    ),
     platform: NodeJS.Platform = process.platform,
-    private readonly tracer: NativeCallTracer = new LldbCallTracer(),
+    tracerFactory?: () => NativeCallTracer,
   ) {
+    this.#environment = snapshotEnvironment(environment, platform);
+    this.#tracerFactory =
+      tracerFactory ?? (() => new LldbCallTracer(this.#environment));
     this.#capabilities = nativeMacOSCapabilities(platform);
   }
 
@@ -97,15 +116,26 @@ export class NativeMacOSProvider implements AnalysisProvider {
   }
 
   createClient(target: BinaryTarget): AnalysisClient {
-    return new NativeMacOSClient(target, this.runner, this.tracer);
+    return new NativeMacOSClient(
+      target,
+      this.runner,
+      this.#tracerFactory(),
+      this.#environment,
+    );
   }
 }
 
 class NativeMacOSClient implements AnalysisClient {
+  readonly #pendingNativeUiRuntimes = new Set<NativeUiHelperRuntime>();
+  readonly #pendingCommands = new Set<Promise<unknown>>();
+  #nativeUiTail: Promise<void> = Promise.resolve();
+  #closed = false;
+
   constructor(
     private readonly target: BinaryTarget,
     private readonly runner: NativeCommandRunner,
     private readonly tracer: NativeCallTracer,
+    private readonly environment: Readonly<NodeJS.ProcessEnv>,
   ) {}
 
   async execute(
@@ -113,11 +143,31 @@ class NativeMacOSClient implements AnalysisClient {
     parameters: Readonly<Record<string, JsonValue>>,
     options?: { readonly signal?: AbortSignal },
   ) {
+    if (this.#closed)
+      return err(
+        new AnalysisCapabilityUnavailableError(
+          IDENTITY.id,
+          operation,
+          "Native provider client is closed",
+        ),
+      );
     if (options?.signal?.aborted === true)
       return err(new AnalysisCancelledError(operation));
     if (operation === "health")
       return ok(createAnalysisExecution(null, IDENTITY));
     if (operation === "inspect_native_dispatch_metadata") {
+      const input = toolContract(operation).inputSchema.safeParse(parameters);
+      if (!input.success)
+        return err(
+          analysisInputErrorFromIssues(
+            operation,
+            input.error.issues,
+            parameters,
+            {
+              cause: input.error,
+            },
+          ),
+        );
       if (this.target.kind !== "executable" || this.target.format !== "mach-o")
         return err(
           new AnalysisCapabilityUnavailableError(
@@ -127,15 +177,9 @@ class NativeMacOSClient implements AnalysisClient {
           ),
         );
       try {
-        const maxRecords = z
-          .number()
-          .int()
-          .min(1)
-          .max(20000)
-          .parse(parameters.max_records ?? 5000);
         const result = await inspectAppleDispatchMetadata(
           this.target,
-          maxRecords,
+          input.data.max_records,
           options?.signal,
         );
         return ok(
@@ -190,16 +234,7 @@ class NativeMacOSClient implements AnalysisClient {
       operation === "observe_native_ui" ||
       operation === "capture_native_ui_scenario"
     ) {
-      const result = await observeNativeUi(this.target, operation, parameters, {
-        signal: options?.signal,
-      });
-      return result.ok
-        ? ok(
-            createAnalysisExecution(result.value, IDENTITY, {
-              limitations: result.value.limitations,
-            }),
-          )
-        : result;
+      return this.#observeNativeUi(operation, parameters, options?.signal);
     }
     try {
       const observation = await this.#dispatch(
@@ -210,7 +245,6 @@ class NativeMacOSClient implements AnalysisClient {
       return observation.ok
         ? ok(
             createAnalysisExecution(observation.value.result, IDENTITY, {
-              rawResult: { provenance: observation.value.provenance },
               limitations: observation.value.limitations,
               locations: observation.value.locations,
             }),
@@ -225,8 +259,164 @@ class NativeMacOSClient implements AnalysisClient {
     }
   }
 
-  close(): Promise<void> {
-    return Promise.resolve();
+  async close(): Promise<Result<null, AnalysisError>> {
+    this.#closed = true;
+    await Promise.allSettled(this.#pendingCommands);
+    const uiCleanupFailures = await this.#serializeNativeUi(() =>
+      this.#retryNativeUiCleanup(),
+    );
+    const commandCleanup = await this.#retryNativeCommandCleanup();
+    let result = await this.tracer.close();
+    const cleanupErrors = [
+      ...(uiCleanupFailures.length === 0
+        ? []
+        : [this.#nativeUiCleanupFailure(uiCleanupFailures, "close_binary")]),
+      ...(commandCleanup === undefined ? [] : [commandCleanup]),
+    ];
+    for (const cleanupError of cleanupErrors)
+      result = result.ok
+        ? err(cleanupError)
+        : err(analysisErrorWithCleanupFailure(result.error, cleanupError));
+    return result;
+  }
+
+  #observeNativeUi(
+    operation: "observe_native_ui" | "capture_native_ui_scenario",
+    parameters: Readonly<Record<string, JsonValue>>,
+    signal?: AbortSignal,
+  ) {
+    return this.#serializeNativeUi(async () => {
+      if (this.#closed)
+        return err(
+          new AnalysisCapabilityUnavailableError(
+            IDENTITY.id,
+            operation,
+            "Native provider client is closed",
+          ),
+        );
+      const earlierCleanupFailures = await this.#retryNativeUiCleanup();
+      if (earlierCleanupFailures.length > 0)
+        return err(
+          this.#nativeUiCleanupFailure(earlierCleanupFailures, operation),
+        );
+      const runtime = createNativeUiHelperRuntime(this.environment);
+      this.#pendingNativeUiRuntimes.add(runtime);
+      let result: Awaited<ReturnType<typeof observeNativeUi>>;
+      try {
+        result = await observeNativeUi(this.target, operation, parameters, {
+          environment: this.environment,
+          signal,
+          runtime,
+        });
+      } catch (cause: unknown) {
+        result = err(
+          cause instanceof AnalysisError
+            ? cause
+            : new ProviderAdapterError(IDENTITY.id, operation, { cause }),
+        );
+      }
+      try {
+        await runtime.close();
+        this.#pendingNativeUiRuntimes.delete(runtime);
+      } catch (cause: unknown) {
+        const cleanup = this.#nativeUiCleanupFailure(
+          [{ runtime, cause }],
+          operation,
+          result.ok ? result.value : undefined,
+        );
+        return err(
+          result.ok
+            ? cleanup
+            : analysisErrorWithCleanupFailure(result.error, cleanup, operation),
+        );
+      }
+      return result.ok
+        ? ok(
+            createAnalysisExecution(result.value, IDENTITY, {
+              limitations: result.value.limitations,
+            }),
+          )
+        : result;
+    });
+  }
+
+  #serializeNativeUi<Value>(operation: () => Promise<Value>): Promise<Value> {
+    const call = this.#nativeUiTail.then(operation, operation);
+    this.#nativeUiTail = call.then(
+      () => undefined,
+      () => undefined,
+    );
+    return call;
+  }
+
+  async #retryNativeUiCleanup(): Promise<
+    Array<{ readonly runtime: NativeUiHelperRuntime; readonly cause: unknown }>
+  > {
+    const failures: Array<{
+      readonly runtime: NativeUiHelperRuntime;
+      readonly cause: unknown;
+    }> = [];
+    for (const runtime of this.#pendingNativeUiRuntimes) {
+      try {
+        await runtime.close();
+        this.#pendingNativeUiRuntimes.delete(runtime);
+      } catch (cause: unknown) {
+        failures.push({ runtime, cause });
+      }
+    }
+    return failures;
+  }
+
+  async #retryNativeCommandCleanup(): Promise<AnalysisError | undefined> {
+    if (this.runner.retryCleanup === undefined) return undefined;
+    try {
+      const failures = await this.runner.retryCleanup();
+      return failures.length === 0
+        ? undefined
+        : nativeCommandCleanupFailure(failures);
+    } catch (cause: unknown) {
+      return new ProviderCleanupError(
+        IDENTITY.id,
+        ["native-command-process-cleanup"],
+        {
+          reason:
+            cause instanceof Error
+              ? cause.message || cause.name
+              : String(cause) || "native command cleanup failed unexpectedly",
+        },
+        { cause },
+      );
+    }
+  }
+
+  #nativeUiCleanupFailure(
+    failures: readonly {
+      readonly runtime: NativeUiHelperRuntime;
+      readonly cause: unknown;
+    }[],
+    operation: string,
+    partialObservation?: NativeUiObservationResult,
+  ): ProviderCleanupError {
+    const resources = failures.flatMap(({ runtime }) => runtime.resources());
+    return new ProviderCleanupError(
+      IDENTITY.id,
+      resources.length === 0 ? ["native-ui-runtime"] : resources,
+      {
+        reason: "Native UI runtime cleanup remains incomplete",
+        failures: failures.map(({ runtime, cause }) => ({
+          resources: [...runtime.resources()],
+          reason: cause instanceof Error ? cause.message : String(cause),
+        })),
+      },
+      {
+        operation,
+        cause: new AggregateError(
+          failures.map(({ cause }) => cause),
+          "Native UI runtime cleanup failed",
+        ),
+        ...(partialObservation === undefined ? {} : { partialObservation }),
+      },
+    );
   }
 
   #dispatch(
@@ -263,6 +453,16 @@ class NativeMacOSClient implements AnalysisClient {
   async #listArchitectures(
     signal?: AbortSignal,
   ): Promise<Result<NativeObservation, AnalysisError>> {
+    // lipo reads only Mach-O; its refusal of a PE, ELF, or plist target is not
+    // a tool failure that a retry or `rea doctor` could repair.
+    if (this.target.format !== "mach-o")
+      return err(
+        new AnalysisCapabilityUnavailableError(
+          IDENTITY.id,
+          "list_architectures",
+          "Active artifact is not Mach-O.",
+        ),
+      );
     const capture = await this.#run(
       "list_architectures",
       "lipo",
@@ -284,7 +484,6 @@ class NativeMacOSClient implements AnalysisClient {
     });
     return ok({
       result: jsonValueSchema.parse(result),
-      provenance,
       limitations: [],
       locations: architectureLocations(result.architectures.items),
     });
@@ -318,7 +517,6 @@ class NativeMacOSClient implements AnalysisClient {
     });
     return ok({
       result: jsonValueSchema.parse(result),
-      provenance,
       limitations: [],
       locations: [],
     });
@@ -415,7 +613,6 @@ class NativeMacOSClient implements AnalysisClient {
     });
     return ok({
       result: jsonValueSchema.parse(result),
-      provenance,
       limitations: result.limitations,
       locations: [],
     });
@@ -578,7 +775,6 @@ class NativeMacOSClient implements AnalysisClient {
     });
     return ok({
       result: jsonValueSchema.parse(result),
-      provenance,
       limitations: parsed.value.limitations,
       locations: [{ kind: "artifact-path", path: plist.value }],
     });
@@ -615,18 +811,47 @@ class NativeMacOSClient implements AnalysisClient {
       readonly acceptNonZero?: boolean;
     } = {},
   ): Promise<Result<NativeCommandCapture, AnalysisError>> {
-    const captured = await this.runner.run(tool, arguments_, {
+    if (this.#closed)
+      return err(
+        new AnalysisCapabilityUnavailableError(
+          IDENTITY.id,
+          operation,
+          "Native provider client is closed",
+        ),
+      );
+    const command = this.runner.run(tool, arguments_, {
       ...(options.signal === undefined ? {} : { signal: options.signal }),
       acceptNonZero: options.acceptNonZero ?? false,
     });
+    this.#pendingCommands.add(command);
+    let captured: Awaited<typeof command>;
+    try {
+      captured = await command;
+    } finally {
+      this.#pendingCommands.delete(command);
+    }
     if (captured.ok) return captured;
     return err(translateCommandFailure(operation, captured.error));
   }
 }
 
+const nativeCommandCleanupFailure = (
+  failures: readonly NativeCommandCleanupFailure[],
+): ProviderCleanupError =>
+  new ProviderCleanupError(
+    IDENTITY.id,
+    [...new Set(failures.flatMap(({ resources }) => resources))],
+    {
+      reason: "Native command process cleanup remains incomplete",
+      failures: failures.map(({ reason, resources }) => ({
+        reason,
+        resources: [...resources],
+      })),
+    },
+  );
+
 interface NativeObservation {
   readonly result: JsonValue;
-  readonly provenance: readonly NativeCommandInvocation[];
   readonly limitations: readonly string[];
   readonly locations: readonly EvidenceLocation[];
 }
@@ -668,13 +893,15 @@ const translateCommandFailure = (
     ...(capturedOutput === undefined ? {} : { capturedOutput }),
     ...(cleanup === undefined ? {} : { cleanup }),
   };
-  if (failure.reason === "unavailable")
+  if (failure.reason === "unavailable") {
+    const reason = `${failure.tool} is unavailable through xcrun.`;
     return new AnalysisCapabilityUnavailableError(
       IDENTITY.id,
       operation,
-      `${failure.tool} is unavailable through xcrun.`,
-      errorOptions,
+      reason,
+      { ...errorOptions, userMessage: reason },
     );
+  }
   if (failure.reason === "cancelled")
     return new AnalysisCancelledError(operation, errorOptions);
   if (failure.reason === "timeout")
@@ -817,11 +1044,14 @@ const unreadablePlist = (
   reason: string,
 ): AnalysisError => {
   const sentence = reason.endsWith(".") ? reason : `${reason}.`;
+  // Name the default that is missing and the selection that still works.
+  const missingDefault = `The target has no readable Contents/Info.plist at ${path}: ${sentence} Select another plist in the target with the path input (CLI: --relative-path).`;
   return requested === undefined
     ? new AnalysisCapabilityUnavailableError(
         IDENTITY.id,
         "inspect_plist",
-        `The target has no readable Contents/Info.plist at ${path}: ${sentence} Pass path to inspect another plist.`,
+        missingDefault,
+        { userMessage: missingDefault },
       )
     : new AnalysisInputError("inspect_plist", undefined, [
         {

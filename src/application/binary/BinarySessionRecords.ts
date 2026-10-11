@@ -1,6 +1,6 @@
 import type { AnalysisProfileCommitment } from "../../domain/analysisProfile.js";
 import type { AnalysisSnapshot } from "../../domain/analysisSnapshot.js";
-import type { BinaryTarget } from "../../domain/binaryTarget.js";
+import type { BinaryTarget } from "../../domain/binaryTargetTypes.js";
 import type { Evidence } from "../../domain/evidence.js";
 import type { EvidenceBundle } from "../../domain/evidenceBundle.js";
 import type { JsonValue } from "../../domain/jsonValue.js";
@@ -9,8 +9,8 @@ import {
   EvidenceIntegrityError,
   AnalysisSnapshotMismatchError,
 } from "../../domain/evidenceErrors.js";
-import { type AnalysisError } from "../../domain/analysisErrorBase.js";
-import { type UnknownRegistryError } from "../../domain/unknownRegistryError.js";
+import type { AnalysisError } from "../../domain/analysisErrorBase.js";
+import type { UnknownRegistryError } from "../../domain/unknownRegistryError.js";
 import type {
   RecordUnknownInput,
   ResidualUnknown,
@@ -42,7 +42,7 @@ export interface WorkflowSnapshotRecordInput {
   >[0]["execution"];
 }
 
-/** Binary snapshot owner and compatibility facade for composed investigation records. */
+/** Own binary snapshots and coordinate the composed investigation records. */
 export abstract class BinarySessionRecords {
   readonly #records: InvestigationRecords;
   readonly #snapshot = new AnalysisSnapshotCache();

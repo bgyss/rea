@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { compareCompiledFunctions } from "./compiledFunctionComparison.js";
 import { createEvidence } from "./evidence.js";
+import { jsonValueSchema } from "./jsonValue.js";
 import type { NativeFunctionInstructions } from "./native/nativeFunctionInstructions.js";
 
 type Part = {
@@ -99,7 +100,7 @@ const evidence = (digit: string, result: NativeFunctionInstructions) =>
     {
       operation: "inspect_native_function_instructions",
       parameters: { procedure: "func" },
-      result,
+      result: jsonValueSchema.parse(result),
       confidence: "observed",
       authority: "shipped-artifact",
     },

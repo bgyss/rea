@@ -6,33 +6,55 @@ import {
   semanticResolutionBlocked,
   type JavaScriptSemanticAnalysisState,
 } from "./javascriptSemanticState.js";
-import { semanticStaticPropertyKey } from "./javascriptAstValues.js";
+import {
+  semanticStaticPropertyKey,
+  unwrapJavaScriptExpression,
+} from "./javascriptAstValues.js";
 import { stringValue } from "./javascriptStaticAnalysisHelpers.js";
+
+interface JavaScriptRequireOrigin {
+  readonly origin: JavaScriptModuleOrigin;
+  readonly call: t.CallExpression;
+}
 
 /** Recover an unshadowed literal require origin and its exact member path. */
 export const semanticRequireOrigin = (
   node: t.Node | null | undefined,
   state: JavaScriptSemanticAnalysisState,
-): JavaScriptModuleOrigin | undefined => {
+): JavaScriptRequireOrigin | undefined => {
   const members: string[] = [];
-  while (t.isMemberExpression(node) || t.isOptionalMemberExpression(node)) {
-    const member = semanticStaticPropertyKey(node.property, node.computed);
-    if (member === null || !t.isNode(node.object)) return undefined;
+  let current = node;
+  while (current !== null && current !== undefined) {
+    current = unwrapJavaScriptExpression(current).node;
+    if (
+      !t.isMemberExpression(current) &&
+      !t.isOptionalMemberExpression(current)
+    )
+      break;
+    const member = semanticStaticPropertyKey(
+      current.property,
+      current.computed,
+    );
+    if (member === null || !t.isNode(current.object)) return undefined;
     members.push(member);
-    node = node.object;
+    current = current.object;
   }
   if (
-    !t.isCallExpression(node) ||
-    !t.isIdentifier(node.callee, { name: "require" })
+    !t.isCallExpression(current) ||
+    !t.isIdentifier(current.callee, { name: "require" })
   )
     return undefined;
   if (
-    resolveSemanticBindingState(state, node.callee, "require") !== undefined ||
-    semanticResolutionBlocked(state, node.callee, "require")
+    resolveSemanticBindingState(state, current.callee, "require") !==
+      undefined ||
+    semanticResolutionBlocked(state, current.callee, "require")
   )
     return undefined;
-  const specifier = stringValue(node.arguments[0]);
+  const specifier = stringValue(current.arguments[0]);
   return specifier === undefined
     ? undefined
-    : { specifier, importedPath: members.reverse() };
+    : {
+        origin: { specifier, importedPath: members.reverse() },
+        call: current,
+      };
 };

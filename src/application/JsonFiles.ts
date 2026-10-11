@@ -3,51 +3,113 @@ import {
   lstat,
   mkdtemp,
   open,
-  readFile,
   realpath,
   rename,
   rm,
+  type FileHandle,
 } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 
 import { EvidenceFileError } from "../domain/evidenceErrors.js";
+import {
+  AnalysisCancelledError,
+  AnalysisResourceConstraintError,
+} from "../domain/analysisErrorCore.js";
 import { err, ok, type Result } from "../domain/result.js";
+import {
+  readJsonInputFile,
+  readJsonObjectFile,
+  type JsonObjectMemberReader,
+} from "./JsonInputFile.js";
+import { NonRegularFileReadError } from "../filesystem/RegularFile.js";
+
+/** Request control and its owning operation for an interruptible atomic write. */
+export interface TextWriteCancellation {
+  readonly signal: AbortSignal;
+  readonly operation: string;
+}
+
+type TextWriteResult<Failure = EvidenceFileError | AnalysisCancelledError> =
+  Result<{ readonly path: string; readonly bytes: number }, Failure>;
 
 /** Read JSON data from a regular file at the caller-supplied path. */
 export const readJsonFile = async (
   path: string,
-): Promise<Result<unknown, EvidenceFileError>> => {
+  signal?: AbortSignal,
+): Promise<
+  Result<unknown, EvidenceFileError | AnalysisResourceConstraintError>
+> =>
+  readJsonFileInput(
+    path,
+    (selected) => readJsonInputFile(selected, "read_evidence_file", signal),
+    signal,
+  );
+
+/** Read selected JSON members through the same regular-file error boundary. */
+export const readJsonObjectMembersFile = (
+  path: string,
+  scans: readonly ReadonlyMap<string, JsonObjectMemberReader>[],
+  signal?: AbortSignal,
+): Promise<
+  Result<
+    void,
+    EvidenceFileError | AnalysisResourceConstraintError | AnalysisCancelledError
+  >
+> =>
+  readJsonFileInput(
+    path,
+    (selected) =>
+      readJsonObjectFile(selected, "read_evidence_file", scans, signal),
+    signal,
+  );
+
+const readJsonFileInput = async <Value>(
+  path: string,
+  read: (
+    selected: string,
+  ) => Promise<
+    Result<
+      Value,
+      | import("../domain/analysisErrorCore.js").AnalysisInputError
+      | AnalysisResourceConstraintError
+    >
+  >,
+  signal?: AbortSignal,
+): Promise<
+  Result<Value, EvidenceFileError | AnalysisResourceConstraintError>
+> => {
   const requestedPath = resolve(path);
   try {
-    const canonicalPath = await realpath(requestedPath);
-    const stats = await lstat(canonicalPath);
-    if (!stats.isFile())
-      return err(
-        new EvidenceFileError("read", "not-file", { path: requestedPath }),
-      );
-    const encoded = await readFile(canonicalPath);
-    let decoded: unknown;
-    try {
-      decoded = JSON.parse(
-        new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
-          encoded,
-        ),
-      );
-    } catch (cause: unknown) {
+    const decoded = await read(requestedPath);
+    if (!decoded.ok) {
+      if (decoded.error instanceof AnalysisResourceConstraintError)
+        return err(decoded.error);
       return err(
         new EvidenceFileError("read", "invalid-json", {
-          cause,
+          cause:
+            decoded.error.cause ??
+            new SyntaxError(
+              decoded.error.issues[0]?.message ?? decoded.error.message,
+            ),
           path: requestedPath,
         }),
       );
     }
-    return ok(decoded);
+    return ok(decoded.value);
   } catch (cause: unknown) {
+    if (cause instanceof AnalysisResourceConstraintError) return err(cause);
+    if (signal?.aborted === true) throw cause;
     return err(
-      new EvidenceFileError("read", missingOrIo(cause), {
-        cause,
-        path: requestedPath,
-      }),
+      new EvidenceFileError(
+        "read",
+        cause instanceof NonRegularFileReadError
+          ? "not-file"
+          : missingOrIo(cause),
+        {
+          cause,
+          path: requestedPath,
+        },
+      ),
     );
   }
 };
@@ -57,20 +119,31 @@ export const writeTextFile = async (
   encoded: string,
   path: string,
   overwrite: boolean,
-): Promise<
-  Result<{ readonly path: string; readonly bytes: number }, EvidenceFileError>
-> => writeTextParts([encoded], path, overwrite);
+): Promise<TextWriteResult<EvidenceFileError>> =>
+  writeTextParts([encoded], path, overwrite);
 
-/** Publish complete streamed text atomically, keeping only one encoded part in memory. */
-export const writeTextParts = async (
+/** Publish streamed text atomically unless cancellation wins before publication. */
+export function writeTextParts(
   parts: Iterable<string>,
   path: string,
   overwrite: boolean,
-): Promise<
-  Result<{ readonly path: string; readonly bytes: number }, EvidenceFileError>
-> => {
+): Promise<TextWriteResult<EvidenceFileError>>;
+/** Pass request control to stop streamed generation before atomic publication. */
+export function writeTextParts(
+  parts: Iterable<string>,
+  path: string,
+  overwrite: boolean,
+  cancellation: TextWriteCancellation | undefined,
+): Promise<TextWriteResult>;
+export async function writeTextParts(
+  parts: Iterable<string>,
+  path: string,
+  overwrite: boolean,
+  cancellation?: TextWriteCancellation,
+): Promise<TextWriteResult> {
   const requestedPath = resolve(path);
   try {
+    assertWriteActive(cancellation);
     const canonicalParent = await realpath(dirname(requestedPath));
     const destination = resolve(canonicalParent, basename(requestedPath));
     const existing = await lstat(destination).catch((cause: unknown) => {
@@ -87,9 +160,21 @@ export const writeTextParts = async (
           new EvidenceFileError("write", "not-file", { path: requestedPath }),
         );
     }
-    const bytes = await publishFile(destination, parts, overwrite);
+    assertWriteActive(cancellation);
+    const bytes = await publishFile(
+      destination,
+      parts,
+      overwrite,
+      cancellation,
+    );
     return ok({ path: requestedPath, bytes });
   } catch (cause: unknown) {
+    if (
+      cancellation?.signal.aborted === true &&
+      cause instanceof AnalysisCancelledError &&
+      cause.operation === cancellation.operation
+    )
+      return err(cause);
     if (!overwrite && fileErrorCode(cause) === "EEXIST")
       return err(
         new EvidenceFileError("write", "exists", {
@@ -104,7 +189,7 @@ export const writeTextParts = async (
       }),
     );
   }
-};
+}
 
 /** A missing path or parent is a selection error, not a permission failure. */
 const missingOrIo = (cause: unknown): "missing" | "io" => {
@@ -116,6 +201,7 @@ const publishFile = async (
   destination: string,
   parts: Iterable<string>,
   overwrite: boolean,
+  cancellation?: TextWriteCancellation,
 ): Promise<number> => {
   const stagingDirectory = await mkdtemp(
     resolve(dirname(destination), ".rea-write-"),
@@ -125,14 +211,14 @@ const publishFile = async (
     const file = await open(staged, "wx", 0o600);
     let bytes = 0;
     try {
-      for (const part of parts) {
-        await file.writeFile(part, { encoding: "utf8" });
-        bytes += Buffer.byteLength(part, "utf8");
-      }
+      bytes = await writeStagedParts(file, parts, cancellation);
+      assertWriteActive(cancellation);
       await file.sync();
     } finally {
       await file.close();
     }
+    // Once submitted, the atomic publication can win a later cancellation race.
+    assertWriteActive(cancellation);
     if (overwrite) await rename(staged, destination);
     // A hard link publishes complete bytes atomically and cannot replace an existing name.
     else await link(staged, destination);
@@ -140,6 +226,35 @@ const publishFile = async (
   } finally {
     await rm(stagingDirectory, { recursive: true, force: true });
   }
+};
+
+const writeStagedParts = async (
+  file: FileHandle,
+  parts: Iterable<string>,
+  cancellation?: TextWriteCancellation,
+): Promise<number> => {
+  assertWriteActive(cancellation);
+  const iterator = parts[Symbol.iterator]();
+  let exhausted = false;
+  let bytes = 0;
+  try {
+    for (;;) {
+      assertWriteActive(cancellation);
+      const part = iterator.next();
+      if (part.done) exhausted = true;
+      assertWriteActive(cancellation);
+      if (part.done) return bytes;
+      await file.writeFile(part.value, { encoding: "utf8" });
+      bytes += Buffer.byteLength(part.value, "utf8");
+    }
+  } finally {
+    if (!exhausted) iterator.return?.();
+  }
+};
+
+const assertWriteActive = (cancellation?: TextWriteCancellation): void => {
+  if (cancellation?.signal.aborted === true)
+    throw new AnalysisCancelledError(cancellation.operation);
 };
 
 const fileErrorCode = (cause: unknown): unknown =>

@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, constants } from "node:fs";
-import { copyFile } from "node:fs/promises";
+import { copyFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, normalize } from "node:path";
-import type { BinaryTarget } from "../domain/binaryTarget.js";
+import type { BinaryTarget } from "../domain/binaryTargetTypes.js";
 import { AnalysisProtocolError } from "../domain/analysisErrorCore.js";
 import { PrivateRuntimeRoot } from "../process/PrivateRuntimeRoot.js";
 
@@ -26,6 +26,7 @@ export class IdaWorkspace {
   private constructor(
     private readonly runtime: PrivateRuntimeRoot,
     readonly inputPath: string,
+    private readonly target: BinaryTarget,
   ) {}
 
   /** Filesystem root owned exclusively by this headless session. */
@@ -33,27 +34,28 @@ export class IdaWorkspace {
     return this.runtime.path;
   }
 
-  /** Allocate a protected workspace and copy the admitted input with digest verification. */
-  static async create(
+  /** Allocate a protected workspace so its owner can retain it before input preparation. */
+  static async allocate(
     target: BinaryTarget,
     root = tmpdir(),
   ): Promise<IdaWorkspace> {
+    // Upstream reports canonical paths (macOS /var -> /private/var), so the
+    // private input path must already be canonical for identity checks.
     const runtime = await PrivateRuntimeRoot.create({
-      parent: normalize(root),
+      parent: await realpath(normalize(root)),
       prefix: "rea-ida-",
     });
     const inputPath = join(runtime.path, basename(target.path));
-    try {
-      await copyFile(target.path, inputPath, constants.COPYFILE_EXCL);
-      if ((await idaFileDigest(inputPath)) !== target.sha256)
-        throw new AnalysisProtocolError(
-          "IDA target changed between admission and the private input copy; reopen the target.",
-        );
-      return new IdaWorkspace(runtime, inputPath);
-    } catch (cause: unknown) {
-      await runtime.close();
-      throw cause;
-    }
+    return new IdaWorkspace(runtime, inputPath, target);
+  }
+
+  /** Copy and verify admitted bytes after the session owns this workspace's cleanup. */
+  async copyInput(): Promise<void> {
+    await copyFile(this.target.path, this.inputPath, constants.COPYFILE_EXCL);
+    if ((await idaFileDigest(this.inputPath)) !== this.target.sha256)
+      throw new AnalysisProtocolError(
+        "IDA target changed between admission and the private input copy; reopen the target.",
+      );
   }
 
   /** Delete only this object's privately allocated directory after worker cleanup. */

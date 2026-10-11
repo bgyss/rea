@@ -6,8 +6,14 @@ import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import Ajv from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
-import { mcpTextValue, requireMcpResult } from "./mcp-verifier-results.mjs";
+import {
+  mcpTextValue,
+  requireMcpEvidenceResult,
+  requireMcpOperationResult,
+  requireMcpLifecycleResult,
+} from "./mcp-verifier-results.mjs";
 import { verifyHopperCliSelectors } from "./real-hopper-cli-selectors.mjs";
+import { verifyLinuxHopperLaunchIsolation } from "./real-hopper-session-isolation.mjs";
 import { verifyHopperNavigationAndText } from "./real-hopper-navigation.mjs";
 import { verifyHopperWorkflows } from "./real-hopper-workflows.mjs";
 import {
@@ -36,14 +42,18 @@ export async function verifyHopperBoundaryContracts(
       ajv.validateSchema(tool.outputSchema),
       `${tool.name} output schema`,
     );
-    validators.set(tool.name, ajv.compile(tool.outputSchema));
+    validators.set(
+      tool.name,
+      (tool.outputSchema?.$id && ajv.getSchema(tool.outputSchema.$id)) ||
+        ajv.compile(tool.outputSchema),
+    );
   }
   let successfulCalls = 0;
   let rejectedCalls = 0;
   const rejectedOperations = new Set();
   const call = async (name, args = {}) => {
     const reply = await client.callTool({ name, arguments: args }, options);
-    const result = requireMcpResult(reply, name);
+    const result = requireMcpOperationResult(reply, name);
     const validate = validators.get(name);
     assert.ok(validate, `${name} is missing from tools/list`);
     assert.ok(
@@ -300,7 +310,7 @@ export async function verifyHopperLifecycleAndCli(client, options, targets) {
   const primary = join(directory, `primary-${suffix}`);
   const secondary = join(directory, `secondary-${suffix}`);
   const call = async (name, args = {}) =>
-    requireMcpResult(
+    requireMcpOperationResult(
       await client.callTool({ name, arguments: args }, options),
       name,
     );
@@ -327,6 +337,16 @@ export async function verifyHopperLifecycleAndCli(client, options, targets) {
       procedure: entry.value,
     });
     const firstDocument = await call("current_document");
+    const linuxApplicationIsolation =
+      process.platform === "linux"
+        ? await verifyLinuxHopperLaunchIsolation({
+            call,
+            runCli,
+            dispatcher: new URL("../rea.mjs", import.meta.url).pathname,
+            primary,
+            secondary,
+          })
+        : null;
     await call("open_binary", { path: secondary });
     const secondDocument = await call("current_document");
     assert.notEqual(firstDocument, secondDocument);
@@ -464,6 +484,7 @@ export async function verifyHopperLifecycleAndCli(client, options, targets) {
       cliNamedSelectorParity,
       callerCancellationRecovered: true,
       closedDocumentAbsent: true,
+      linuxApplicationIsolation,
     };
   } finally {
     await call("close_binary");
@@ -496,14 +517,14 @@ const verifyBatchCancellation = async (client, options, procedures) => {
     /aborted/u,
   );
   assert.ok(cancelled, "cancellation did not follow a real Hopper response");
-  const recovered = requireMcpResult(
+  const recovered = requireMcpEvidenceResult(
     await client.callTool({ name: "list_procedures", arguments: {} }, options),
-    "list_procedures after cancellation",
+    "list_procedures",
   );
   assert.deepEqual(recovered, procedures);
-  const status = requireMcpResult(
+  const status = requireMcpLifecycleResult(
     await client.callTool({ name: "binary_session", arguments: {} }, options),
-    "binary_session after cancellation",
+    "binary_session",
   );
   assert.equal(status.provider_operation_health.state, "idle");
 };

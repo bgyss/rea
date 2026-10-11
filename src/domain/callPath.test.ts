@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import { enhancedInputSchemas } from "../contracts/enhancedInputs.js";
+import { buildCallPath } from "./callPath.js";
 import {
-  buildCallPath,
   callPathInputSchema,
   callPathResultSchema,
-} from "./callPath.js";
+} from "./callPathSchemas.js";
 import { createEvidence, type Evidence } from "./evidence.js";
 import { functionDossierSchema } from "./hopperValues.js";
 import { jsonValueSchema } from "./jsonValue.js";
@@ -19,6 +19,12 @@ const observe = (
     procedure: {
       address,
       name: `fn_${address.slice(2)}`,
+      classification: null,
+      body: {
+        available: false,
+        reason:
+          "Hopper's public Python API does not expose complete function body ranges",
+      },
       signature: null,
       locals: [],
     },
@@ -29,12 +35,21 @@ const observe = (
     callees: callees.map((callee) => ({
       address: callee,
       name: `fn_${callee.slice(2)}`,
+      classification: null,
+      body: {
+        available: false,
+        reason:
+          "Hopper's public Python API does not expose complete function body ranges",
+      },
     })),
     incoming_references: [],
     outgoing_references: [],
     referenced_strings: [],
     referenced_names: [],
+    native_api: null,
+    native_value_flow: null,
     basic_blocks: [],
+    limitations: [],
   });
   return createEvidence(
     { path: "/tmp/a", sha256: "a".repeat(64), format: "mach-o" },

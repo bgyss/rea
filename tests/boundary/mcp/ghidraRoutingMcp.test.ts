@@ -1,3 +1,4 @@
+import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { describe, expect, it } from "vitest";
 import { connectGhidraMcp } from "./ghidraMcpHarness.js";
 
@@ -12,7 +13,7 @@ describe("Ghidra MCP capability routing", () => {
       });
       expect(batch.isError).not.toBe(true);
       expect(batch.structuredContent).toMatchObject({
-        result: {
+        normalized_result: {
           succeeded: 1,
           failed: 0,
           items: [{ status: "ok" }],
@@ -28,7 +29,7 @@ describe("Ghidra MCP capability routing", () => {
         arguments: { address: "0x1000", comment: "must not mutate" },
       });
       expect(denied.isError).toBe(true);
-      expect(denied.structuredContent).toMatchObject({
+      expect(parseMcpToolError(denied)).toMatchObject({
         error: {
           code: "capability_unavailable",
           category: "unsupported_provider",
