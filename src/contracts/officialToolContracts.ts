@@ -20,6 +20,7 @@ import { nativeFunctionInstructionsInputSchema } from "../domain/native/nativeFu
 import { nativeSignatureMatchesInputSchema } from "../domain/native/nativeSignatureMatches.js";
 import { nativeEncodedTextSearchInputSchema } from "../domain/native/nativeEncodedText.js";
 import { nativePointerTableScanInputSchema } from "../domain/native/nativePointerTables.js";
+import { nativeFunctionSimilarityInputSchema } from "../domain/native/nativeFunctionSimilarity.js";
 import { nativeInstructionInputSchema } from "../domain/native/nativeInstruction.js";
 import { functionInstructionInputSchema } from "./functionInstructionContract.js";
 import { HOPPER_MEMORY_TOOL_DEFINITIONS } from "./hopperMemoryContracts.js";
@@ -98,6 +99,11 @@ export const OFFICIAL_TOOL_CONTRACTS = [
     "scan_native_pointer_tables",
     "Scan initialized memory for candidate pointer tables: runs of at least min_entries consecutive entry_size-byte values (little or big endian, plus an optional target_base) that each resolve into initialized memory, optionally within a target window and strictly ascending by default. Returns each run's address, file offset, entry count and every target address. A candidate is a structural hypothesis, not evidence of a table; verify targets with search_native_encoded_text or read_bytes. Narrow the scanned region with start and end.",
     nativePointerTableScanInputSchema,
+  ),
+  official(
+    "query_native_function_similarity",
+    "Find functions in an operator-supplied BSim database (a file-backed H2 .mv.db, pinned by SHA-256 and verified before use) that resemble the open binary's functions. Signatures come from Ghidra's decompiler data-flow features, so it matches code that was recompiled, renamed or relinked where exact hashes differ. Returns inferred candidates per function with the candidate's name, address, similarity, significance and executable (name, MD5, architecture, compiler), plus the database identity. A similarity score is a hypothesis about shared origin, not proof of identical behavior. Tune with min_similarity, min_significance and max_matches (candidates per function); narrow with procedure for one function. The database is opened from a private copy and never modified.",
+    nativeFunctionSimilarityInputSchema,
   ),
   official(
     "resolve_native_call_targets",

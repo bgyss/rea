@@ -168,6 +168,12 @@ export const limitationsFor = (operation: string): readonly string[] => {
         "Exact byte matches in initialized Ghidra memory for the pattern encoded by the named charset or pinned character table; Ghidra's defined-string inventory is not consulted.",
         "Matches are not checked against character boundaries, and only one byte sequence per character is searched.",
       ];
+    case "query_native_function_similarity":
+      return [
+        ...common,
+        "Candidates come from the BSim database the caller supplied, verified by SHA-256 in the bridge and opened from a private copy. A similarity score is an inference from decompiler data-flow features, not an observation of this binary.",
+        "Functions BSim cannot sign are reported as functions_without_signature and are not compared.",
+      ];
     case "scan_native_pointer_tables":
       return [
         ...common,

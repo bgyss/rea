@@ -383,6 +383,59 @@ export const registerCoreNativeCommands = (
         ),
       ),
   });
+  cli.command(CLI_COMMANDS.queryNativeFunctionSimilarity, {
+    description:
+      "Find functions in a pinned BSim database that resemble this binary's functions",
+    args: z.object({
+      path: z.string().describe("Local native executable or object file"),
+    }),
+    options: z.object({
+      ...nativeOpenOptionFields,
+      database: z
+        .string()
+        .describe("BSim H2 database as SHA256=ABSOLUTE_PATH_TO_.mv.db"),
+      procedure: z
+        .string()
+        .optional()
+        .describe("Query one procedure symbol or address instead of all"),
+      minSimilarity: z.coerce
+        .number()
+        .optional()
+        .describe("Lowest similarity to report, 0 to 1 (default 0.7)"),
+      minSignificance: z.coerce
+        .number()
+        .optional()
+        .describe("Lowest significance to report (default 0)"),
+      maxMatches: z.coerce
+        .number()
+        .int()
+        .optional()
+        .describe("Most candidates per function (default 10)"),
+    }),
+    run: ({ args, options }) =>
+      logCliCommand(logger, CLI_COMMANDS.queryNativeFunctionSimilarity, () =>
+        runDirectAnalysis(
+          args.path,
+          "query_native_function_similarity",
+          {
+            database: parsePinnedFile(options.database),
+            ...(options.procedure === undefined
+              ? {}
+              : { procedure: options.procedure }),
+            ...(options.minSimilarity === undefined
+              ? {}
+              : { min_similarity: options.minSimilarity }),
+            ...(options.minSignificance === undefined
+              ? {}
+              : { min_significance: options.minSignificance }),
+            ...(options.maxMatches === undefined
+              ? {}
+              : { max_matches: options.maxMatches }),
+          },
+          directAnalysisOptionsFromCli(logger, options),
+        ),
+      ),
+  });
   registerNativeApiCommand(cli, logger, runDirectAnalysis);
   registerNativeUiActionCommand(cli, logger, runDirectAnalysis);
   registerNativeDispatchMetadataCommand(cli, logger, runDirectAnalysis);

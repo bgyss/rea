@@ -243,6 +243,7 @@ const sessionInfo = ({
     "match_native_function_signatures",
     "search_native_encoded_text",
     "scan_native_pointer_tables",
+    "query_native_function_similarity",
     "resolve_native_call_targets",
     "analyze_function",
     "procedure_assembly",
