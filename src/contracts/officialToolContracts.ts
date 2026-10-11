@@ -19,6 +19,7 @@ import type { ToolContract } from "./toolContractTypes.js";
 import { toolContractMetadata } from "./toolEffects.js";
 import { nativeDataTypeInputSchema } from "../domain/native/nativeDataType.js";
 import { nativeFunctionInstructionsInputSchema } from "../domain/native/nativeFunctionInstructions.js";
+import { nativeSignatureMatchesInputSchema } from "../domain/native/nativeSignatureMatches.js";
 import { nativeInstructionInputSchema } from "../domain/native/nativeInstruction.js";
 import { functionInstructionInputSchema } from "./functionInstructionContract.js";
 import { HOPPER_MEMORY_TOOL_DEFINITIONS } from "./hopperMemoryContracts.js";
@@ -82,6 +83,11 @@ export const OFFICIAL_TOOL_CONTRACTS = [
     "inspect_native_function_instructions",
     "List every instruction of one function by symbol or address: exact bytes, mnemonic, ordered operand tokens, flow, typed references and the relocations recorded on each instruction (type, status, symbol, file bytes). Use it on the original binary and on a relocatable object file opened as a second session, then pass both results to compare_compiled_function. Does not invoke the decompiler.",
     nativeFunctionInstructionsInputSchema,
+  ),
+  official(
+    "match_native_function_signatures",
+    "Match the open binary's functions against operator-supplied Ghidra Function ID databases, each pinned by SHA-256 and verified before use. Returns inferred candidates per function with the library, version and variant that named them, hash identities and Ghidra's match scores, plus the identity of every database consulted. A name from a signature database is a hypothesis about a statically linked library function, not an observation of this binary. Bundled Ghidra databases are never consulted; pass the databases to use. Narrow with procedure for one function.",
+    nativeSignatureMatchesInputSchema,
   ),
   official(
     "resolve_native_call_targets",

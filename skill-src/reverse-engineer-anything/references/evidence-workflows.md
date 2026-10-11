@@ -21,6 +21,9 @@ or absence:
   metadata, and graph relations.
 - `compare_functions` compares explicit function Evidence, not fuzzy
   whole-binary matches.
+- `match_native_function_signatures` proposes names for statically linked
+  library functions from Function ID databases you pin by SHA-256. Candidates
+  are inferred; accept one with `annotate_native_function`.
 - `compare_compiled_function` aligns an original function with a rebuilt
   candidate instruction by instruction, with relocations and outside targets
   masked. Pass `inspect_native_function_instructions` Evidence for both; open the

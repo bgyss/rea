@@ -168,6 +168,31 @@ kept them). It does not run the decompiler. Open a relocatable object file as
 its own session to list the function a build produced; select it by address
 (`0x0` for the first function of a section) because object symbols are local.
 
+## Naming statically linked library functions
+
+`match_native_function_signatures` (CLI `match-native-function-signatures <path>
+--database SHA256=PATH`, repeatable) matches the open binary's functions against
+Ghidra Function ID databases you supply. Each database is pinned by SHA-256: the
+bridge reads the file once, refuses a different digest, and queries that exact
+copy. Bundled Ghidra databases are never consulted, so the result names only the
+libraries you chose. Pass `procedure` to match one function instead of all.
+
+Each candidate is `inferred`. It carries the library family, version and
+variant, the Ghidra language and compiler spec the library was built for, the
+hash identities, Ghidra's match mode (`SPECIFIC`, `FULL`, ...) and its overall,
+function, child and parent scores. The result also lists every database consulted
+with its libraries and whether it applies to the target's language, and counts
+the functions too short to hash.
+
+Function ID hashes mask operand values, so a candidate says the code has the
+same shape as the library function, not that its constants or call targets are
+equal. Very short functions only match when their callers or callees match too,
+which is Ghidra's own threshold. Build a database from your own libraries with
+Ghidra's _Populate FidDb_ tooling; the verifier script
+`scripts/verify/ghidra/PopulateFixtureFid.java` is a minimal headless example.
+Nothing is applied to the program: rename functions with
+`annotate_native_function` once you accept a candidate.
+
 ## Matching a rebuilt function
 
 `compare_compiled_function` compares the original function's listing (`left`)

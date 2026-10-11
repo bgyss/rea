@@ -25,6 +25,9 @@ export const TOOL_EXAMPLE_OVERRIDES: Readonly<
   inspect_native_data_type: { type: "/MyStruct" },
   inspect_native_instruction: { address: "0x1000" },
   inspect_native_function_instructions: { procedure: "main" },
+  match_native_function_signatures: {
+    databases: [{ path: "/opt/fid/libc.fidbf", sha256: "0".repeat(64) }],
+  },
   resolve_native_call_targets: { address: "0x1000" },
   read_function_instructions: { procedure: "main" },
   read_bytes: { address: "0x1000", length: 16 },

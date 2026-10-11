@@ -262,6 +262,41 @@ export const registerCoreNativeCommands = (
           ),
       ),
   });
+  cli.command(CLI_COMMANDS.matchNativeFunctionSignatures, {
+    description:
+      "Match functions against operator-supplied Ghidra Function ID databases",
+    args: z.object({
+      path: z.string().describe("Local native executable or object file"),
+    }),
+    options: z.object({
+      ...formatSelectionOptions,
+      ...annotationLedgerOptions,
+      provider: providerSelectionOption,
+      database: z
+        .array(z.string())
+        .describe(
+          "Function ID database as SHA256=ABSOLUTE_PATH (repeat for several)",
+        ),
+      procedure: z
+        .string()
+        .optional()
+        .describe("Match one procedure symbol or address instead of all"),
+    }),
+    run: ({ args, options }) =>
+      logCliCommand(logger, CLI_COMMANDS.matchNativeFunctionSignatures, () =>
+        runDirectAnalysis(
+          args.path,
+          "match_native_function_signatures",
+          {
+            databases: options.database.map(parseSignatureDatabase),
+            ...(options.procedure === undefined
+              ? {}
+              : { procedure: options.procedure }),
+          },
+          directAnalysisOptions(logger, undefined, options.provider, options),
+        ),
+      ),
+  });
   registerNativeApiCommand(cli, logger);
   registerNativeUiActionCommand(cli, logger);
   registerNativeDispatchMetadataCommand(cli, logger);
@@ -694,4 +729,13 @@ const registerAnnotationSetCommand = (
         );
       }),
   });
+};
+
+/** Split a `SHA256=PATH` option; the digest never contains `=`, so paths may. */
+const parseSignatureDatabase = (value: string) => {
+  const split = value.indexOf("=");
+  return {
+    sha256: split < 0 ? "" : value.slice(0, split),
+    path: split < 0 ? value : value.slice(split + 1),
+  };
 };
