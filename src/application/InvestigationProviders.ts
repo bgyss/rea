@@ -98,6 +98,13 @@ export const FUNCTION_COMPARISON_PROVIDER = {
   version: "1",
 } as const;
 
+/** Provider identity for instruction-aligned original-versus-rebuilt comparisons. */
+export const COMPILED_FUNCTION_COMPARISON_PROVIDER = {
+  id: "rea-compiled-function-comparison",
+  name: "REA compiled function comparison",
+  version: "1",
+} as const;
+
 /** Provider identity for deterministic Evidence bundle comparisons. */
 export const BUNDLE_COMPARISON_PROVIDER = {
   id: "rea-bundle-comparison",

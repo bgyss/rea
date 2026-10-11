@@ -17,6 +17,7 @@ import {
   resolveAnnotationSet,
 } from "../domain/native/nativeLabelPacks.js";
 import { nativeDataTypeSchema } from "../domain/native/nativeDataType.js";
+import { nativeFunctionInstructionsSchema } from "../domain/native/nativeFunctionInstructions.js";
 import {
   nativeInstructionSchema,
   nativeCallTargetsSchema,
@@ -58,6 +59,7 @@ export const GHIDRA_FUNCTION_OPERATIONS = [
   "apply_native_annotations",
   "inspect_native_data_type",
   "inspect_native_instruction",
+  "inspect_native_function_instructions",
   "resolve_native_call_targets",
   "analyze_function",
   "procedure_assembly",
@@ -106,6 +108,7 @@ const inputSchemas = {
   inspect_native_instruction: z
     .object({ document, address: ghidraInputAddressSchema })
     .strict(),
+  inspect_native_function_instructions: z.object(directProcedure).strict(),
   resolve_native_call_targets: z
     .object({ document, address: ghidraInputAddressSchema })
     .strict(),
@@ -407,6 +410,9 @@ const resultSchemas = {
   procedure_pseudo_code: z.string().nullable(),
   read_function_instructions: ghidraFunctionInstructionWindow,
   inspect_native_instruction: nativeInstructionSchema,
+  inspect_native_function_instructions: nativeFunctionInstructionsSchema.extend(
+    { procedure: procedureIdentity },
+  ),
   inspect_native_data_type: nativeDataTypeSchema,
   resolve_native_call_targets: nativeCallTargetsSchema,
   procedure_references: procedureReferences,

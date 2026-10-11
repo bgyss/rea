@@ -160,6 +160,44 @@ outside-memory and undecodable addresses have separate outcomes. Effective
 memory base/index/displacement roles and per-instruction context mode remain
 unavailable; `mode` is the program language variant.
 
+`inspect_native_function_instructions` (CLI `inspect-native-function-instructions
+<path> <procedure>`) lists every instruction of one function: bytes, mnemonic,
+ordered operand tokens, flow, typed references, and the relocations recorded on
+each instruction (type, status, symbol and the original file bytes where Ghidra
+kept them). It does not run the decompiler. Open a relocatable object file as
+its own session to list the function a build produced; select it by address
+(`0x0` for the first function of a section) because object symbols are local.
+
+## Matching a rebuilt function
+
+`compare_compiled_function` compares the original function's listing (`left`)
+with a candidate built from reconstructed source (`right`). Both are
+`inspect_native_function_instructions` Evidence, so the original can come from a
+linked binary and the candidate from an object file in a second session. The
+comparison reads only the Evidence passed in and needs no open session.
+
+1. Instructions are aligned by mnemonic and register operands. Constants are
+   left out of the alignment, so a relocated operand still pairs with its
+   linked form.
+2. Each aligned pair is compared. Registers and mnemonics must match. Constants
+   must match unless masked: an operand carrying a relocation (typed reference
+   or external address) is masked; an instruction with a relocation that no
+   operand can be attributed to masks every constant in it
+   (`relocation_unattributed`); targets outside the function are masked; branch
+   targets inside the function compare as offsets from the function entry.
+   `masking.immediates: "mask"` also ignores every immediate, for example while
+   constants are still unknown. Bytes of a masked pair are not compared;
+   an unmasked pair whose bytes differ reports an `encoding` difference.
+3. The result lists every aligned row (`match`, `masked`, `replace`,
+   `left_only`, `right_only`), `first_divergence`, `counts`, a Dice `score`
+   (`2 × matched / (left + right)`), the verdict (`identical`,
+   `equivalent_masked`, `different`) and the candidate's relocation symbols.
+
+A call to the wrong function is masked, since a target outside the function is
+a link-time choice; compare `right_relocations[].symbol` with the original's
+callees. Sequences more than 4000 edits apart are paired by position and say so
+in `limitations`.
+
 Call resolution reports direct, resolved indirect, ambiguous, unresolved and
 non-call outcomes from static call references. It does not establish runtime
 execution or classify Objective-C/Swift/vtable/closure mechanisms from names.

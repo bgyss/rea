@@ -24,6 +24,7 @@ import java.nio.file.attribute.PosixFilePermissions;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.Iterator;
@@ -158,6 +159,7 @@ public final class ReaGhidraBridge extends HeadlessScript {
         "procedure_pseudo_code",
         "read_function_instructions",
         "inspect_native_instruction",
+        "inspect_native_function_instructions",
         "inspect_native_data_type",
         "resolve_native_call_targets",
         "procedure_references",
@@ -393,6 +395,7 @@ public final class ReaGhidraBridge extends HeadlessScript {
             case "search_strings" -> search(request.params, false);
             case "inspect_native_data_type" -> inspectNativeDataType(request.params);
             case "inspect_native_instruction" -> inspectNativeInstruction(request.params);
+            case "inspect_native_function_instructions" -> inspectNativeFunctionInstructions(request.params);
             case "resolve_native_call_targets" -> resolveNativeCallTargets(request.params);
             case "xrefs" -> xrefs(request.params);
             case "analyze_function" -> analyzeFunction(request.params);
@@ -899,6 +902,108 @@ public final class ReaGhidraBridge extends HeadlessScript {
         return item;
     }
 
+    private List<JsonObject> operandFacts(Instruction instruction) {
+        List<JsonObject> operands = new ArrayList<>();
+        for (int index = 0; index < instruction.getNumOperands(); index++) {
+            JsonObject operand = new JsonObject();
+            operand.addProperty("index", index);
+            operand.addProperty("raw", instruction.getDefaultOperandRepresentation(index));
+            operand.addProperty("provider_type", instruction.getOperandType(index));
+            operand.addProperty("memory_addressing", "unavailable");
+            JsonArray components = new JsonArray();
+            for (Object object : instruction.getOpObjects(index)) {
+                JsonObject component = new JsonObject();
+                component.addProperty("text", object.toString());
+                component.add("value", JsonNull.INSTANCE);
+                component.add("bit_width", JsonNull.INSTANCE);
+                if (object instanceof Register register) {
+                    component.addProperty("kind", "register");
+                    component.addProperty("value", register.getName());
+                    component.addProperty("bit_width", register.getBitLength());
+                } else if (object instanceof Scalar scalar) {
+                    component.addProperty("kind", "immediate");
+                    component.addProperty("value", "0x" + Long.toUnsignedString(scalar.getUnsignedValue(), 16));
+                    component.addProperty("bit_width", scalar.bitLength());
+                } else if (object instanceof Address target) {
+                    component.addProperty("kind", "address");
+                    component.addProperty("value", canonicalAddress(target));
+                } else component.addProperty("kind", "unknown");
+                components.add(component);
+            }
+            operand.add("components", components);
+            operands.add(operand);
+        }
+        return operands;
+    }
+
+    private JsonObject inspectNativeFunctionInstructions(JsonObject params) throws Exception {
+        requireKeys(params, Set.of("document", "procedure"));
+        requireDocument(params);
+        Function function = resolveProcedure(requireString(params, "procedure"));
+        InstructionScan scan = scanInstructions(function, Integer.MAX_VALUE);
+        Address entry = function.getEntryPoint();
+        Map<Address, List<Relocation>> relocations = new HashMap<>();
+        Iterator<Relocation> relocationIterator = currentProgram.getRelocationTable().getRelocations(function.getBody());
+        while (relocationIterator.hasNext()) {
+            monitor.checkCancelled();
+            Relocation relocation = relocationIterator.next();
+            relocations.computeIfAbsent(relocation.getAddress(), key -> new ArrayList<>()).add(relocation);
+        }
+        JsonArray items = new JsonArray();
+        for (Instruction instruction : scan.instructions) {
+            JsonObject item = new JsonObject();
+            Address address = instruction.getAddress();
+            item.addProperty("address", canonicalAddress(address));
+            item.addProperty("offset", address.getOffset() - entry.getOffset());
+            item.addProperty("bytes", java.util.HexFormat.of().formatHex(instruction.getBytes()));
+            item.addProperty("length", instruction.getLength());
+            item.addProperty("mnemonic", instruction.getMnemonicString());
+            item.addProperty("raw_disassembly", instruction.toString());
+            JsonArray operands = new JsonArray();
+            for (JsonObject operand : operandFacts(instruction)) operands.add(operand);
+            item.add("operands", operands);
+            RefType type = instruction.getFlowType();
+            JsonObject flow = new JsonObject();
+            flow.addProperty("kind", type.isCall() ? "call" : type.isJump() ? "jump" : type.isTerminal() ? "terminal" : "fallthrough");
+            flow.addProperty("conditional", type.isConditional());
+            flow.addProperty("computed", type.isComputed());
+            JsonArray destinations = new JsonArray();
+            if (!type.isComputed()) for (Address target : instruction.getFlows()) destinations.add(canonicalAddress(target));
+            flow.add("direct_destinations", destinations);
+            item.add("flow", flow);
+            JsonArray references = new JsonArray();
+            for (Reference reference : instruction.getReferencesFrom()) references.add(instructionReference(reference));
+            item.add("references", references);
+            JsonArray applied = new JsonArray();
+            for (int index = 0; index < instruction.getLength(); index++) {
+                for (Relocation relocation : relocations.getOrDefault(address.add(index), List.of())) {
+                    JsonObject row = new JsonObject();
+                    row.addProperty("byte_offset", index);
+                    row.addProperty("type", relocation.getType());
+                    row.addProperty("status", relocation.getStatus().toString());
+                    String symbol = relocation.getSymbolName();
+                    if (symbol == null) row.add("symbol", JsonNull.INSTANCE);
+                    else row.addProperty("symbol", symbol);
+                    byte[] original = relocation.getBytes();
+                    row.add("original_bytes_hex", original == null ? JsonNull.INSTANCE : GSON.toJsonTree(bytesHex(original)));
+                    applied.add(row);
+                }
+            }
+            item.add("relocations", applied);
+            items.add(item);
+        }
+        JsonArray limitations = new JsonArray();
+        limitations.add("Instruction bytes are the loaded program bytes; for a relocatable object, Ghidra may already have applied a relocation, so original_bytes_hex preserves the file bytes where Ghidra recorded them.");
+        limitations.add("Operand components are Ghidra Listing decoder tokens; effective memory addressing roles are unavailable.");
+        JsonObject result = new JsonObject();
+        result.add("procedure", procedureIdentity(function));
+        result.addProperty("architecture", currentProgram.getLanguageID().getIdAsString());
+        result.addProperty("mode", currentProgram.getLanguage().getLanguageDescription().getVariant());
+        result.add("instructions", items);
+        result.add("limitations", limitations);
+        return result;
+    }
+
     private JsonObject inspectNativeInstruction(JsonObject params) throws Exception {
         requireKeys(params, Set.of("document", "address"));
         requireDocument(params);
@@ -933,35 +1038,7 @@ public final class ReaGhidraBridge extends HeadlessScript {
             flow.addProperty("computed", type.isComputed());
             if (!type.isComputed()) for (Address target : instruction.getFlows()) destinations.add(canonicalAddress(target));
             for (Reference reference : instruction.getReferencesFrom()) references.add(instructionReference(reference));
-            for (int index = 0; index < instruction.getNumOperands(); index++) {
-                JsonObject operand = new JsonObject();
-                operand.addProperty("index", index);
-                operand.addProperty("raw", instruction.getDefaultOperandRepresentation(index));
-                operand.addProperty("provider_type", instruction.getOperandType(index));
-                operand.addProperty("memory_addressing", "unavailable");
-                JsonArray components = new JsonArray();
-                for (Object object : instruction.getOpObjects(index)) {
-                    JsonObject component = new JsonObject();
-                    component.addProperty("text", object.toString());
-                    component.add("value", JsonNull.INSTANCE);
-                    component.add("bit_width", JsonNull.INSTANCE);
-                    if (object instanceof Register register) {
-                        component.addProperty("kind", "register");
-                        component.addProperty("value", register.getName());
-                        component.addProperty("bit_width", register.getBitLength());
-                    } else if (object instanceof Scalar scalar) {
-                        component.addProperty("kind", "immediate");
-                        component.addProperty("value", "0x" + Long.toUnsignedString(scalar.getUnsignedValue(), 16));
-                        component.addProperty("bit_width", scalar.bitLength());
-                    } else if (object instanceof Address target) {
-                        component.addProperty("kind", "address");
-                        component.addProperty("value", canonicalAddress(target));
-                    } else component.addProperty("kind", "unknown");
-                    components.add(component);
-                }
-                operand.add("components", components);
-                operands.add(operand);
-            }
+            for (JsonObject operand : operandFacts(instruction)) operands.add(operand);
         }
         flow.add("direct_destinations", destinations);
         result.add("operands", operands);

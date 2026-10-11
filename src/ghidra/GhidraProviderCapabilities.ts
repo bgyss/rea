@@ -136,6 +136,12 @@ export const limitationsFor = (operation: string): readonly string[] => {
         "This fast path reads only the requested function and does not invoke the decompiler or whole-program string/name inventories.",
         "Instruction text is Ghidra-specific and does not claim textual equivalence with Hopper output.",
       ];
+    case "inspect_native_function_instructions":
+      return [
+        ...common,
+        "Instructions, operand tokens and relocations are Ghidra Listing and RelocationTable observations. For a relocatable object Ghidra may already have applied a relocation to the loaded bytes; the relocation records the symbol and the file bytes where the loader kept them.",
+        "Does not invoke the decompiler or whole-program name and string inventories.",
+      ];
     case "procedure_assembly":
       return [
         ...common,

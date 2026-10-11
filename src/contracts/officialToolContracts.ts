@@ -18,6 +18,7 @@ import {
 import type { ToolContract } from "./toolContractTypes.js";
 import { toolContractMetadata } from "./toolEffects.js";
 import { nativeDataTypeInputSchema } from "../domain/native/nativeDataType.js";
+import { nativeFunctionInstructionsInputSchema } from "../domain/native/nativeFunctionInstructions.js";
 import { nativeInstructionInputSchema } from "../domain/native/nativeInstruction.js";
 import { functionInstructionInputSchema } from "./functionInstructionContract.js";
 import { HOPPER_MEMORY_TOOL_DEFINITIONS } from "./hopperMemoryContracts.js";
@@ -76,6 +77,11 @@ export const OFFICIAL_TOOL_CONTRACTS = [
     "inspect_native_instruction",
     "Inspect one exact instruction address: decoded bytes, mnemonic, ordered operand tokens, flow and typed references. Memory addressing decomposition is unavailable when the provider supplies only tokens. Data, interior instruction addresses and undecodable bytes are distinct outcomes.",
     nativeInstructionInputSchema,
+  ),
+  official(
+    "inspect_native_function_instructions",
+    "List every instruction of one function by symbol or address: exact bytes, mnemonic, ordered operand tokens, flow, typed references and the relocations recorded on each instruction (type, status, symbol, file bytes). Use it on the original binary and on a relocatable object file opened as a second session, then pass both results to compare_compiled_function. Does not invoke the decompiler.",
+    nativeFunctionInstructionsInputSchema,
   ),
   official(
     "resolve_native_call_targets",

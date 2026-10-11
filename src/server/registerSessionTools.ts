@@ -28,6 +28,7 @@ import { mcpProgressReporter } from "./mcpProgress.js";
 import { registerArtifactComparisonTool } from "./registerArtifactComparisonTool.js";
 import { registerBundleComparisonTool } from "./registerBundleComparisonTool.js";
 import { registerCloseLifecycleTool } from "./registerCloseLifecycleTool.js";
+import { registerCompiledFunctionComparisonTool } from "./registerCompiledFunctionComparisonTool.js";
 import { registerFunctionComparisonTool } from "./registerFunctionComparisonTool.js";
 import { registerInvestigationTools } from "./registerInvestigationTools.js";
 import { registerProcessComparisonTool } from "./registerProcessComparisonTool.js";
@@ -294,6 +295,7 @@ export const registerSessionTools = (
   const compareContract = toolContract("compare_process_captures");
   const compareArtifactsContract = toolContract("compare_artifacts");
   const compareFunctionsContract = toolContract("compare_functions");
+  const compareCompiledContract = toolContract("compare_compiled_function");
   const compareBundlesContract = toolContract("compare_bundles");
   const snapshotContract = toolContract("get_evidence_bundle");
   registerLifecycleTools({
@@ -326,6 +328,11 @@ export const registerSessionTools = (
   registerProcessComparisonTool(server, session, compareContract);
   registerArtifactComparisonTool(server, session, compareArtifactsContract);
   registerFunctionComparisonTool(server, session, compareFunctionsContract);
+  registerCompiledFunctionComparisonTool(
+    server,
+    session,
+    compareCompiledContract,
+  );
   registerBundleComparisonTool(server, session, compareBundlesContract);
   registerInvestigationTools(server, session);
   registerUnknownTools({ server, session });

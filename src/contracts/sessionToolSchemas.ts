@@ -6,6 +6,7 @@ import { artifactComparisonInputSchema } from "../domain/artifactComparison.js";
 import { bundleComparisonInputSchema } from "../domain/bundleComparison.js";
 import { callPathInputSchema } from "../domain/callPath.js";
 import { changedBehaviorInputSchema } from "../domain/changedBehavior.js";
+import { compiledFunctionComparisonInputSchema } from "../domain/compiledFunctionComparison.js";
 import { functionComparisonInputSchema } from "../domain/functionComparison.js";
 import { jsonValueSchema } from "../domain/jsonValue.js";
 import { processScenarioSchema } from "../domain/process/processCapture.js";
@@ -79,6 +80,7 @@ export {
   callPathInputSchema,
   changedBehaviorInputSchema,
   closeBinaryInputSchema,
+  compiledFunctionComparisonInputSchema,
   functionComparisonInputSchema,
   openBinaryInputSchema,
   processScenarioSchema,
