@@ -116,6 +116,12 @@ Memory-map overlay spaces per bank. Every address-bearing evidence row gains `{s
 
 Like `REA_GHIDRA_NATIVEAOT_JAR`, but for loaders: a configured path plus SHA-256 and a declared loader name, installed into rea's private Ghidra user directory per session. Each loader is `advertised` until a verifier lane with an authored fixture passes.
 
+**First use case: Nintendo Switch NSO and NRO.** Ghidra 12.1.4 as pinned here ships no NSO or NRO loader (checked by searching the install), and dcomp's Switch lane claims no qualified executable loader (`docs/console-lanes.md` in dcomp). A pinned NSO/NRO loader would let rea inspect Switch code and run `compare_compiled_function` on it.
+
+- **Source.** Write the loader from the public NSO0/NRO0, MOD0 and dynamic-section formats and authored fixtures. A review of the local SwitchRecomp-alt checkout (Apache 2.0, "SwitchRecomp by MZ Labs" credit required in derived work) found `nxloader.py` is a usable reference for format and function-discovery details (`.eh_frame`, symbols, relocation and BL targets), but its code should not be copied without carrying that notice.
+- **Not a rea or dcomp backend.** That project's generated code always includes a fallback ARM64 interpreter (`swr_lookup` falls back to it for any target without a compiled function), crashes on unsupported instructions, emits `goto`-based machine code rather than readable source, and needs a full HLE kernel/GPU runtime. That conflicts with dcomp's ban on emulator or interpreter delivery. In dcomp it could only be a candidate `native_static_recompilation` tool after the interpreter is removed or proven unreachable and the runtime is audited. This review read source only; nothing was executed, and its prebuilt binaries are unverified.
+- **Verifier.** An authored NSO/NRO fixture built without game data, checked with `verify:ghidra`-style lanes, before the loader leaves `advertised`.
+
 ### B8. Matching-decomp function compare
 
 **[D]** · 1 week
