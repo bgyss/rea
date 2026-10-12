@@ -59,7 +59,7 @@ const readRawImageProfile = (path: string): Result<RawImageProfile, string> => {
 export const formatSelectionOption = executableFormatHintSchema
   .optional()
   .describe(
-    "Explicit headerless interpretation: dos-com; raw-binary with --architecture and --entry-point; or raw-image with --raw-image-profile. Omission preserves header-based detection",
+    "Explicit headerless interpretation: dos-com; raw-binary with --architecture and --entry-point; or raw-image with --raw-image-profile; switch-nso or switch-nro for Nintendo Switch executables (needs a pinned Ghidra loader, see docs/ghidra-switch.md). Omission preserves header-based detection",
   );
 
 export const architectureSelectionOption = binaryArchitectureSchema

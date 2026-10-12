@@ -14,7 +14,13 @@ export type ExecutableMetadata =
       readonly mips: MipsElfMetadata;
     }
   | {
-      readonly format: "mach-o" | "elf" | "dos-mz" | "dos-com";
+      readonly format:
+        | "mach-o"
+        | "elf"
+        | "dos-mz"
+        | "dos-com"
+        | "switch-nso"
+        | "switch-nro";
       readonly architecture: Exclude<BinaryArchitecture, "mips">;
       readonly availableArchitectures: readonly Exclude<
         BinaryArchitecture,

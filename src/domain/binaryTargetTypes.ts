@@ -80,7 +80,13 @@ export type BinaryTarget =
         readonly managed?: never;
       })
   | (ExecutableTarget & {
-      readonly format: "mach-o" | "elf" | "dos-mz" | "dos-com";
+      readonly format:
+        | "mach-o"
+        | "elf"
+        | "dos-mz"
+        | "dos-com"
+        | "switch-nso"
+        | "switch-nro";
       readonly executableRole?: never;
       readonly managed?: never;
     })

@@ -25,4 +25,27 @@ describe("IDA provider target support", () => {
       reason: expect.stringContaining("Ghidra"),
     });
   });
+
+  it.each(["switch-nso", "switch-nro"] as const)(
+    "declines %s targets that need a pinned Ghidra loader",
+    (format) => {
+      const config = parseConfig({});
+      if (!config.ok) throw new Error("expected valid configuration");
+      const provider = new IdaProvider(config.value, {});
+      expect(
+        provider.inspectTargetSupport({
+          path: "/tmp/main",
+          sha256: "a".repeat(64),
+          kind: "executable",
+          format,
+          architecture: "arm64",
+          availableArchitectures: ["arm64"],
+        }),
+      ).toMatchObject({
+        status: "unsupported",
+        code: "target_format_unsupported",
+        reason: expect.stringContaining("Ghidra"),
+      });
+    },
+  );
 });

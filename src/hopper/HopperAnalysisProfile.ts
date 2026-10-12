@@ -141,6 +141,8 @@ export const hopperLoaderArgsForTarget = (
     case "dos-mz":
     case "dos-com":
     case "raw-binary":
+    case "switch-nso":
+    case "switch-nro":
       return err(
         new ProviderAdapterError("hopper", "resolve_analysis_profile"),
       );

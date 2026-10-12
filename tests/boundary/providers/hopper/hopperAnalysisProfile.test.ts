@@ -31,6 +31,28 @@ describe("Hopper analysis profiles", () => {
     });
   });
 
+  it.each(["switch-nso", "switch-nro"] as const)(
+    "does not map %s executables onto a Hopper loader",
+    (format) => {
+      expect(
+        hopperLoaderArgsForTarget({
+          path: "/tmp/main",
+          sha256: "a".repeat(64),
+          kind: "executable",
+          format,
+          architecture: "arm64",
+          availableArchitectures: ["arm64"],
+        }),
+      ).toMatchObject({
+        ok: false,
+        error: {
+          _tag: "ProviderAdapterError",
+          operation: "resolve_analysis_profile",
+        },
+      });
+    },
+  );
+
   it("does not map caller-supplied raw binaries onto a Hopper loader", () => {
     expect(
       hopperLoaderArgsForTarget({

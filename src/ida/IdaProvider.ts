@@ -133,6 +133,14 @@ export class IdaProvider implements AnalysisProviderCandidate {
           "IDA does not admit headerless raw binaries. Open the target with Ghidra and supply architecture and entry_point.",
         diagnostics,
       };
+    if (target.format === "switch-nso" || target.format === "switch-nro")
+      return {
+        status: "unsupported",
+        code: "target_format_unsupported",
+        reason:
+          "IDA does not admit Nintendo Switch NSO/NRO executables. Open the target with Ghidra and a pinned loader extension.",
+        diagnostics,
+      };
     return { status: "supported", code: null, reason: null, diagnostics };
   }
   async resolveAnalysisProfile(

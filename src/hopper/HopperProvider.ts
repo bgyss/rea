@@ -147,6 +147,14 @@ export class HopperProvider implements AnalysisProviderCandidate {
           "Raw images with a declared processor profile require the Ghidra adapter.",
         diagnostics,
       };
+    if (target.format === "switch-nso" || target.format === "switch-nro")
+      return {
+        status: "unsupported",
+        code: "target_format_unsupported",
+        reason:
+          "Nintendo Switch NSO/NRO executables require the Ghidra adapter with a pinned loader extension.",
+        diagnostics,
+      };
     return {
       status: "supported",
       code: null,
