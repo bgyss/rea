@@ -94,6 +94,9 @@ export const parseConfig = (
     ...(env.REA_GHIDRA_NATIVEAOT_JAR === undefined
       ? {}
       : { ghidraNativeAotJar: env.REA_GHIDRA_NATIVEAOT_JAR }),
+    ...(env.REA_GHIDRA_LOADER_EXTENSIONS_JSON === undefined
+      ? {}
+      : { ghidraLoaderExtensions: env.REA_GHIDRA_LOADER_EXTENSIONS_JSON }),
     ...(env.REA_GHIDRA_PROJECT_CACHE_DIR === undefined
       ? {}
       : { ghidraProjectCacheDir: env.REA_GHIDRA_PROJECT_CACHE_DIR }),

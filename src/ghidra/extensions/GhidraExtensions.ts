@@ -69,7 +69,7 @@ const adapters: readonly GhidraExtensionAdapter[] = [nativeAotAdapter];
 const MAX_EXTENSION_BYTES = 8 * 1024 * 1024;
 
 /** Read a bounded regular artifact through its open handle, without ambient state changes. */
-const readJar = async (path: string): Promise<Buffer> => {
+export const readGhidraJar = async (path: string): Promise<Buffer> => {
   const file = await open(
     path,
     constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
@@ -123,7 +123,7 @@ export const resolveGhidraExtensions = async (
     if (refusal !== null) return err(extensionRefusalError(refusal, target));
     try {
       const path = await realpath(configured);
-      const bytes = await readJar(path);
+      const bytes = await readGhidraJar(path);
       extensions.push({
         id: adapter.id,
         path,
@@ -224,7 +224,7 @@ export const snapshotGhidraExtensions = async (
   await mkdir(directory, { mode: 0o700 });
   const result: GhidraExtension[] = [];
   for (const extension of extensions) {
-    const bytes = await readJar(extension.path);
+    const bytes = await readGhidraJar(extension.path);
     if (createHash("sha256").update(bytes).digest("hex") !== extension.sha256)
       throw new Error(
         `Ghidra extension digest differs from committed profile: ${extension.id} (${extension.path})`,
