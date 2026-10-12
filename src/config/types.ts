@@ -3,6 +3,7 @@ import type { ReferenceSourcePolicy } from "../domain/referenceSourcePolicy.js";
 import type { AnalysisProviderSelector } from "../contracts/providerSelection.js";
 
 import type { GhidraLanguageOverride } from "./ghidraLanguageOverride.js";
+import type { GhidraLoaderExtensionConfig } from "./ghidraLoaderExtensions.js";
 import type { McpInputSchemaProfile } from "./mcpInputSchemaProfile.js";
 
 export interface AppConfig {
@@ -17,6 +18,8 @@ export interface AppConfig {
   readonly ghidraDisabledAnalyzers?: readonly string[];
   readonly ghidraSeedFile?: string;
   readonly ghidraNativeAotJar?: string;
+  /** Operator-pinned Ghidra loader jars, installed per session when a target needs them. */
+  readonly ghidraLoaderExtensions?: readonly GhidraLoaderExtensionConfig[];
   /** Private root for persistent analysed Ghidra projects; absent keeps imports ephemeral. */
   readonly ghidraProjectCacheDir?: string;
   readonly ilspyCmdPath: string | undefined;

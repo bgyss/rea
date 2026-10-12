@@ -37,7 +37,7 @@ export const openBinaryInputSchema = z
     format: executableFormatHintSchema
       .optional()
       .describe(
-        "Explicit headerless interpretation: dos-com; raw-binary with architecture and entry_point; or raw-image with raw_image_profile. Omission preserves header-based detection.",
+        "Explicit headerless interpretation: dos-com; raw-binary with architecture and entry_point; or raw-image with raw_image_profile; switch-nso or switch-nro for Nintendo Switch executables (needs a pinned Ghidra loader, see docs/ghidra-switch.md). Omission preserves header-based detection.",
       ),
     architecture: binaryArchitectureSchema
       .optional()

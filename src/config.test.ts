@@ -3,6 +3,42 @@ import { describe, expect, it } from "vitest";
 import { parseConfig } from "./config/parseConfig.js";
 import { projectAnalysisError } from "./domain/analysisErrorProjection.js";
 
+describe("REA_GHIDRA_LOADER_EXTENSIONS_JSON", () => {
+  const entry = {
+    id: "switch-nxo",
+    path: "/opt/rea/rea-switch-loader.jar",
+    sha256: "a".repeat(64),
+    loader_name: "ReaSwitchLoader",
+  };
+  it("parses pinned loaders into the app config", () => {
+    const parsed = parseConfig({
+      REA_GHIDRA_LOADER_EXTENSIONS_JSON: JSON.stringify([entry]),
+    });
+    expect(parsed.ok && parsed.value.ghidraLoaderExtensions).toEqual([entry]);
+  });
+  it("leaves the setting absent by default", () => {
+    const parsed = parseConfig({});
+    expect(parsed.ok && parsed.value.ghidraLoaderExtensions).toBeUndefined();
+  });
+  it.each([
+    ["not json", "{"],
+    ["a relative path", JSON.stringify([{ ...entry, path: "loader.jar" }])],
+    [
+      "an uppercase digest",
+      JSON.stringify([{ ...entry, sha256: "A".repeat(64) }]),
+    ],
+    ["duplicate ids", JSON.stringify([entry, entry])],
+    ["an unknown field", JSON.stringify([{ ...entry, extra: 1 }])],
+  ])("rejects %s without echoing the value", (_name, value) => {
+    const parsed = parseConfig({ REA_GHIDRA_LOADER_EXTENSIONS_JSON: value });
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(JSON.stringify(projectAnalysisError(parsed.error))).not.toContain(
+      "loader.jar",
+    );
+  });
+});
+
 describe("runtime configuration", () => {
   it("allows target-free startup and applies runtime defaults", () => {
     const empty = parseConfig({});

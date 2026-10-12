@@ -174,6 +174,43 @@ export const parseBinaryTarget = async (
           availableArchitectures: ["x86"],
         });
       }
+      if (formatHint === "switch-nso" || formatHint === "switch-nro") {
+        if (targetKind !== undefined && targetKind !== "executable")
+          return err(
+            new BinaryTargetError(
+              path,
+              `${formatHint} format requires an executable target kind`,
+            ),
+          );
+        const header = Buffer.alloc(0x14);
+        const read = await handle.read(header, 0, header.length, 0);
+        throwIfTargetResolutionCancelled(signal);
+        const nso = formatHint === "switch-nso";
+        const observed = nso
+          ? header.subarray(0, 4).toString("ascii")
+          : header.subarray(0x10, 0x14).toString("ascii");
+        if (
+          read.bytesRead < header.length ||
+          observed !== (nso ? "NSO0" : "NRO0")
+        )
+          return err(
+            new BinaryTargetError(
+              path,
+              nso
+                ? "format=switch-nso requires the NSO0 magic at offset 0"
+                : "format=switch-nro requires the NRO0 magic at offset 0x10",
+            ),
+          );
+        return ok({
+          path,
+          sourcePath: canonical,
+          sha256: await sha256Handle(handle, path, metadata, signal),
+          kind: "executable",
+          format: formatHint,
+          architecture: "arm64",
+          availableArchitectures: ["arm64"],
+        });
+      }
       if (
         targetKind === "database" ||
         (targetKind === undefined && path.toLowerCase().endsWith(".hop"))
@@ -273,6 +310,8 @@ const detectArtifactFormat = async (
       | "dos-com"
       | "raw-image"
       | "raw-binary"
+      | "switch-nso"
+      | "switch-nro"
     >
   | undefined
 > => {
@@ -330,6 +369,8 @@ const isArchiveFormat = (
     | "dos-com"
     | "raw-image"
     | "raw-binary"
+    | "switch-nso"
+    | "switch-nro"
   >,
 ): format is Extract<BinaryTarget, { kind: "archive" }>["format"] =>
   isZipPackageFormat(format) || ["asar", "dmg", "pkg"].includes(format);

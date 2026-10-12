@@ -31,6 +31,11 @@ or absence:
 - `query_native_function_similarity` finds functions in a BSim database you
   pin by SHA-256 that resemble the open binary's, including recompiled or
   renamed code; candidates are inferred and scored.
+- Nintendo Switch NSO/NRO files open with `format` `switch-nso` or
+  `switch-nro` once an operator has pinned the REA-built loader
+  (`REA_GHIDRA_LOADER_EXTENSIONS_JSON`); the loader maps segments only, so
+  relocations and imports are not applied and only the entry is a function
+  until analysis finds more.
 - `match_native_function_signatures` proposes names for statically linked
   library functions from Function ID databases you pin by SHA-256. Candidates
   are inferred; accept one with `annotate_native_function`.

@@ -15,6 +15,13 @@ import { err, ok, type Result } from "../domain/result.js";
 import type { GhidraInstallationInspection } from "./GhidraInstallation.js";
 import { ghidraMipsProfileParameters } from "./GhidraMipsProfile.js";
 import { ghidraRawBinaryLanguage } from "./GhidraRawBinaryLanguage.js";
+import { GHIDRA_SWITCH_LOADER_NAME } from "../config/ghidraLoaderExtensions.js";
+import {
+  GHIDRA_SWITCH_COMPILER_SPEC_ID,
+  GHIDRA_SWITCH_IMAGE_BASE,
+  GHIDRA_SWITCH_LANGUAGE_ID,
+  isGhidraSwitchTarget,
+} from "./extensions/GhidraLoaderExtensions.js";
 
 import {
   ghidraProcessorUnsupportedReason,
@@ -129,6 +136,17 @@ export const resolveGhidraAnalysisProfile = async (
       }),
     );
   }
+  const switchFormat = isGhidraSwitchTarget(target);
+  if (switchFormat && languageOverride !== undefined)
+    return Promise.resolve(
+      err(
+        new AnalysisUnsupportedTargetError(
+          "resolve_analysis_profile",
+          target.path,
+          "REA_GHIDRA_LANGUAGE_ID cannot override the Switch loader's declared AArch64 language.",
+        ),
+      ),
+    );
   const dosMz = target.format === "dos-mz";
   const dosCom = target.format === "dos-com";
   const dos = dosMz || dosCom;
@@ -199,19 +217,30 @@ export const resolveGhidraAnalysisProfile = async (
           ? "MzLoader"
           : dosCom || raw !== undefined
             ? "BinaryLoader"
-            : "auto-from-header",
+            : switchFormat
+              ? GHIDRA_SWITCH_LOADER_NAME
+              : "auto-from-header",
         language_id: dos
           ? "x86:LE:16:Real Mode"
           : (raw?.processor_language_id ??
-            languageOverride?.languageId ??
-            "auto-from-header"),
+            (switchFormat
+              ? GHIDRA_SWITCH_LANGUAGE_ID
+              : (languageOverride?.languageId ?? "auto-from-header"))),
         compiler_spec_id: dos
           ? "default"
           : raw !== undefined
             ? raw.compiler_spec_id
-            : languageOverride === undefined
-              ? "auto-default"
-              : (languageOverride.compilerSpecId ?? "language-default"),
+            : switchFormat
+              ? GHIDRA_SWITCH_COMPILER_SPEC_ID
+              : languageOverride === undefined
+                ? "auto-default"
+                : (languageOverride.compilerSpecId ?? "language-default"),
+        ...(switchFormat
+          ? {
+              language_selection: "loader-declared-v1",
+              image_base: GHIDRA_SWITCH_IMAGE_BASE,
+            }
+          : {}),
         ...(languageOverride === undefined
           ? {}
           : { language_selection: "configured-v1" }),

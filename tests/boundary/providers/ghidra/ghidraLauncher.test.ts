@@ -570,3 +570,56 @@ describe("Ghidra Windows launcher", () => {
     },
   );
 });
+
+describe("Ghidra pinned-loader import", () => {
+  const base = {
+    projectRoot: "/tmp/project",
+    targetPath: "/tmp/main",
+    bridgeScriptPath: "/package/bridge/ReaGhidraBridge.java",
+    descriptorPath: "/tmp/session.json",
+    ghidraLogPath: "/tmp/ghidra.log",
+    scriptLogPath: "/tmp/script.log",
+  };
+  const loader = {
+    name: "ReaSwitchLoader",
+    languageId: "AARCH64:LE:64:v8A",
+    compilerSpecId: "default",
+  };
+
+  it("imports through the pinned loader with its declared language", () => {
+    const arguments_ = ghidraHeadlessArguments({ ...base, loader });
+    const importAt = arguments_.indexOf("-import");
+    expect(arguments_.slice(importAt, importAt + 8)).toEqual([
+      "-import",
+      "/tmp/main",
+      "-loader",
+      "ReaSwitchLoader",
+      "-processor",
+      "AARCH64:LE:64:v8A",
+      "-cspec",
+      "default",
+    ]);
+  });
+
+  it.each([
+    ["DOS", { dosCom: true as const }],
+    [
+      "raw-binary",
+      {
+        rawBinary: {
+          languageId: "ARM:LE:32:v7",
+          compilerSpecId: "default",
+          baseAddr: "0x8000000",
+        },
+      },
+    ],
+    [
+      "language override",
+      { languageOverride: { languageId: "x86:LE:32:default" } },
+    ],
+  ])("never combines a pinned loader with a %s import", (_name, other) => {
+    expect(() =>
+      ghidraHeadlessArguments({ ...base, ...other, loader }),
+    ).toThrow(/pinned-loader import cannot be combined/u);
+  });
+});

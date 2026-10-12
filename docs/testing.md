@@ -877,6 +877,19 @@ unreachable bound, refuses a wrong digest, and reports the same result through
 the CLI. Only the host architecture is exercised, and only the
 `medium_nosize` template.
 
+`npm run verify:ghidra:nxo` builds the Switch NSO/NRO loader from this repository
+with `scripts/build-ghidra-switch-loader.mjs`, pins its digest in
+`REA_GHIDRA_LOADER_EXTENSIONS_JSON`, and opens authored NSO (plain and with an
+LZ4-compressed `.rodata`) and NRO fixtures through MCP. It checks each memory
+map and permission, the decoded `.rodata` bytes, the entry procedure and its
+`nop`/`ret` instructions, and a `compare_compiled_function` run against an
+AArch64 object assembled with the host compiler (`--target=aarch64-linux-gnu`).
+It also checks that a hint disagreeing with the header, a missing pin and a
+mismatched pin are refused, and that the CLI `read-bytes` result equals MCP's.
+It needs `GHIDRA_INSTALL_DIR`, `JAVA_HOME` and a compiler that can assemble for
+AArch64, and no game data. Only AArch64 macOS is exercised. See
+[Nintendo Switch NSO and NRO](ghidra-switch.md).
+
 ## Apple Interface Builder archives
 
 `npm run verify:interface-builder` compiles the source-owned AppKit XIB into a

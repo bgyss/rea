@@ -7,6 +7,8 @@ export const executableFormatHintSchema = z.enum([
   "dos-com",
   "raw-binary",
   "raw-image",
+  "switch-nso",
+  "switch-nro",
 ]);
 /** Explicit interpretation selector accepted at the CLI and MCP boundaries. */
 export type ExecutableFormatSelector = z.infer<
@@ -21,6 +23,8 @@ export type ExecutableFormatSelector = z.infer<
 export type ExecutableFormatHint =
   | "dos-com"
   | "raw-binary"
+  | "switch-nso"
+  | "switch-nro"
   | { readonly format: "raw-image"; readonly profile: RawImageProfile };
 
 /**

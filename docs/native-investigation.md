@@ -297,6 +297,17 @@ Only file-backed H2 databases are supported; a PostgreSQL or Elasticsearch
 server is not contacted. Nothing is applied to the program: rename functions
 with `annotate_native_function` once you accept a candidate.
 
+## Nintendo Switch executables
+
+Open an NSO or NRO with `--target-format switch-nso` or `switch-nro` (MCP
+`open_binary` `format`) after pinning the loader REA builds from
+`bridge/ghidra-loaders/switch/` in `REA_GHIDRA_LOADER_EXTENSIONS_JSON`. The
+loader maps the segments at `0x7100000000` as AArch64, labels `entry`, `MOD0`
+and `_DYNAMIC`, and leaves everything else to Ghidra's analysis; relocations
+and imports are not applied. The usual inspect and compare tools then work, for
+example `inspect_native_function_instructions` and `compare_compiled_function`
+against a rebuilt object. See [Nintendo Switch NSO and NRO](ghidra-switch.md).
+
 ## Naming statically linked library functions
 
 `match_native_function_signatures` (CLI `match-native-function-signatures <path>
