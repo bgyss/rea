@@ -9,6 +9,8 @@ export const ghidraJavaLaunch = async (options: {
   readonly javaHome: string;
   readonly homeRoot: string;
   readonly tempRoot: string;
+  /** Ghidra user settings root, inside `homeRoot`; set only for pinned loaders. */
+  readonly settingsRoot?: string;
   readonly arguments: readonly string[];
   readonly environment: NodeJS.ProcessEnv;
   readonly signal?: AbortSignal;
@@ -23,6 +25,9 @@ export const ghidraJavaLaunch = async (options: {
   const isolatedProperties = [
     `-Duser.home=${options.homeRoot}`,
     `-Djava.io.tmpdir=${options.tempRoot}`,
+    ...(options.settingsRoot === undefined
+      ? []
+      : [`-Dapplication.settingsdir=${options.settingsRoot}`]),
   ];
   const supportArguments = [
     ...isolatedProperties,

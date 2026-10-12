@@ -87,6 +87,13 @@ import type { GhidraSessionError } from "./GhidraSessionError.js";
 import type { GhidraSessionInfo } from "./GhidraSessionValues.js";
 import { ghidraExtensionFailure } from "./extensions/GhidraExtensionFailures.js";
 import {
+  GHIDRA_SWITCH_COMPILER_SPEC_ID,
+  GHIDRA_SWITCH_LANGUAGE_ID,
+  ghidraLoaderExtensionSchema,
+  isGhidraSwitchTarget,
+} from "./extensions/GhidraLoaderExtensions.js";
+import { GHIDRA_SWITCH_LOADER_NAME } from "../config/ghidraLoaderExtensions.js";
+import {
   ghidraExtensionSchema,
   validateGhidraExtensionProfile,
   ghidraExtensionLimitations,
@@ -409,6 +416,36 @@ export const createGhidraProviderClient = (input: {
       }),
     );
   const extensions = extensionProfile.data;
+  const switchTarget = isGhidraSwitchTarget(target);
+  const loaderProfile = ghidraLoaderExtensionSchema
+    .array()
+    .safeParse(committedProfile.parameters.loader_extensions ?? []);
+  const loaderSources = loaderProfile.success
+    ? loaderProfile.data.map((extension) => ({
+        extension,
+        path: config.ghidraLoaderExtensions?.find(
+          (configured) =>
+            configured.id === extension.id &&
+            configured.loader_name === extension.loader_name,
+        )?.path,
+      }))
+    : [];
+  if (
+    !loaderProfile.success ||
+    loaderSources.some(({ path }) => path === undefined) ||
+    (switchTarget
+      ? loaderSources.length !== 1 ||
+        loaderSources[0]?.extension.loader_name !== GHIDRA_SWITCH_LOADER_NAME
+      : loaderSources.length !== 0)
+  )
+    return unavailableClient(
+      new ProviderAdapterError("ghidra", "open_binary", {
+        diagnostics: {
+          reason:
+            "Resolve the pinned Ghidra loader into an analysis profile before opening the session.",
+        },
+      }),
+    );
   const seedProfile = ghidraSeedCommitmentSchema
     .optional()
     .safeParse(committedProfile.parameters.analysis_seeds);
@@ -485,6 +522,11 @@ export const createGhidraProviderClient = (input: {
           "Static DOS analysis does not emulate BIOS, DOS interrupts, device ports, or self-modifying unpacking code. Packed targets require a separately identified unpacked artifact for original-program analysis; appended overlays are not the initialized load module.",
         ]
       : []),
+    ...(switchTarget
+      ? [
+          "The Switch loader maps NSO/NRO segments at the fixed image base 0x7100000000 and does not apply dynamic relocations, resolve imports, or discover functions beyond the entry point.",
+        ]
+      : []),
     ...(target.format === "raw-binary"
       ? [
           "Headerless raw-binary analysis uses the caller-supplied architecture and entry address; file offset 0 is mapped at that address. Headers are not discovered from file bytes.",
@@ -545,6 +587,18 @@ export const createGhidraProviderClient = (input: {
       ...(seeds === undefined ? {} : { analysisSeeds: seeds }),
       platform: installation.platform,
       ...(extensions.length === 0 ? {} : { analysisExtensions: extensions }),
+      ...(switchTarget
+        ? {
+            loaderImport: {
+              name: GHIDRA_SWITCH_LOADER_NAME,
+              languageId: GHIDRA_SWITCH_LANGUAGE_ID,
+              compilerSpecId: GHIDRA_SWITCH_COMPILER_SPEC_ID,
+              extensions: loaderSources.flatMap(({ extension, path }) =>
+                path === undefined ? [] : [{ extension, path }],
+              ),
+            },
+          }
+        : {}),
       ...(projectCache.root === undefined
         ? {}
         : { projectCache: { root: projectCache.root } }),
@@ -560,31 +614,36 @@ export const createGhidraProviderClient = (input: {
         : "unix-socket",
     providerVersion: prerequisites.value.providerVersion,
     profileDigest: committedProfile.digest,
-    ...(["dos-mz", "dos-com"].includes(target.format)
+    ...(switchTarget
       ? {
-          expectedLanguageId: "x86:LE:16:Real Mode",
-          expectedCompilerSpecId: "default",
+          expectedLanguageId: GHIDRA_SWITCH_LANGUAGE_ID,
+          expectedCompilerSpecId: GHIDRA_SWITCH_COMPILER_SPEC_ID,
         }
-      : target.format === "raw-image"
+      : ["dos-mz", "dos-com"].includes(target.format)
         ? {
-            expectedLanguageId: target.rawImage.processor_language_id,
-            expectedCompilerSpecId: target.rawImage.compiler_spec_id,
+            expectedLanguageId: "x86:LE:16:Real Mode",
+            expectedCompilerSpecId: "default",
           }
-        : rawLanguage === undefined
-          ? languageOverride === undefined
-            ? {}
+        : target.format === "raw-image"
+          ? {
+              expectedLanguageId: target.rawImage.processor_language_id,
+              expectedCompilerSpecId: target.rawImage.compiler_spec_id,
+            }
+          : rawLanguage === undefined
+            ? languageOverride === undefined
+              ? {}
+              : {
+                  expectedLanguageId: languageOverride.languageId,
+                  ...(languageOverride.compilerSpecId === undefined
+                    ? {}
+                    : {
+                        expectedCompilerSpecId: languageOverride.compilerSpecId,
+                      }),
+                }
             : {
-                expectedLanguageId: languageOverride.languageId,
-                ...(languageOverride.compilerSpecId === undefined
-                  ? {}
-                  : {
-                      expectedCompilerSpecId: languageOverride.compilerSpecId,
-                    }),
-              }
-          : {
-              expectedLanguageId: rawLanguage.languageId,
-              expectedCompilerSpecId: rawLanguage.compilerSpecId,
-            }),
+                expectedLanguageId: rawLanguage.languageId,
+                expectedCompilerSpecId: rawLanguage.compilerSpecId,
+              }),
     ...(psp
       ? {
           expectedLanguageId: "Allegrex:LE:32:default",

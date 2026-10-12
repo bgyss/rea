@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import type { GhidraLoaderExtensionConfig } from "../../config/ghidraLoaderExtensions.js";
+import type { BinaryTarget } from "../../domain/binaryTargetTypes.js";
 import type { AppConfig } from "../../config/types.js";
 import { AnalysisCapabilityUnavailableError } from "../../domain/analysisErrorCore.js";
 import type { AnalysisError } from "../../domain/analysisErrorBase.js";
@@ -17,6 +18,15 @@ export const ghidraLoaderExtensionSchema = z.strictObject({
   loader_name: z.string().regex(/^[A-Z][A-Za-z0-9]*$/u),
 });
 export type GhidraLoaderExtension = z.infer<typeof ghidraLoaderExtensionSchema>;
+
+/** Language, compiler spec and image base the Switch loader declares for NSO and NRO images. */
+export const GHIDRA_SWITCH_LANGUAGE_ID = "AARCH64:LE:64:v8A";
+export const GHIDRA_SWITCH_COMPILER_SPEC_ID = "default";
+export const GHIDRA_SWITCH_IMAGE_BASE = "0x7100000000";
+
+/** Whether the target is opened through the pinned Switch loader. */
+export const isGhidraSwitchTarget = (target: BinaryTarget): boolean =>
+  target.format === "switch-nso" || target.format === "switch-nro";
 
 const sha256Of = (bytes: Buffer): string =>
   createHash("sha256").update(bytes).digest("hex");

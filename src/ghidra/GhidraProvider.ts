@@ -43,6 +43,11 @@ import {
 } from "./GhidraPspProfile.js";
 import { resolveGhidraExtensions } from "./extensions/GhidraExtensions.js";
 import {
+  isGhidraSwitchTarget,
+  resolveGhidraLoaderExtension,
+} from "./extensions/GhidraLoaderExtensions.js";
+import { GHIDRA_SWITCH_LOADER_NAME } from "../config/ghidraLoaderExtensions.js";
+import {
   CAPABILITIES,
   windowsP0Capabilities,
   GHIDRA_PROVIDER_IDENTITY,
@@ -243,7 +248,19 @@ export class GhidraProvider implements AnalysisProviderCandidate {
       return err(new AnalysisCancelledError("open_binary"));
     const seeds = await resolveGhidraAnalysisSeeds(this.config.ghidraSeedFile);
     if (!seeds.ok) return seeds;
-    if (extensions.value.length === 0 && seeds.value === undefined)
+    const loaderExtension = isGhidraSwitchTarget(target)
+      ? await resolveGhidraLoaderExtension(
+          this.config,
+          GHIDRA_SWITCH_LOADER_NAME,
+          installation.platform,
+        )
+      : null;
+    if (loaderExtension !== null && !loaderExtension.ok) return loaderExtension;
+    if (
+      extensions.value.length === 0 &&
+      seeds.value === undefined &&
+      loaderExtension === null
+    )
       return resolved;
     return ok({
       ...resolved.value,
@@ -255,6 +272,11 @@ export class GhidraProvider implements AnalysisProviderCandidate {
         ...(seeds.value === undefined
           ? {}
           : { analysis_seeds: jsonValueSchema.parse(seeds.value) }),
+        ...(loaderExtension === null
+          ? {}
+          : {
+              loader_extensions: jsonValueSchema.parse([loaderExtension.value]),
+            }),
       }),
     });
   }

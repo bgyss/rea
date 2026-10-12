@@ -34,6 +34,12 @@ import {
 import { ghidraJavaEnvironment } from "./GhidraInstallation.js";
 import { ghidraJavaLaunch } from "./GhidraJavaLaunch.js";
 import {
+  ghidraApplicationVersionedName,
+  ghidraUserExtensionsDirectory,
+  installGhidraLoaderExtensions,
+  type GhidraLoaderExtension,
+} from "./extensions/GhidraLoaderExtensions.js";
+import {
   createGhidraProjectCacheStaging,
   discardGhidraProjectCacheStaging,
   ghidraImportPassSaved,
@@ -129,12 +135,26 @@ export interface GhidraHeadlessLauncherOptions {
   readonly analysisSeeds?: GhidraSeedCommitment;
   readonly analysisExtensions?: readonly GhidraExtension[];
   readonly pspExtension?: GhidraPspExtension;
+  /** Import through an operator-pinned loader installed for this session only. */
+  readonly loaderImport?: GhidraLoaderImport;
   /** Spawn seam for provider-boundary lifecycle tests. */
   readonly spawnProcess?: typeof spawnOwnedProviderProcess;
   /** Import headerless bytes with a caller-declared language, base and entry. */
   readonly rawImage?: GhidraRawImageImport;
   /** Analyse once into a persistent project, then reopen it per session. */
   readonly projectCache?: GhidraProjectCacheOptions;
+}
+
+/** A pinned loader class, its declared language, and the verified jars that provide it. */
+export interface GhidraLoaderImport {
+  readonly name: string;
+  readonly languageId: string;
+  readonly compilerSpecId: string;
+  /** Committed identities with the configured paths they must still match. */
+  readonly extensions: readonly {
+    readonly extension: GhidraLoaderExtension;
+    readonly path: string;
+  }[];
 }
 
 /** Explicit BinaryLoader import for a raw image; addresses are 0x-prefixed hex. */
@@ -206,6 +226,20 @@ export class GhidraHeadlessLauncher implements GhidraLauncher {
           );
       }
       await createGhidraRuntimeDirectories(paths, platform);
+      const loaderImport = this.options.loaderImport;
+      if (loaderImport !== undefined) {
+        const versionedName = await ghidraApplicationVersionedName(
+          join(dirname(this.options.analyzeHeadlessPath), ".."),
+        );
+        await installGhidraLoaderExtensions({
+          extensions: loaderImport.extensions,
+          extensionsDirectory: ghidraUserExtensionsDirectory(
+            ghidraSettingsRoot(paths),
+            versionedName,
+          ),
+          ghidraVersion: versionedName.split("_")[1] ?? "",
+        });
+      }
       const seedPath =
         this.options.analysisSeeds === undefined
           ? undefined
@@ -390,6 +424,15 @@ export class GhidraHeadlessLauncher implements GhidraLauncher {
       ...(this.options.languageOverride === undefined
         ? {}
         : { languageOverride: this.options.languageOverride }),
+      ...(this.options.loaderImport === undefined
+        ? {}
+        : {
+            loader: {
+              name: this.options.loaderImport.name,
+              languageId: this.options.loaderImport.languageId,
+              compilerSpecId: this.options.loaderImport.compilerSpecId,
+            },
+          }),
       ...(context.seedPath === undefined ? {} : { seedPath: context.seedPath }),
       ...(this.options.disabledAnalyzers === undefined
         ? {}
@@ -432,6 +475,9 @@ export class GhidraHeadlessLauncher implements GhidraLauncher {
           javaHome: this.options.javaHome,
           homeRoot: paths.homeRoot,
           tempRoot: paths.tempRoot,
+          ...(this.options.loaderImport === undefined
+            ? {}
+            : { settingsRoot: ghidraSettingsRoot(paths) }),
           arguments: headlessArguments,
           environment,
           ...(signal === undefined ? {} : { signal }),
@@ -670,6 +716,12 @@ export interface GhidraHeadlessArgumentOptions {
     readonly baseAddr: string;
   };
   readonly languageOverride?: GhidraLanguageOverride;
+  /** Pinned loader class and the language it declares; installed by the launcher. */
+  readonly loader?: {
+    readonly name: string;
+    readonly languageId: string;
+    readonly compilerSpecId: string;
+  };
   /** Auto-analyzers disabled by the pre-analysis options script. */
   readonly disabledAnalyzers?: readonly string[];
   /** Canonical seed snapshot passed to the pre-analysis seed script. */
@@ -751,6 +803,19 @@ export const ghidraHeadlessArguments = (
     throw new Error(
       "A PSP ELF import cannot be combined with DOS or a generic Ghidra language override.",
     );
+  const loader = options.loader;
+  if (
+    loader !== undefined &&
+    (options.psp === true ||
+      options.dosMz === true ||
+      options.dosCom === true ||
+      options.rawImage !== undefined ||
+      rawBinary !== undefined ||
+      override !== undefined)
+  )
+    throw new Error(
+      "A pinned-loader import cannot be combined with another import selection.",
+    );
   const rawImage = options.rawImage;
   if (
     rawImage !== undefined &&
@@ -790,57 +855,66 @@ export const ghidraHeadlessArguments = (
     "rea-project",
     "-import",
     options.targetPath,
-    ...(options.dosMz === true
+    ...(loader !== undefined
       ? [
           "-loader",
-          "MzLoader",
+          loader.name,
           "-processor",
-          "x86:LE:16:Real Mode",
+          loader.languageId,
           "-cspec",
-          "default",
+          loader.compilerSpecId,
         ]
-      : options.dosCom === true
+      : options.dosMz === true
         ? [
             "-loader",
-            "BinaryLoader",
-            "-loader-baseAddr",
-            "1000:0100",
+            "MzLoader",
             "-processor",
             "x86:LE:16:Real Mode",
             "-cspec",
             "default",
           ]
-        : rawImage !== undefined
-          ? rawImageImportArguments(rawImage)
-          : rawBinary === undefined
-            ? options.psp === true
-              ? [
-                  "-loader",
-                  "PspElfLoader",
-                  "-processor",
-                  "Allegrex:LE:32:default",
-                  "-cspec",
-                  "default",
-                ]
-              : override !== undefined
+        : options.dosCom === true
+          ? [
+              "-loader",
+              "BinaryLoader",
+              "-loader-baseAddr",
+              "1000:0100",
+              "-processor",
+              "x86:LE:16:Real Mode",
+              "-cspec",
+              "default",
+            ]
+          : rawImage !== undefined
+            ? rawImageImportArguments(rawImage)
+            : rawBinary === undefined
+              ? options.psp === true
                 ? [
+                    "-loader",
+                    "PspElfLoader",
                     "-processor",
-                    override.languageId,
-                    ...(override.compilerSpecId === undefined
-                      ? []
-                      : ["-cspec", override.compilerSpecId]),
+                    "Allegrex:LE:32:default",
+                    "-cspec",
+                    "default",
                   ]
-                : []
-            : [
-                "-loader",
-                "BinaryLoader",
-                "-loader-baseAddr",
-                rawBinary.baseAddr,
-                "-processor",
-                rawBinary.languageId,
-                "-cspec",
-                rawBinary.compilerSpecId,
-              ]),
+                : override !== undefined
+                  ? [
+                      "-processor",
+                      override.languageId,
+                      ...(override.compilerSpecId === undefined
+                        ? []
+                        : ["-cspec", override.compilerSpecId]),
+                    ]
+                  : []
+              : [
+                  "-loader",
+                  "BinaryLoader",
+                  "-loader-baseAddr",
+                  rawBinary.baseAddr,
+                  "-processor",
+                  rawBinary.languageId,
+                  "-cspec",
+                  rawBinary.compilerSpecId,
+                ]),
     "-readOnly",
     "-deleteProject",
     "-log",
@@ -919,6 +993,11 @@ const ghidraRuntimePaths = (runtimeRoot: string) => ({
   importGhidraLogPath: join(runtimeRoot, "import-ghidra.log"),
   importScriptLogPath: join(runtimeRoot, "import-script.log"),
 });
+
+/** Ghidra's user settings root; inside the private home so the app directory name is plain. */
+const ghidraSettingsRoot = (
+  paths: ReturnType<typeof ghidraRuntimePaths>,
+): string => join(paths.homeRoot, "ghidra-settings");
 
 const createGhidraRuntimeDirectories = async (
   paths: ReturnType<typeof ghidraRuntimePaths>,
