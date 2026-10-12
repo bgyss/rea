@@ -1,0 +1,167 @@
+package rea.switchloader;
+
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
+/** Parsed NSO0 or NRO0 image: segments placed relative to the image base. */
+final class NxoImage {
+    enum Kind { NSO, NRO }
+
+    record Segment(String name, long offset, byte[] bytes, boolean write, boolean execute) {
+    }
+
+    /** Admission bound for any one segment or the whole image (not a target limit). */
+    static final long MAX_SEGMENT_BYTES = 256L * 1024 * 1024;
+
+    final Kind kind;
+    final List<Segment> segments;
+    final long entryOffset;
+    final long bssOffset;
+    final long bssSize;
+    final long modOffset;
+    final long dynamicOffset;
+
+    private NxoImage(Kind kind, List<Segment> segments, long entryOffset, long bssOffset, long bssSize,
+        long modOffset, long dynamicOffset) {
+        this.kind = kind;
+        this.segments = List.copyOf(segments);
+        this.entryOffset = entryOffset;
+        this.bssOffset = bssOffset;
+        this.bssSize = bssSize;
+        this.modOffset = modOffset;
+        this.dynamicOffset = dynamicOffset;
+    }
+
+    private static final String[] NAMES = {".text", ".rodata", ".data"};
+
+    static NxoImage parse(byte[] file) {
+        ByteBuffer buffer = ByteBuffer.wrap(file).order(ByteOrder.LITTLE_ENDIAN);
+        if (file.length >= 0x100 && magic(buffer, 0, "NSO0")) {
+            return parseNso(file, buffer);
+        }
+        if (file.length >= 0x80 && magic(buffer, 0x10, "NRO0")) {
+            return parseNro(file, buffer);
+        }
+        throw new IllegalArgumentException("not an NSO0 or NRO0 image");
+    }
+
+    private static boolean magic(ByteBuffer buffer, int at, String text) {
+        for (int i = 0; i < 4; i++) {
+            if (buffer.get(at + i) != (byte) text.charAt(i)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static long u32(ByteBuffer buffer, int at) {
+        return Integer.toUnsignedLong(buffer.getInt(at));
+    }
+
+    private static NxoImage parseNso(byte[] file, ByteBuffer buffer) {
+        long flags = u32(buffer, 0x0c);
+        List<Segment> segments = new ArrayList<>();
+        long previousEnd = 0;
+        for (int i = 0; i < 3; i++) {
+            int record = 0x10 + 0x10 * i;
+            long fileOffset = u32(buffer, record);
+            long memoryOffset = u32(buffer, record + 4);
+            long size = u32(buffer, record + 8);
+            long stored = u32(buffer, 0x60 + 4 * i);
+            boolean compressed = ((flags >>> i) & 1) != 0;
+            long length = compressed ? stored : size;
+            if (size > MAX_SEGMENT_BYTES || length > MAX_SEGMENT_BYTES) {
+                throw new IllegalArgumentException("NSO segment " + NAMES[i] + " exceeds the admitted size");
+            }
+            if (fileOffset < 0x100 || fileOffset + length > file.length) {
+                throw new IllegalArgumentException("NSO segment " + NAMES[i] + " lies outside the file");
+            }
+            if (memoryOffset < previousEnd) {
+                throw new IllegalArgumentException("NSO segment " + NAMES[i] + " overlaps the previous segment");
+            }
+            byte[] bytes = compressed
+                ? Lz4Block.decode(file, (int) fileOffset, (int) length, (int) size)
+                : Arrays.copyOfRange(file, (int) fileOffset, (int) (fileOffset + length));
+            segments.add(new Segment(NAMES[i], memoryOffset, bytes, i == 2, i == 0));
+            previousEnd = memoryOffset + size;
+        }
+        long bssSize = u32(buffer, 0x3c);
+        if (bssSize > MAX_SEGMENT_BYTES) {
+            throw new IllegalArgumentException("NSO bss exceeds the admitted size");
+        }
+        Segment text = segments.get(0);
+        long modOffset = -1;
+        long dynamicOffset = -1;
+        if (text.bytes().length >= 8) {
+            long candidate = u32(ByteBuffer.wrap(text.bytes()).order(ByteOrder.LITTLE_ENDIAN), 4);
+            long[] mod = readMod(segments, text.offset() + candidate);
+            if (mod != null) {
+                modOffset = text.offset() + candidate;
+                dynamicOffset = modOffset + mod[0];
+            }
+        }
+        Segment data = segments.get(2);
+        return new NxoImage(Kind.NSO, segments, text.offset(), data.offset() + data.bytes().length, bssSize,
+            modOffset, dynamicOffset);
+    }
+
+    private static NxoImage parseNro(byte[] file, ByteBuffer buffer) {
+        long fileSize = u32(buffer, 0x18);
+        if (fileSize > file.length || fileSize > MAX_SEGMENT_BYTES) {
+            throw new IllegalArgumentException("NRO file_size exceeds the file");
+        }
+        List<Segment> segments = new ArrayList<>();
+        long previousEnd = 0;
+        for (int i = 0; i < 3; i++) {
+            long offset = u32(buffer, 0x20 + 8 * i);
+            long size = u32(buffer, 0x24 + 8 * i);
+            if (offset + size > fileSize) {
+                throw new IllegalArgumentException("NRO segment " + NAMES[i] + " lies outside the file");
+            }
+            if (offset < previousEnd) {
+                throw new IllegalArgumentException("NRO segment " + NAMES[i] + " overlaps the previous segment");
+            }
+            segments.add(new Segment(NAMES[i], offset, Arrays.copyOfRange(file, (int) offset,
+                (int) (offset + size)), i == 2, i == 0));
+            previousEnd = offset + size;
+        }
+        long bssSize = u32(buffer, 0x38);
+        long modOffset = -1;
+        long dynamicOffset = -1;
+        long candidate = u32(buffer, 0x04);
+        long[] mod = readMod(segments, candidate);
+        if (mod != null) {
+            modOffset = candidate;
+            dynamicOffset = candidate + mod[0];
+            if (mod[2] >= mod[1]) {
+                bssSize = mod[2] - mod[1];
+            }
+        }
+        if (bssSize > MAX_SEGMENT_BYTES) {
+            throw new IllegalArgumentException("NRO bss exceeds the admitted size");
+        }
+        Segment data = segments.get(2);
+        return new NxoImage(Kind.NRO, segments, segments.get(0).offset(), data.offset() + data.bytes().length,
+            bssSize, modOffset, dynamicOffset);
+    }
+
+    /** {dynamic, bss_start, bss_end} of a MOD0 header at an image offset, or null if absent. */
+    private static long[] readMod(List<Segment> segments, long at) {
+        for (Segment segment : segments) {
+            long start = segment.offset();
+            long end = start + segment.bytes().length;
+            if (at >= start && at + 0x1c <= end) {
+                ByteBuffer view = ByteBuffer.wrap(segment.bytes()).order(ByteOrder.LITTLE_ENDIAN);
+                int base = (int) (at - start);
+                if (magic(view, base, "MOD0")) {
+                    return new long[] {u32(view, base + 4), u32(view, base + 8), u32(view, base + 12)};
+                }
+                return null;
+            }
+        }
+        return null;
+    }
+}

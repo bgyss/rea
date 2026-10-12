@@ -111,6 +111,7 @@
     "check:pr": "node scripts/run-exclusive.mjs artifacts turbo run typecheck lint format:check knip metadata:check test:run && npm run docs:check && npm run jscpd && npm run scan:todos",
     "precheck:ci": "npm run deps:check",
     "check:ci": "node scripts/run-exclusive.mjs artifacts turbo run typecheck lint format:check knip metadata:check jscpd scan:todos && npm run verify:architecture-guards",
+    "build:ghidra-switch-loader": "node scripts/build-ghidra-switch-loader.mjs",
     "build:cached": "node scripts/check-dependency-install.mjs && node scripts/run-exclusive.mjs artifacts turbo run artifacts:skills",
     "build:termux": "node scripts/run-exclusive.mjs artifacts npm run build:termux:run",
     "build:termux:run": "npm run compile:termux && npm run artifacts:skills",
