@@ -56,6 +56,7 @@ export default defineConfig({
           { text: "Ghidra DOS analysis", link: "/ghidra-dos" },
           { text: "Ghidra raw binary", link: "/raw-binary" },
           { text: "Ghidra raw image", link: "/ghidra-raw-image" },
+          { text: "Ghidra Switch", link: "/ghidra-switch" },
           { text: "Ghidra NativeAOT", link: "/ghidra-nativeaot" },
           { text: "Ghidra semantics", link: "/ghidra-provider" },
         ],

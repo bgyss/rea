@@ -7,7 +7,7 @@ description = "Cached static checks and tests affected since origin/main"
 run = "npm run check:changed"
 
 [tasks.verify-ghidra]
-description = "Real Ghidra lanes: native fixtures, raw images, compiled-function compare and Function ID signatures (run inside `nix develop`)"
+description = "Real Ghidra lanes: native fixtures, raw images, compiled-function compare, Function ID signatures, BSim and Switch NSO/NRO loading (run inside `nix develop`)"
 run = [
   "npm run verify:ghidra",
   "npm run verify:ghidra:raw",
@@ -15,5 +15,6 @@ run = [
   "npm run verify:ghidra:compare",
   "npm run verify:ghidra:signatures",
   "npm run verify:ghidra:bsim",
+  "npm run verify:ghidra:nxo",
   "npm run verify:ghidra:text",
 ]
