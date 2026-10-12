@@ -13,8 +13,16 @@ final class NxoImage {
     record Segment(String name, long offset, byte[] bytes, boolean write, boolean execute) {
     }
 
-    /** Admission bound for any one segment or the whole image (not a target limit). */
+    /** Admission bound for any one segment (not a target limit). */
     static final long MAX_SEGMENT_BYTES = 256L * 1024 * 1024;
+    /**
+     * Admission bound for the memory one image may claim: every decoded segment
+     * plus bss. Declared sizes are checked against it before anything is allocated.
+     */
+    static final long MAX_IMAGE_BYTES = 512L * 1024 * 1024;
+    /** LZ4 cannot expand a block beyond about 255:1; the slack covers tiny blocks. */
+    private static final long LZ4_MAX_RATIO = 255;
+    private static final long LZ4_RATIO_SLACK = 64;
 
     final Kind kind;
     final List<Segment> segments;
@@ -63,34 +71,50 @@ final class NxoImage {
 
     private static NxoImage parseNso(byte[] file, ByteBuffer buffer) {
         long flags = u32(buffer, 0x0c);
-        List<Segment> segments = new ArrayList<>();
+        long bssSize = u32(buffer, 0x3c);
+        long[] fileOffsets = new long[3];
+        long[] memoryOffsets = new long[3];
+        long[] sizes = new long[3];
+        long[] lengths = new long[3];
+        boolean[] compressed = new boolean[3];
+        // Validate every declared size before decoding or allocating anything.
+        long claimed = bssSize;
         long previousEnd = 0;
         for (int i = 0; i < 3; i++) {
             int record = 0x10 + 0x10 * i;
-            long fileOffset = u32(buffer, record);
-            long memoryOffset = u32(buffer, record + 4);
-            long size = u32(buffer, record + 8);
-            long stored = u32(buffer, 0x60 + 4 * i);
-            boolean compressed = ((flags >>> i) & 1) != 0;
-            long length = compressed ? stored : size;
-            if (size > MAX_SEGMENT_BYTES || length > MAX_SEGMENT_BYTES) {
+            fileOffsets[i] = u32(buffer, record);
+            memoryOffsets[i] = u32(buffer, record + 4);
+            sizes[i] = u32(buffer, record + 8);
+            compressed[i] = ((flags >>> i) & 1) != 0;
+            lengths[i] = compressed[i] ? u32(buffer, 0x60 + 4 * i) : sizes[i];
+            if (sizes[i] > MAX_SEGMENT_BYTES || lengths[i] > MAX_SEGMENT_BYTES) {
                 throw new IllegalArgumentException("NSO segment " + NAMES[i] + " exceeds the admitted size");
             }
-            if (fileOffset < 0x100 || fileOffset + length > file.length) {
+            if (fileOffsets[i] < 0x100 || fileOffsets[i] + lengths[i] > file.length) {
                 throw new IllegalArgumentException("NSO segment " + NAMES[i] + " lies outside the file");
             }
-            if (memoryOffset < previousEnd) {
+            if (memoryOffsets[i] < previousEnd) {
                 throw new IllegalArgumentException("NSO segment " + NAMES[i] + " overlaps the previous segment");
             }
-            byte[] bytes = compressed
-                ? Lz4Block.decode(file, (int) fileOffset, (int) length, (int) size)
-                : Arrays.copyOfRange(file, (int) fileOffset, (int) (fileOffset + length));
-            segments.add(new Segment(NAMES[i], memoryOffset, bytes, i == 2, i == 0));
-            previousEnd = memoryOffset + size;
+            if (compressed[i] && sizes[i] > lengths[i] * LZ4_MAX_RATIO + LZ4_RATIO_SLACK) {
+                throw new IllegalArgumentException(
+                    "NSO segment " + NAMES[i] + " expands beyond LZ4's maximum ratio");
+            }
+            previousEnd = memoryOffsets[i] + sizes[i];
+            claimed += sizes[i];
         }
-        long bssSize = u32(buffer, 0x3c);
         if (bssSize > MAX_SEGMENT_BYTES) {
             throw new IllegalArgumentException("NSO bss exceeds the admitted size");
+        }
+        if (claimed > MAX_IMAGE_BYTES) {
+            throw new IllegalArgumentException("NSO image exceeds the admitted memory budget");
+        }
+        List<Segment> segments = new ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            byte[] bytes = compressed[i]
+                ? Lz4Block.decode(file, (int) fileOffsets[i], (int) lengths[i], (int) sizes[i])
+                : Arrays.copyOfRange(file, (int) fileOffsets[i], (int) (fileOffsets[i] + lengths[i]));
+            segments.add(new Segment(NAMES[i], memoryOffsets[i], bytes, i == 2, i == 0));
         }
         Segment text = segments.get(0);
         long modOffset = -1;

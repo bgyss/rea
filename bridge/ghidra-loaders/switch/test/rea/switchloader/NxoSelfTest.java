@@ -12,6 +12,7 @@ public final class NxoSelfTest {
         lz4Overrun();
         nsoMixedCompression();
         nsoRejections();
+        nsoExpansionBounds();
         nroWithMod();
         nroWithoutMod();
         System.out.println("NxoSelfTest ok: " + checks + " checks");
@@ -28,6 +29,20 @@ public final class NxoSelfTest {
             action.run();
         }
         catch (IllegalArgumentException expected) {
+            return;
+        }
+        throw new AssertionError(message);
+    }
+
+    private static void rejectsWith(Runnable action, String reason, String message) {
+        checks++;
+        try {
+            action.run();
+        }
+        catch (IllegalArgumentException expected) {
+            if (expected.getMessage() == null || !expected.getMessage().contains(reason)) {
+                throw new AssertionError(message + ": refused for another reason: " + expected.getMessage());
+            }
             return;
         }
         throw new AssertionError(message);
@@ -106,6 +121,52 @@ public final class NxoSelfTest {
         byte[] overlap = good.clone();
         ByteBuffer.wrap(overlap).order(ByteOrder.LITTLE_ENDIAN).putInt(0x24, 0); // rodata memory offset onto text
         rejects(() -> NxoImage.parse(overlap), "overlapping segments");
+    }
+
+    /**
+     * An NSO whose three segments are all LZ4-compressed, with the given declared
+     * sizes and stored blocks. The stored bytes are not required to be valid LZ4:
+     * a header that claims more than the format or the budget allows is refused
+     * before any block is decoded or any output buffer is allocated.
+     */
+    static byte[] compressedNso(long[] declared, byte[][] stored, long bss) {
+        int total = 0x100;
+        for (byte[] block : stored) total += block.length;
+        ByteBuffer file = ByteBuffer.allocate(total).order(ByteOrder.LITTLE_ENDIAN);
+        file.put(new byte[] {'N', 'S', 'O', '0'});
+        file.putInt(0x0c, 0b111);
+        int at = 0x100;
+        for (int i = 0; i < 3; i++) {
+            int record = 0x10 + 0x10 * i;
+            file.putInt(record, at).putInt(record + 4, i * 0x10000000);
+            file.putInt(record + 8, (int) declared[i]);
+            file.putInt(0x60 + 4 * i, stored[i].length);
+            file.position(at);
+            file.put(stored[i]);
+            at += stored[i].length;
+        }
+        file.putInt(0x3c, (int) bss);
+        return file.array();
+    }
+
+    private static void nsoExpansionBounds() {
+        byte[][] vector = {LZ4, LZ4, LZ4};
+        byte[] ok = compressedNso(new long[] {17, 17, 17}, vector, 0);
+        check(NxoImage.parse(ok).segments.size() == 3, "a plausible compressed header still parses");
+        // 13 stored bytes cannot expand to 1 MiB: refused before a 1 MiB buffer exists.
+        rejectsWith(() -> NxoImage.parse(compressedNso(new long[] {1 << 20, 17, 17}, vector, 0)),
+            "maximum ratio", "declared size beyond LZ4's expansion ratio");
+        // Nothing stored cannot expand to anything.
+        rejectsWith(() -> NxoImage.parse(compressedNso(new long[] {17, 17, 4096},
+            new byte[][] {LZ4, LZ4, new byte[0]}, 0)), "maximum ratio", "empty block with a declared size");
+        // Each segment passes the ratio (200 MiB from 1 MiB), but together they exceed the budget.
+        byte[] megabyte = new byte[1 << 20];
+        long twoHundredMiB = 200L << 20;
+        rejectsWith(() -> NxoImage.parse(compressedNso(new long[] {twoHundredMiB, twoHundredMiB, twoHundredMiB},
+            new byte[][] {megabyte, megabyte, megabyte}, 0)), "memory budget", "segments beyond the image budget");
+        // bss counts toward the same budget.
+        rejectsWith(() -> NxoImage.parse(compressedNso(new long[] {twoHundredMiB, twoHundredMiB, 17},
+            new byte[][] {megabyte, megabyte, LZ4}, 200L << 20)), "memory budget", "bss beyond the image budget");
     }
 
     /** NRO: mapped flat; MOD0 at 0x80 overrides bss. */

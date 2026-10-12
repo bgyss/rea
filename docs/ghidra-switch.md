@@ -64,6 +64,11 @@ Everything is placed at the fixed image base `0x7100000000`.
 | NSO0   | `.text`, `.rodata`, `.data` at their header memory offsets; each is LZ4-decoded when its header flag is set; `.bss` follows `.data` (header size) |
 | NRO0   | `.text`, `.rodata`, `.data` at their file offsets; `.bss` follows `.data`; a MOD0 header's `bss_end - bss_start` replaces the header's bss size   |
 
+The loader refuses an image before allocating for it when a header claims more
+than it can hold: a segment over 256 MiB, a compressed segment that would have
+to expand beyond LZ4's maximum ratio (about 255:1), or decoded segments plus
+bss over 512 MiB in total.
+
 The entry point is the start of `.text`, labeled `entry`. When MOD0 is present
 REA labels it `MOD0` and the dynamic section `_DYNAMIC`. `.text` is
 read-and-execute, `.rodata` read-only, `.data` and `.bss` read-and-write.
